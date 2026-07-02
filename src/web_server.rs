@@ -193,13 +193,19 @@ button, input, textarea { font: inherit; }
 .table-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .table-meta { color: #708090; font-size: 11px; }
 .empty { color: #66758a; padding: 14px; font-size: 13px; }
-.main { min-width: 0; display: grid; grid-template-rows: 44px minmax(180px, 38vh) auto minmax(0, 1fr); height: 100vh; }
+.main { --editor-height: 38vh; min-width: 0; display: grid; grid-template-rows: 44px minmax(150px, var(--editor-height)) 8px auto minmax(0, 1fr); height: 100vh; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 44px; padding: 0 14px; border-bottom: 1px solid #d8dde6; background: #f9fafb; }
 .title { font-weight: 700; }
+.top-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .summary { color: #66758a; font-size: 12px; white-space: nowrap; }
 .editor { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid #d8dde6; }
 .editor textarea { flex: 1; width: 100%; min-height: 130px; resize: none; border: 0; outline: 0; padding: 12px 14px; font-family: Consolas, "Courier New", monospace; font-size: 14px; line-height: 1.55; color: #0f172a; background: #fff; }
 .toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid #e6e9ef; background: #f4f6f8; }
+.splitter { height: 8px; cursor: row-resize; background: #f4f6f8; border-top: 1px solid #d8dde6; border-bottom: 1px solid #d8dde6; position: relative; }
+.splitter::before { content: ""; position: absolute; left: 12px; right: 12px; top: 3px; height: 2px; border-radius: 1px; background: #b8c2d1; }
+.splitter:hover, .splitter.dragging { background: #eaf2ff; }
+.splitter:hover::before, .splitter.dragging::before { background: #5b9ee8; }
+body.resizing { cursor: row-resize; user-select: none; }
 .primary-button { height: 30px; padding: 0 14px; border: 1px solid #1565c0; border-radius: 4px; color: #fff; background: #1a73e8; cursor: pointer; }
 .primary-button:hover { background: #1558b0; }
 .secondary-button { height: 30px; padding: 0 12px; border: 1px solid #b9c4d3; border-radius: 4px; color: #263445; background: #fff; cursor: pointer; }
@@ -237,15 +243,18 @@ tbody tr:nth-child(even) { background: #fafbfc; }
   <main class="main">
     <div class="topbar">
       <div class="title">SQL Console</div>
-      <div id="schemaSummary" class="summary">0 tables</div>
+      <div class="top-actions">
+        <div id="schemaSummary" class="summary">0 tables</div>
+        <button class="secondary-button" onclick="saveSnapshot()">Save Snapshot</button>
+      </div>
     </div>
     <section class="editor">
       <textarea id="sql" spellcheck="false">SHOW TABLES;</textarea>
       <div class="toolbar">
         <button class="primary-button" onclick="run()">Execute</button>
-        <button class="secondary-button" onclick="saveSnapshot()">Save Snapshot</button>
       </div>
     </section>
+    <div id="editorSplitter" class="splitter" title="Drag to resize editor"></div>
     <div class="pager">
       <button class="secondary-button" onclick="prevPage()">Prev</button>
       <span id="pageLabel">Page 1</span>
@@ -264,6 +273,7 @@ let currentPage = 0;
 let lastSql = '';
 let tables = [];
 let activeTable = '';
+const editorHeightKey = 'rsduck.editorHeight';
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -427,6 +437,61 @@ async function saveSnapshot() {
   msg.innerText = (data.success ? data.msg : 'Error: ' + data.msg) + ' in ' + ms + 'ms';
 }
 
+function setEditorHeight(height) {
+  const main = document.querySelector('.main');
+  const bounds = main.getBoundingClientRect();
+  const topbar = document.querySelector('.topbar').offsetHeight;
+  const pager = document.querySelector('.pager').offsetHeight;
+  const splitter = document.getElementById('editorSplitter').offsetHeight;
+  const minEditor = 150;
+  const minResult = 160;
+  const maxEditor = Math.max(minEditor, bounds.height - topbar - pager - splitter - minResult);
+  const nextHeight = Math.max(minEditor, Math.min(maxEditor, height));
+  main.style.setProperty('--editor-height', nextHeight + 'px');
+  localStorage.setItem(editorHeightKey, String(Math.round(nextHeight)));
+}
+
+function setupEditorSplitter() {
+  const main = document.querySelector('.main');
+  const splitter = document.getElementById('editorSplitter');
+  const savedHeight = Number(localStorage.getItem(editorHeightKey));
+  if (Number.isFinite(savedHeight) && savedHeight > 0) {
+    setEditorHeight(savedHeight);
+  }
+
+  splitter.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    splitter.setPointerCapture(event.pointerId);
+    splitter.classList.add('dragging');
+    document.body.classList.add('resizing');
+
+    const onMove = moveEvent => {
+      const bounds = main.getBoundingClientRect();
+      const topbar = document.querySelector('.topbar').offsetHeight;
+      setEditorHeight(moveEvent.clientY - bounds.top - topbar);
+    };
+
+    const onUp = upEvent => {
+      splitter.releasePointerCapture(upEvent.pointerId);
+      splitter.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  });
+
+  window.addEventListener('resize', () => {
+    const currentHeight = document.querySelector('.editor').getBoundingClientRect().height;
+    setEditorHeight(currentHeight);
+  });
+}
+
+setupEditorSplitter();
 loadTables().then(() => run());
 </script>
 </body>
