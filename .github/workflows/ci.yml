@@ -5,7 +5,23 @@ on:
     branches:
       - master
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.gif"
+      - "*.svg"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.gif"
+      - "*.svg"
   workflow_dispatch:
 
 permissions:
