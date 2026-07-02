@@ -28,6 +28,7 @@ pub struct SqlResp {
 pub struct WebState {
     pub pg_client: Arc<Client>,
     pub snapshot_dir: Arc<String>,
+    pub snapshot_prefix: Arc<String>,
 }
 
 pub async fn create_pg_client(pg_bind: &str) -> Result<Client, tokio_postgres::Error> {
@@ -132,7 +133,9 @@ async fn index_page() -> Html<&'static str> {
 async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
     let t0 = Instant::now();
 
-    match crate::db::save_snapshot(state.snapshot_dir.as_str()).await {
+    match crate::db::save_snapshot(state.snapshot_dir.as_str(), state.snapshot_prefix.as_str())
+        .await
+    {
         Ok(path) => Json(SqlResp {
             columns: vec![],
             rows: vec![],
@@ -148,7 +151,7 @@ async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
     }
 }
 
-pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String) -> Router {
+pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String, snapshot_prefix: String) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/sql", post(sql_handler))
@@ -156,6 +159,7 @@ pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String) -> Router {
         .with_state(WebState {
             pg_client,
             snapshot_dir: Arc::new(snapshot_dir),
+            snapshot_prefix: Arc::new(snapshot_prefix),
         })
 }
 
@@ -165,40 +169,213 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <meta charset="utf-8">
 <title>rsduck console</title>
 <style>
-body { font-family: "Segoe UI", sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; }
-h2 { color: #333; }
-textarea { width: 100%; font-family: Consolas, monospace; font-size: 14px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; resize: vertical; }
-button { margin-top: 10px; padding: 8px 24px; font-size: 14px; cursor: pointer; background: #1a73e8; color: #fff; border: none; border-radius: 4px; }
-button:hover { background: #1558b0; }
-.toolbar { display: flex; gap: 8px; align-items: center; }
-.pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; color: #555; font-size: 13px; }
-.pager input { width: 88px; padding: 5px 6px; border: 1px solid #ccc; border-radius: 4px; }
-.pager button { margin-top: 0; padding: 5px 12px; }
-#msg { margin-top: 8px; color: #666; font-size: 13px; }
-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
-th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
-th { background: #f5f5f5; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; background: #fff; overflow: hidden; }
+button, input, textarea { font: inherit; }
+.app { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100vh; }
+.sidebar { min-width: 0; border-right: 1px solid #d8dde6; background: #f7f9fc; display: flex; flex-direction: column; }
+.brand { height: 44px; display: flex; align-items: center; padding: 0 14px; font-weight: 700; border-bottom: 1px solid #d8dde6; background: #fff; }
+.db-node { padding: 10px 12px 8px; border-bottom: 1px solid #e3e7ee; }
+.db-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+.db-title::before { content: ""; width: 12px; height: 12px; border-radius: 3px; background: #0f9f6e; display: inline-block; }
+.schema-tools { display: flex; gap: 6px; margin-top: 9px; }
+.schema-tools input { min-width: 0; flex: 1; height: 28px; padding: 4px 8px; border: 1px solid #c8d0dc; border-radius: 4px; background: #fff; font-size: 12px; }
+.icon-button { height: 28px; padding: 0 9px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; color: #334155; cursor: pointer; font-size: 12px; }
+.icon-button:hover { background: #edf4ff; border-color: #7daeea; }
+.tree { overflow: auto; padding: 6px 0 12px; flex: 1; }
+.schema-group { margin: 2px 0 8px; }
+.schema-name { padding: 5px 12px; color: #526172; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.table-row { width: 100%; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 6px; border: 0; background: transparent; color: #1f2933; text-align: left; padding: 4px 10px 4px 18px; cursor: pointer; font-size: 13px; }
+.table-row:hover { background: #e8f2ff; }
+.table-row.active { background: #cfe6ff; outline: 1px solid #59a8ff; outline-offset: -1px; }
+.table-icon { width: 13px; height: 12px; border: 1px solid #5aa2d8; background: linear-gradient(#9fd4ff 0 35%, #4da3df 35% 100%); border-radius: 2px; }
+.table-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.table-meta { color: #708090; font-size: 11px; }
+.empty { color: #66758a; padding: 14px; font-size: 13px; }
+.main { min-width: 0; display: grid; grid-template-rows: 44px minmax(180px, 38vh) auto minmax(0, 1fr); height: 100vh; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 44px; padding: 0 14px; border-bottom: 1px solid #d8dde6; background: #f9fafb; }
+.title { font-weight: 700; }
+.summary { color: #66758a; font-size: 12px; white-space: nowrap; }
+.editor { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid #d8dde6; }
+.editor textarea { flex: 1; width: 100%; min-height: 130px; resize: none; border: 0; outline: 0; padding: 12px 14px; font-family: Consolas, "Courier New", monospace; font-size: 14px; line-height: 1.55; color: #0f172a; background: #fff; }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid #e6e9ef; background: #f4f6f8; }
+.primary-button { height: 30px; padding: 0 14px; border: 1px solid #1565c0; border-radius: 4px; color: #fff; background: #1a73e8; cursor: pointer; }
+.primary-button:hover { background: #1558b0; }
+.secondary-button { height: 30px; padding: 0 12px; border: 1px solid #b9c4d3; border-radius: 4px; color: #263445; background: #fff; cursor: pointer; }
+.secondary-button:hover { background: #edf4ff; border-color: #7daeea; }
+.pager { display: flex; gap: 8px; align-items: center; padding: 7px 12px; border-bottom: 1px solid #d8dde6; background: #fff; color: #475569; font-size: 13px; }
+.pager input { width: 96px; height: 28px; padding: 4px 7px; border: 1px solid #c8d0dc; border-radius: 4px; }
+.status { margin-left: auto; color: #66758a; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.result { min-width: 0; min-height: 0; overflow: auto; background: #fff; }
+table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-right: 1px solid #e1e5eb; border-bottom: 1px solid #e1e5eb; padding: 6px 9px; text-align: left; white-space: nowrap; }
+th { position: sticky; top: 0; background: #f3f5f7; color: #111827; z-index: 1; }
+td { color: #253244; }
+tbody tr:nth-child(even) { background: #fafbfc; }
+@media (max-width: 760px) {
+  body { overflow: auto; }
+  .app { grid-template-columns: 1fr; grid-template-rows: 240px 1fr; height: auto; min-height: 100vh; }
+  .sidebar { border-right: 0; border-bottom: 1px solid #d8dde6; }
+  .main { height: calc(100vh - 240px); min-height: 520px; }
+}
 </style>
 </head>
 <body>
-<h2>rsduck SQL Console</h2>
-<textarea id="sql" rows="6">SELECT * FROM kline_day LIMIT 20;</textarea>
-<div class="toolbar">
-  <button onclick="run()">Execute</button>
-  <button onclick="saveSnapshot()">Save Snapshot</button>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">rsduck</div>
+    <div class="db-node">
+      <div class="db-title">memory</div>
+      <div class="schema-tools">
+        <input id="tableFilter" placeholder="Filter tables" oninput="renderTables()">
+        <button class="icon-button" onclick="loadTables()" title="Refresh tables">Refresh</button>
+      </div>
+    </div>
+    <div id="tableList" class="tree"><div class="empty">Loading tables...</div></div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="title">SQL Console</div>
+      <div id="schemaSummary" class="summary">0 tables</div>
+    </div>
+    <section class="editor">
+      <textarea id="sql" spellcheck="false">SHOW TABLES;</textarea>
+      <div class="toolbar">
+        <button class="primary-button" onclick="run()">Execute</button>
+        <button class="secondary-button" onclick="saveSnapshot()">Save Snapshot</button>
+      </div>
+    </section>
+    <div class="pager">
+      <button class="secondary-button" onclick="prevPage()">Prev</button>
+      <span id="pageLabel">Page 1</span>
+      <button class="secondary-button" onclick="nextPage()">Next</button>
+      <span>Page size</span>
+      <input id="pageSize" type="number" min="1" max="100000" value="100">
+      <span id="msg" class="status"></span>
+    </div>
+    <section class="result">
+      <table id="tbl"></table>
+    </section>
+  </main>
 </div>
-<div class="pager">
-  <button onclick="prevPage()">Prev</button>
-  <span id="pageLabel">Page 1</span>
-  <button onclick="nextPage()">Next</button>
-  <span>Page size</span>
-  <input id="pageSize" type="number" min="1" max="100000" value="100">
-</div>
-<div id="msg"></div>
-<table id="tbl"></table>
 <script>
 let currentPage = 0;
 let lastSql = '';
+let tables = [];
+let activeTable = '';
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+}
+
+function quoteIdent(value) {
+  return '"' + String(value).replace(/"/g, '""') + '"';
+}
+
+function tableSql(schema, table) {
+  return 'SELECT * FROM ' + quoteIdent(schema) + '.' + quoteIdent(table) + ' LIMIT 100;';
+}
+
+function shouldRefreshTables(sql) {
+  const command = sql.trim().split(/\s+/)[0]?.toUpperCase() || '';
+  return ['CREATE', 'DROP', 'ALTER', 'IMPORT'].includes(command);
+}
+
+async function postSql(sql, page = 0, pageSize = 1000) {
+  const resp = await fetch('/sql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, page, page_size: pageSize })
+  });
+  return await resp.json();
+}
+
+async function loadTables(showErrors = true) {
+  const sql = `
+    SELECT schema_name, table_name, column_count, estimated_size
+    FROM duckdb_tables()
+    WHERE internal = false
+    ORDER BY schema_name, table_name
+  `;
+  const data = await postSql(sql, 0, 10000);
+  if (!data.success) {
+    if (showErrors) {
+      document.getElementById('tableList').innerHTML =
+        '<div class="empty">Failed to load tables: ' + escapeHtml(data.msg) + '</div>';
+    }
+    return;
+  }
+
+  const schemaIdx = data.columns.findIndex(c => c.toLowerCase() === 'schema_name');
+  const tableIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_name');
+  const columnIdx = data.columns.findIndex(c => c.toLowerCase() === 'column_count');
+  const sizeIdx = data.columns.findIndex(c => c.toLowerCase() === 'estimated_size');
+
+  tables = data.rows.map(row => ({
+    schema: row[schemaIdx] || 'main',
+    name: row[tableIdx] || '',
+    columns: columnIdx >= 0 ? row[columnIdx] : '',
+    size: sizeIdx >= 0 ? row[sizeIdx] : ''
+  })).filter(item => item.name);
+
+  renderTables();
+}
+
+function renderTables() {
+  const list = document.getElementById('tableList');
+  const summary = document.getElementById('schemaSummary');
+  const filter = document.getElementById('tableFilter').value.trim().toLowerCase();
+  const visible = tables.filter(item =>
+    !filter ||
+    item.name.toLowerCase().includes(filter) ||
+    item.schema.toLowerCase().includes(filter)
+  );
+
+  summary.innerText = tables.length + (tables.length === 1 ? ' table' : ' tables');
+  if (!visible.length) {
+    list.innerHTML = '<div class="empty">No tables</div>';
+    return;
+  }
+
+  const groups = new Map();
+  for (const item of visible) {
+    if (!groups.has(item.schema)) groups.set(item.schema, []);
+    groups.get(item.schema).push(item);
+  }
+
+  let html = '';
+  for (const [schema, items] of groups) {
+    html += '<div class="schema-group">';
+    html += '<div class="schema-name">' + escapeHtml(schema) + '</div>';
+    for (const item of items) {
+      const key = item.schema + '.' + item.name;
+      const meta = item.columns ? item.columns + ' cols' : '';
+      html += '<button class="table-row ' + (key === activeTable ? 'active' : '') + '" ';
+      html += 'title="' + escapeHtml(key) + '" ';
+      html += 'onclick="selectTable(' + escapeHtml(JSON.stringify(item.schema)) + ',' + escapeHtml(JSON.stringify(item.name)) + ')">';
+      html += '<span class="table-icon"></span>';
+      html += '<span class="table-name">' + escapeHtml(item.name) + '</span>';
+      html += '<span class="table-meta">' + escapeHtml(meta) + '</span>';
+      html += '</button>';
+    }
+    html += '</div>';
+  }
+  list.innerHTML = html;
+}
+
+function selectTable(schema, table) {
+  activeTable = schema + '.' + table;
+  document.getElementById('sql').value = tableSql(schema, table);
+  renderTables();
+  run();
+}
 
 async function run(resetPage = true) {
   const sql = document.getElementById('sql').value.trim();
@@ -207,12 +384,7 @@ async function run(resetPage = true) {
   lastSql = sql;
   const pageSize = Math.max(1, Math.min(100000, Number(document.getElementById('pageSize').value) || 100));
   const t0 = performance.now();
-  const resp = await fetch('/sql', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql, page: currentPage, page_size: pageSize })
-  });
-  const data = await resp.json();
+  const data = await postSql(sql, currentPage, pageSize);
   const ms = (performance.now() - t0).toFixed(1);
   const msg = document.getElementById('msg');
   if (!data.success) {
@@ -226,12 +398,13 @@ async function run(resetPage = true) {
     tbl.innerHTML = '';
     return;
   }
-  let html = '<thead><tr>' + data.columns.map(c => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>';
+  let html = '<thead><tr>' + data.columns.map(c => '<th>' + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
   for (const row of data.rows) {
-    html += '<tr>' + row.map(v => '<td>' + (v ?? '') + '</td>').join('') + '</tr>';
+    html += '<tr>' + row.map(v => '<td>' + escapeHtml(v) + '</td>').join('') + '</tr>';
   }
   html += '</tbody>';
   tbl.innerHTML = html;
+  if (shouldRefreshTables(sql)) loadTables(false);
 }
 
 function nextPage() {
@@ -253,6 +426,8 @@ async function saveSnapshot() {
   const msg = document.getElementById('msg');
   msg.innerText = (data.success ? data.msg : 'Error: ' + data.msg) + ' in ' + ms + 'ms';
 }
+
+loadTables().then(() => run());
 </script>
 </body>
 </html>

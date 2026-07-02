@@ -5,6 +5,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize)]
 pub struct RsduckConfig {
     #[serde(default)]
+    pub db: DbConfig,
+    #[serde(default)]
     pub snapshot: SnapshotConfig,
     #[serde(default)]
     pub pg: PgConfig,
@@ -13,11 +15,29 @@ pub struct RsduckConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct DbConfig {
+    #[serde(default = "default_init_sql")]
+    pub init_sql: String,
+    #[serde(default = "default_read_workers")]
+    pub read_workers: usize,
+    #[serde(default = "default_write_queue_size")]
+    pub write_queue_size: usize,
+    #[serde(default = "default_read_queue_size")]
+    pub read_queue_size: usize,
+    #[serde(default = "default_snapshot_queue_size")]
+    pub snapshot_queue_size: usize,
+    #[serde(default = "default_max_result_rows")]
+    pub max_result_rows: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct SnapshotConfig {
     #[serde(default = "default_true")]
     pub restore_on_startup: bool,
     #[serde(default = "default_snapshot_dir")]
     pub dir: String,
+    #[serde(default = "default_snapshot_prefix")]
+    pub prefix: String,
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
     #[serde(default = "default_retain_hours")]
@@ -32,6 +52,8 @@ pub struct PgConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default = "default_web_bind")]
     pub bind: String,
 }
@@ -42,6 +64,34 @@ fn default_true() -> bool {
 
 fn default_snapshot_dir() -> String {
     "snapshot".into()
+}
+
+fn default_snapshot_prefix() -> String {
+    "rsduck".into()
+}
+
+fn default_init_sql() -> String {
+    String::new()
+}
+
+fn default_read_workers() -> usize {
+    4
+}
+
+fn default_write_queue_size() -> usize {
+    100_000
+}
+
+fn default_read_queue_size() -> usize {
+    1024
+}
+
+fn default_snapshot_queue_size() -> usize {
+    16
+}
+
+fn default_max_result_rows() -> usize {
+    100_000
 }
 
 fn default_interval_secs() -> u64 {
@@ -65,8 +115,22 @@ impl Default for SnapshotConfig {
         Self {
             restore_on_startup: default_true(),
             dir: default_snapshot_dir(),
+            prefix: default_snapshot_prefix(),
             interval_secs: default_interval_secs(),
             retain_hours: default_retain_hours(),
+        }
+    }
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            init_sql: default_init_sql(),
+            read_workers: default_read_workers(),
+            write_queue_size: default_write_queue_size(),
+            read_queue_size: default_read_queue_size(),
+            snapshot_queue_size: default_snapshot_queue_size(),
+            max_result_rows: default_max_result_rows(),
         }
     }
 }
@@ -82,6 +146,7 @@ impl Default for PgConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
+            enabled: default_true(),
             bind: default_web_bind(),
         }
     }
@@ -90,6 +155,7 @@ impl Default for WebConfig {
 impl Default for RsduckConfig {
     fn default() -> Self {
         Self {
+            db: DbConfig::default(),
             snapshot: SnapshotConfig::default(),
             pg: PgConfig::default(),
             web: WebConfig::default(),

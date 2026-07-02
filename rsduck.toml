@@ -1,6 +1,15 @@
+[db]
+init_sql = "init.sql"
+read_workers = 4
+write_queue_size = 100000
+read_queue_size = 1024
+snapshot_queue_size = 16
+max_result_rows = 100000
+
 [snapshot]
 restore_on_startup = true
 dir = "snapshot"
+prefix = "rsduck"
 interval_secs = 900
 retain_hours = 2
 
@@ -8,4 +17,5 @@ retain_hours = 2
 bind = "127.0.0.1:15432"
 
 [web]
+enabled = true
 bind = "127.0.0.1:8080"
