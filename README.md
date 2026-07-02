@@ -23,6 +23,10 @@ rsduck is an in-memory database middleware service built on DuckDB. It starts an
 - Local development, strategy backtesting, data experiments, and temporary data APIs.
 - In-memory database services that need fast startup and low-frequency snapshot persistence.
 
+## Architecture
+
+Architecture design reference: [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md).
+
 ## Quick Start
 
 Development build:
