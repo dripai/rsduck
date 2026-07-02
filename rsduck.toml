@@ -1,0 +1,11 @@
+[snapshot]
+restore_on_startup = true
+dir = "snapshot"
+interval_secs = 900
+retain_hours = 2
+
+[pg]
+bind = "127.0.0.1:15432"
+
+[web]
+bind = "127.0.0.1:8080"
