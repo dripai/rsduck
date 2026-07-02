@@ -1,63 +1,71 @@
 # rsduck
 
-rsduck 是一个基于 DuckDB 的内存数据库中间件服务。它在进程内启动 DuckDB 内存库，对外提供 PostgreSQL wire 协议和 Web SQL 控制台，并通过目录快照实现内存库的持久化恢复。
+Language: English | [简体中文](README.zh-CN.md)
 
-## 功能概览
+rsduck is an in-memory database middleware service built on DuckDB. It starts an in-process DuckDB memory database, exposes a PostgreSQL wire protocol endpoint and a Web SQL console, and persists the in-memory database through directory-based snapshots.
 
-- 内存 DuckDB：启动后数据主要在内存中读写，适合低延迟分析查询。
-- PostgreSQL wire 接入：外部工具可按 PG 协议连接 rsduck。
-- Web SQL 控制台：浏览器中查看表列表、执行 SQL、分页查看结果、手工保存快照。
-- 多读单写架构：读请求分发到 read workers，写请求进入 single write worker，降低读写互相阻塞。
-- 目录快照：使用 DuckDB `EXPORT DATABASE` / `IMPORT DATABASE` 保存和恢复完整库。
-- 初始化 SQL：没有快照时可通过 `init.sql` 初始化表结构。
-- 压测脚本：`scripts/rsduck_load_test.py` 可持续写入并发查询，用于观察前端查询影响。
-- GitHub Actions：远程 push 后会自动执行格式检查、测试和 Windows release 编译。
+## Features
 
-## 应用场景
+- In-memory DuckDB: data is mainly read and written in memory after startup, suitable for low-latency analytical queries.
+- PostgreSQL wire protocol: external tools can connect to rsduck through a PG-compatible endpoint.
+- Web SQL console: browse tables, execute SQL, page through results, and trigger snapshots from the browser.
+- Multi-read single-write architecture: read requests are dispatched to read workers, while write requests go through one write worker to reduce read/write blocking.
+- Directory snapshots: uses DuckDB `EXPORT DATABASE` / `IMPORT DATABASE` to save and restore the full database.
+- Init SQL: when no snapshot exists, `init.sql` can initialize schema and seed data.
+- Load test script: `scripts/rsduck_load_test.py` continuously writes data and runs concurrent queries for testing.
+- GitHub Actions: push to the remote repository to run formatting checks, tests, and Windows release builds.
 
-- 高频写入、实时查询的临时分析库。
-- 需要 PG 协议入口，但不想部署完整数据库服务的轻量场景。
-- 股票 K 线、指标、日志、监控数据等内存分析查询。
-- 本地研发、策略回测、数据实验、临时数据服务。
-- 需要快速恢复的内存数据库服务，允许低频快照持久化。
+## Use Cases
 
-## 快速开始
+- Temporary analytical stores with high-frequency writes and real-time queries.
+- Lightweight PG-compatible data services without deploying a full database server.
+- In-memory analysis for K-line data, factors, logs, metrics, and monitoring data.
+- Local development, strategy backtesting, data experiments, and temporary data APIs.
+- In-memory database services that need fast startup and low-frequency snapshot persistence.
 
-开发编译：
+## Quick Start
+
+Development build:
 
 ```powershell
 cargo build
 ```
 
-正式编译：
+Release build:
 
 ```powershell
 cargo build --release
 ```
 
-当前环境的构建产物通常在：
+In this local workspace, build outputs are usually located at:
 
 ```text
 D:\cargo-target\debug\rsduck.exe
 D:\cargo-target\release\rsduck.exe
 ```
 
-启动服务：
+Start the service:
 
 ```powershell
 D:\cargo-target\release\rsduck.exe
 ```
 
-默认端口：
+Default endpoints:
 
 ```text
 PG wire: 127.0.0.1:15432
 Web:     http://127.0.0.1:8080
 ```
 
-## 配置
+## Web Console
 
-默认配置文件为 `rsduck.toml`：
+The Web console shows database tables on the left, a SQL editor on the top-right, and query results below. It also provides pagination, manual snapshots, and a draggable splitter between the editor and result panel.
+
+![rsduck Web SQL Console](console.png)
+
+## Configuration
+
+The default configuration file is `rsduck.toml`:
 
 ```toml
 [db]
@@ -83,16 +91,16 @@ enabled = true
 bind = "127.0.0.1:8080"
 ```
 
-启动恢复顺序：
+Startup restore order:
 
-1. 如果 `restore_on_startup = true`，扫描最新正式快照目录。
-2. 如果找到快照，执行 `IMPORT DATABASE` 恢复完整库。
-3. 如果没有快照，执行 `db.init_sql`。
-4. 如果 `init_sql = ""`，启动空内存库。
+1. If `restore_on_startup = true`, scan for the latest finalized snapshot directory.
+2. If a snapshot is found, run `IMPORT DATABASE` to restore the full database.
+3. If no snapshot exists, run `db.init_sql`.
+4. If `init_sql = ""`, start an empty in-memory database.
 
-## 快照
+## Snapshots
 
-rsduck 使用目录快照保存完整 DuckDB 数据库：
+rsduck uses directory snapshots to persist the full DuckDB database:
 
 ```text
 snapshot/
@@ -103,23 +111,23 @@ snapshot/
     table_b.parquet
 ```
 
-保存时先写临时目录：
+Snapshots are first written to a temporary directory:
 
 ```text
 snapshot/rsduck_yyyyMMdd_HHmmss.tmp
 ```
 
-成功后重命名为正式目录：
+After export succeeds, the temporary directory is renamed to the finalized snapshot directory:
 
 ```text
 snapshot/rsduck_yyyyMMdd_HHmmss
 ```
 
-Web 控制台右上角的 `Save Snapshot` 可以手工触发快照。
+The `Save Snapshot` button in the top-right corner of the Web console can trigger a manual snapshot.
 
-## 使用案例：K 线实时写入和查询
+## Example: Real-Time K-Line Writes And Queries
 
-默认 `init.sql` 会创建 `kline_day` 表：
+The default `init.sql` creates a `kline_day` table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS kline_day (
@@ -134,25 +142,25 @@ CREATE TABLE IF NOT EXISTS kline_day (
 );
 ```
 
-启动 rsduck 后，打开 Web 控制台：
+After starting rsduck, open the Web console:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-运行压测脚本，持续写入并并发查询：
+Run the load test script to continuously write rows and execute concurrent queries:
 
 ```powershell
 python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query-workers 4 --query-interval 0.2
 ```
 
-在 Web 控制台执行查询：
+Run a query in the Web console:
 
 ```sql
 SELECT * FROM kline_day ORDER BY bar_time DESC LIMIT 100;
 ```
 
-也可以查看表信息：
+Inspect table metadata:
 
 ```sql
 SELECT schema_name, table_name, estimated_size, column_count
@@ -161,15 +169,15 @@ WHERE internal = false
 ORDER BY schema_name, table_name;
 ```
 
-## 自动构建
+## GitHub Actions
 
-GitHub Actions workflow 位于：
+The GitHub Actions workflow is located at:
 
 ```text
 .github/workflows/ci.yml
 ```
 
-push 到远程后会执行：
+On push or pull request, it runs:
 
 ```text
 cargo fmt --check
@@ -177,7 +185,7 @@ cargo test
 cargo build --release
 ```
 
-并上传 Windows 可执行文件：
+It uploads the Windows executable:
 
 ```text
 target/release/rsduck.exe
