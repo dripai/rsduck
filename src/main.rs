@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod pg_compat;
 mod pg_server;
 mod web_server;
 

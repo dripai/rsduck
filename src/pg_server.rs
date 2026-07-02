@@ -62,6 +62,17 @@ fn exec_to_response<'a>(command: &str, affected_rows: usize) -> Response<'a> {
     Response::Execution(Tag::new(command).with_rows(affected_rows))
 }
 
+async fn execute_pg_sql(sql: String) -> Result<SqlResult, String> {
+    if let Some(result) = crate::pg_compat::compat_result(&sql) {
+        return Ok(result);
+    }
+    if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(&sql) {
+        return crate::db::execute_sql(rewritten_sql).await;
+    }
+
+    crate::db::execute_sql(sql).await
+}
+
 impl NoopStartupHandler for DuckdbProcessor {}
 
 #[async_trait]
@@ -81,7 +92,7 @@ impl SimpleQueryHandler for DuckdbProcessor {
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        match crate::db::execute_sql(sql).await.map_err(|e| {
+        match execute_pg_sql(sql).await.map_err(|e| {
             PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
         })? {
             SqlResult::Query { columns, rows } => Ok(vec![query_to_response(columns, rows)?]),
@@ -135,7 +146,7 @@ impl ExtendedQueryHandler for DuckdbProcessor {
     {
         let sql = portal.statement.statement.to_string();
 
-        match crate::db::execute_sql(sql).await.map_err(|e| {
+        match execute_pg_sql(sql).await.map_err(|e| {
             PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
         })? {
             SqlResult::Query { columns, rows } => query_to_response(columns, rows),
