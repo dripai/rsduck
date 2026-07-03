@@ -364,9 +364,25 @@ workflow 会打包这些文件：
 
 ```text
 rsduck-windows-x64.zip
+rsduck-windows-service-x64.zip
 rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
 workflow run 里的 artifacts 是临时 CI 产物。GitHub Releases 里的下载文件会在推送 `v*` tag 时生成，例如 `v0.1.0`。
+
+`rsduck-windows-service-x64.zip` 会包含 WinSW 服务包装器文件，以及用于安装或卸载 Windows 服务的 PowerShell 脚本。
+
+Windows 服务包使用方式：
+
+```powershell
+Expand-Archive .\rsduck-windows-service-x64.zip -DestinationPath C:\rsduck
+C:\rsduck\install-service.ps1
+```
+
+卸载服务：
+
+```powershell
+C:\rsduck\uninstall-service.ps1
+```

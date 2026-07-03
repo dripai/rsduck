@@ -113,6 +113,38 @@ jobs:
           path: dist/${{ matrix.asset_name }}
           if-no-files-found: error
 
+      - name: Download WinSW
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe" `
+            -OutFile "dist/rsduck-service.exe"
+
+      - name: Package Windows service asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path service | Out-Null
+          New-Item -ItemType Directory -Force -Path service\logs | Out-Null
+          New-Item -ItemType Directory -Force -Path service\snapshot | Out-Null
+          Copy-Item target\release\rsduck.exe service\rsduck.exe
+          Copy-Item rsduck.toml service\rsduck.toml
+          Copy-Item init.sql service\init.sql
+          Copy-Item dist\rsduck-service.exe service\rsduck-service.exe
+          Copy-Item packaging\windows-service\rsduck-service.xml service\rsduck-service.xml
+          Copy-Item packaging\windows-service\install-service.ps1 service\install-service.ps1
+          Copy-Item packaging\windows-service\uninstall-service.ps1 service\uninstall-service.ps1
+          Compress-Archive -Path service\* -DestinationPath dist\rsduck-windows-service-x64.zip
+
+      - name: Upload Windows service package artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsduck-windows-service-x64.zip
+          path: dist/rsduck-windows-service-x64.zip
+          if-no-files-found: error
+
   github-release:
     name: Publish GitHub Release
     needs: release-build

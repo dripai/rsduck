@@ -364,9 +364,25 @@ The workflow packages these files:
 
 ```text
 rsduck-windows-x64.zip
+rsduck-windows-service-x64.zip
 rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
 Workflow run artifacts are temporary CI outputs. GitHub Release downloads are created when a `v*` tag is pushed, for example `v0.1.0`.
+
+`rsduck-windows-service-x64.zip` includes WinSW service wrapper files and PowerShell scripts for installing or uninstalling rsduck as a Windows service.
+
+Windows service package usage:
+
+```powershell
+Expand-Archive .\rsduck-windows-service-x64.zip -DestinationPath C:\rsduck
+C:\rsduck\install-service.ps1
+```
+
+Uninstall:
+
+```powershell
+C:\rsduck\uninstall-service.ps1
+```

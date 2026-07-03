@@ -1,0 +1,21 @@
+<service>
+  <id>rsduck</id>
+  <name>rsduck</name>
+  <description>rsduck in-memory DuckDB middleware service</description>
+
+  <executable>%BASE%\rsduck.exe</executable>
+  <workingdirectory>%BASE%</workingdirectory>
+  <startmode>Automatic</startmode>
+  <stoptimeout>30sec</stoptimeout>
+  <preshutdown>true</preshutdown>
+  <preshutdownTimeout>30sec</preshutdownTimeout>
+  <hidewindow>true</hidewindow>
+
+  <logpath>%BASE%\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+
+  <onfailure action="restart" delay="10 sec" />
+</service>
