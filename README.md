@@ -13,7 +13,7 @@ rsduck is an in-memory database middleware service built on DuckDB. It starts an
 - Directory snapshots: uses DuckDB `EXPORT DATABASE` / `IMPORT DATABASE` to save and restore the full database.
 - Init SQL: when no snapshot exists, `init.sql` can initialize schema and seed data.
 - Load test script: `scripts/rsduck_load_test.py` continuously writes data and runs concurrent queries for testing.
-- GitHub Actions: push to the remote repository to run formatting checks, tests, and Windows release builds.
+- GitHub Actions: push to the remote repository to run formatting checks, tests, and multi-platform release builds.
 
 ## Use Cases
 
@@ -28,6 +28,34 @@ rsduck is an in-memory database middleware service built on DuckDB. It starts an
 Architecture design reference: [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md).
 
 ## Quick Start
+
+### 1. Prepare `init.sql`
+
+`init.sql` is the first-start schema script. rsduck executes it only when no snapshot is restored. Put table DDL and optional seed data here:
+
+```sql
+CREATE TABLE IF NOT EXISTS kline_day (
+    code      VARCHAR NOT NULL,
+    bar_time  TIMESTAMP NOT NULL,
+    open      DOUBLE,
+    high      DOUBLE,
+    low       DOUBLE,
+    close     DOUBLE,
+    volume    BIGINT,
+    PRIMARY KEY (code, bar_time)
+);
+```
+
+The repository sample `rsduck.toml` points `[db].init_sql` to this file:
+
+```toml
+[db]
+init_sql = "init.sql"
+```
+
+If `rsduck.toml` is missing, the built-in default is `init_sql = ""`, so rsduck starts an empty in-memory database when no snapshot exists.
+
+### 2. Build
 
 Development build:
 
@@ -48,7 +76,7 @@ D:\cargo-target\debug\rsduck.exe
 D:\cargo-target\release\rsduck.exe
 ```
 
-Start the service:
+### 3. Start the service
 
 ```powershell
 D:\cargo-target\release\rsduck.exe
@@ -66,6 +94,124 @@ Web:     http://127.0.0.1:8080
 The Web console shows database tables on the left, a SQL editor on the top-right, and query results below. It also provides pagination, manual snapshots, and a draggable splitter between the editor and result panel.
 
 ![rsduck Web SQL Console](console.png)
+
+## Programmatic Access
+
+rsduck exposes two programmatic entry points:
+
+- HTTP SQL API at `http://127.0.0.1:8080/sql`
+- PostgreSQL wire protocol at `127.0.0.1:15432`
+
+### HTTP API With Python Standard Library
+
+This example has no third-party Python dependency. It sends complete SQL text to the Web API and can query or write rows:
+
+```python
+import json
+from urllib.request import Request, urlopen
+
+BASE_URL = "http://127.0.0.1:8080"
+
+def run_sql(sql, page=0, page_size=1000):
+    payload = json.dumps({
+        "sql": sql,
+        "page": page,
+        "page_size": page_size,
+    }).encode("utf-8")
+    req = Request(
+        BASE_URL + "/sql",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if not data["success"]:
+        raise RuntimeError(data["msg"])
+    return data
+
+run_sql("""
+INSERT INTO kline_day
+(code, bar_time, open, high, low, close, volume)
+VALUES
+('600000', TIMESTAMP '2026-07-03 09:30:00', 10.1, 10.5, 9.9, 10.2, 120000)
+""")
+
+result = run_sql("SELECT code, close, volume FROM kline_day ORDER BY bar_time DESC LIMIT 10")
+print(result["columns"])
+print(result["rows"])
+```
+
+HTTP request shape:
+
+```json
+{
+  "sql": "SELECT * FROM kline_day LIMIT 10",
+  "page": 0,
+  "page_size": 1000
+}
+```
+
+Response shape:
+
+```json
+{
+  "columns": ["code", "close"],
+  "rows": [["600000", "10.2"]],
+  "success": true,
+  "msg": "1 row(s)"
+}
+```
+
+### PostgreSQL Wire Protocol
+
+PG-compatible tools and drivers can connect through the PG wire endpoint. The current adapter does not enforce authentication; `dbname`, `user`, and `password` are compatibility fields, not separate DuckDB databases or users.
+
+Connection values:
+
+```text
+host:     127.0.0.1
+port:     15432
+database: postgres
+user:     postgres
+password: any value or empty
+```
+
+Python example with `psycopg`:
+
+```powershell
+pip install "psycopg[binary]"
+```
+
+```python
+import psycopg
+
+conn = psycopg.connect(
+    host="127.0.0.1",
+    port=15432,
+    dbname="postgres",
+    user="postgres",
+    password="postgres",
+)
+
+with conn:
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO kline_day
+            (code, bar_time, open, high, low, close, volume)
+            VALUES
+            ('600001', TIMESTAMP '2026-07-03 09:31:00', 11.0, 11.4, 10.8, 11.2, 90000)
+        """)
+
+        cur.execute("SELECT code, close, volume FROM kline_day ORDER BY bar_time DESC LIMIT 10")
+        print(cur.fetchall())
+```
+
+For long-running load tests, use:
+
+```powershell
+python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query-workers 4 --query-interval 0.2
+```
 
 ## Configuration
 
@@ -101,6 +247,23 @@ Startup restore order:
 2. If a snapshot is found, run `IMPORT DATABASE` to restore the full database.
 3. If no snapshot exists, run `db.init_sql`.
 4. If `init_sql = ""`, start an empty in-memory database.
+
+Parameter reference, in `rsduck.toml` order:
+
+- 【db.init_sql】Path to the initialization SQL file. It runs only when startup does not restore a snapshot. Use it to create tables, indexes, views, or seed data. Set it to `""` to start empty.
+- 【db.read_workers】Number of dedicated DuckDB read worker threads. Read SQL is distributed across these workers. Increase it for more concurrent reads, while keeping memory and CPU capacity in mind.
+- 【db.write_queue_size】Bounded queue size for write SQL. Writes are serialized through the single write worker; when this queue is full, new write requests fail quickly instead of blocking indefinitely.
+- 【db.read_queue_size】Bounded queue size for each read worker. When a read queue is full, new read requests fail quickly.
+- 【db.snapshot_queue_size】Bounded queue size for snapshot requests from the scheduler, shutdown hook, and Web console. A full queue means another snapshot is already waiting or running.
+- 【db.max_result_rows】Maximum number of rows returned by one SQL execution before Web pagination is applied. This protects the service from returning excessively large result sets.
+- 【snapshot.restore_on_startup】Whether to restore the latest finalized snapshot directory at startup. If enabled and a matching snapshot exists, `db.init_sql` is not executed.
+- 【snapshot.dir】Base directory used to read and write snapshot directories.
+- 【snapshot.prefix】Snapshot directory prefix. Final snapshot names use `prefix_yyyyMMdd_HHmmss`, for example `rsduck_20260703_120000`.
+- 【snapshot.interval_secs】Automatic snapshot interval in seconds. The scheduler saves one snapshot at this cadence while the service is running.
+- 【snapshot.retain_hours】Retention window for old finalized snapshots. Expired snapshot directories are removed after scheduled snapshot cleanup.
+- 【pg.bind】Listen address for the PostgreSQL wire endpoint. Keep `127.0.0.1` for local-only access; use an explicit LAN address only when external clients should connect.
+- 【web.enabled】Whether to start the Web SQL console.
+- 【web.bind】Listen address for the Web console and HTTP SQL API.
 
 ## Snapshots
 
@@ -189,8 +352,11 @@ cargo test
 cargo build --release
 ```
 
-It uploads the Windows executable:
+It uploads release artifacts for Windows, Linux, and macOS to the workflow run. When a `v*` tag is pushed, the workflow also publishes those files to GitHub Releases:
 
 ```text
-target/release/rsduck.exe
+rsduck-windows-x64.zip
+rsduck-linux-x64.tar.gz
+rsduck-macos-arm64.tar.gz
+rsduck-macos-x64.tar.gz
 ```
