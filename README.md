@@ -370,8 +370,6 @@ rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
-Workflow run artifacts are temporary CI outputs. GitHub Release downloads are created from tag builds, for example `v0.1.1`. Branch pushes to `master` do not trigger release builds.
-
 ## Service Registration
 
 ### Windows

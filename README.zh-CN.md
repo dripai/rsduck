@@ -370,8 +370,6 @@ rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
-workflow run 里的 artifacts 是临时 CI 产物。GitHub Releases 里的下载文件会由 tag 构建生成，例如 `v0.1.1`。普通 `master` 分支提交不会触发 release 构建。
-
 ## 注册为服务
 
 ### Windows
