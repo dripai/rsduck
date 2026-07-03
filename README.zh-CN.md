@@ -69,7 +69,7 @@ cargo build
 cargo build --release
 ```
 
-当前环境的构建产物通常在：
+构建产物位置取决于 Cargo 的 target 目录。如果设置了 `CARGO_TARGET_DIR`，产物会写入该目录；否则会写入当前仓库的 `target` 目录。当前环境的 `CARGO_TARGET_DIR` 指向 `D:\cargo-target`，所以通常在：
 
 ```text
 D:\cargo-target\debug\rsduck.exe
@@ -81,6 +81,8 @@ D:\cargo-target\release\rsduck.exe
 ```powershell
 D:\cargo-target\release\rsduck.exe
 ```
+
+实际启动时请根据自己的构建产物存放路径调整可执行文件路径。
 
 默认端口：
 
@@ -336,7 +338,7 @@ WHERE internal = false
 ORDER BY schema_name, table_name;
 ```
 
-## 自动构建
+## 自动构建和下载地址
 
 GitHub Actions workflow 位于：
 
@@ -352,7 +354,13 @@ cargo test
 cargo build --release
 ```
 
-并把 Windows、Linux、macOS 构建产物上传到本次 workflow run。推送 `v*` tag 时，还会把这些文件发布到 GitHub Releases：
+编译后的版本可以从这里下载：
+
+- 最新 Release：[github.com/dripai/rsduck/releases/latest](https://github.com/dripai/rsduck/releases/latest)
+- 全部 Release：[github.com/dripai/rsduck/releases](https://github.com/dripai/rsduck/releases)
+- 每次 CI 运行的构建产物：[github.com/dripai/rsduck/actions/workflows/ci.yml](https://github.com/dripai/rsduck/actions/workflows/ci.yml)
+
+workflow 会打包这些文件：
 
 ```text
 rsduck-windows-x64.zip
@@ -360,3 +368,5 @@ rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
+
+workflow run 里的 artifacts 是临时 CI 产物。GitHub Releases 里的下载文件会在推送 `v*` tag 时生成，例如 `v0.1.0`。

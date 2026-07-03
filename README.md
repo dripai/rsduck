@@ -69,7 +69,7 @@ Release build:
 cargo build --release
 ```
 
-In this local workspace, build outputs are usually located at:
+Build outputs depend on Cargo's target directory. If `CARGO_TARGET_DIR` is set, artifacts are written under that directory; otherwise they are written under the repository's `target` directory. In this workspace, `CARGO_TARGET_DIR` points to `D:\cargo-target`, so the paths are usually:
 
 ```text
 D:\cargo-target\debug\rsduck.exe
@@ -81,6 +81,8 @@ D:\cargo-target\release\rsduck.exe
 ```powershell
 D:\cargo-target\release\rsduck.exe
 ```
+
+Adjust the executable path to your actual build output location.
 
 Default endpoints:
 
@@ -336,7 +338,7 @@ WHERE internal = false
 ORDER BY schema_name, table_name;
 ```
 
-## GitHub Actions
+## GitHub Actions And Downloads
 
 The GitHub Actions workflow is located at:
 
@@ -352,7 +354,13 @@ cargo test
 cargo build --release
 ```
 
-It uploads release artifacts for Windows, Linux, and macOS to the workflow run. When a `v*` tag is pushed, the workflow also publishes those files to GitHub Releases:
+Download released builds from:
+
+- Latest release: [github.com/dripai/rsduck/releases/latest](https://github.com/dripai/rsduck/releases/latest)
+- All releases: [github.com/dripai/rsduck/releases](https://github.com/dripai/rsduck/releases)
+- CI artifacts for each workflow run: [github.com/dripai/rsduck/actions/workflows/ci.yml](https://github.com/dripai/rsduck/actions/workflows/ci.yml)
+
+The workflow packages these files:
 
 ```text
 rsduck-windows-x64.zip
@@ -360,3 +368,5 @@ rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
+
+Workflow run artifacts are temporary CI outputs. GitHub Release downloads are created when a `v*` tag is pushed, for example `v0.1.0`.
