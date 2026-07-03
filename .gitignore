@@ -1,4 +1,5 @@
 /target
 /snapshot
+/web/node_modules
 __pycache__/
 *.pyc

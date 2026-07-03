@@ -1,4 +1,5 @@
 use crate::config::DbConfig;
+use crate::sql_route::{route_sql, SqlRoute};
 use duckdb::{types::ValueRef, Connection};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -28,6 +29,8 @@ pub enum SqlResult {
 enum SqlCommand {
     Run {
         sql: String,
+        route: SqlRoute,
+        command: String,
         resp: oneshot::Sender<Result<SqlResult, String>>,
     },
     Shutdown,
@@ -116,10 +119,18 @@ pub async fn execute_sql(sql: String) -> Result<SqlResult, String> {
         return Err("empty sql".into());
     }
 
-    if is_query_sql(&sql_trimmed) {
-        engine().query(sql_trimmed).await
-    } else {
-        engine().execute(sql_trimmed).await
+    let decision = route_sql(&sql_trimmed)?;
+    match decision.route {
+        SqlRoute::Read => {
+            engine()
+                .query(sql_trimmed, decision.route, decision.command)
+                .await
+        }
+        SqlRoute::Write => {
+            engine()
+                .execute(sql_trimmed, decision.route, decision.command)
+                .await
+        }
     }
 }
 
@@ -140,13 +151,23 @@ fn engine() -> &'static DbEngine {
 }
 
 impl DbEngine {
-    async fn query(&self, sql: String) -> Result<SqlResult, String> {
+    async fn query(
+        &self,
+        sql: String,
+        route: SqlRoute,
+        command: String,
+    ) -> Result<SqlResult, String> {
         let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
-        send_sql(&self.read_txs[idx], sql, "read").await
+        send_sql(&self.read_txs[idx], sql, route, command, "read").await
     }
 
-    async fn execute(&self, sql: String) -> Result<SqlResult, String> {
-        send_sql(&self.write_tx, sql, "write").await
+    async fn execute(
+        &self,
+        sql: String,
+        route: SqlRoute,
+        command: String,
+    ) -> Result<SqlResult, String> {
+        send_sql(&self.write_tx, sql, route, command, "write").await
     }
 
     async fn save_snapshot(&self, dir: String, prefix: String) -> Result<String, String> {
@@ -184,10 +205,17 @@ impl DbEngine {
 async fn send_sql(
     tx: &SyncSender<SqlCommand>,
     sql: String,
+    route: SqlRoute,
+    command: String,
     queue_name: &str,
 ) -> Result<SqlResult, String> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    match tx.try_send(SqlCommand::Run { sql, resp: resp_tx }) {
+    match tx.try_send(SqlCommand::Run {
+        sql,
+        route,
+        command,
+        resp: resp_tx,
+    }) {
         Ok(()) => resp_rx
             .await
             .unwrap_or_else(|_| Err(format!("{queue_name} worker stopped"))),
@@ -213,9 +241,14 @@ where
             info!("DuckDB worker started: {thread_log_name}");
             while let Ok(command) = rx.recv() {
                 match command {
-                    SqlCommand::Run { sql, resp } => {
+                    SqlCommand::Run {
+                        sql,
+                        route,
+                        command,
+                        resp,
+                    } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            execute_sql_blocking(&conn, &sql, max_result_rows)
+                            execute_sql_blocking(&conn, &sql, route, &command, max_result_rows)
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result);
@@ -296,6 +329,8 @@ fn restore_or_initialize(
 fn execute_sql_blocking(
     conn: &Connection,
     sql: &str,
+    route: SqlRoute,
+    command: &str,
     max_result_rows: usize,
 ) -> Result<SqlResult, String> {
     let sql_trimmed = sql.trim();
@@ -303,15 +338,15 @@ fn execute_sql_blocking(
         return Err("empty sql".into());
     }
 
-    let command = detect_command(sql_trimmed);
-    if is_query_command(&command) {
-        query_sql_blocking(conn, sql_trimmed, max_result_rows)
-    } else {
-        let affected_rows = conn.execute(sql_trimmed, []).map_err(|e| e.to_string())?;
-        Ok(SqlResult::Execute {
-            command,
-            affected_rows,
-        })
+    match route {
+        SqlRoute::Read => query_sql_blocking(conn, sql_trimmed, max_result_rows),
+        SqlRoute::Write => {
+            let affected_rows = conn.execute(sql_trimmed, []).map_err(|e| e.to_string())?;
+            Ok(SqlResult::Execute {
+                command: command.to_string(),
+                affected_rows,
+            })
+        }
     }
 }
 
@@ -427,24 +462,6 @@ fn value_ref_to_string(value: ValueRef<'_>) -> String {
         } => format!("{months} months {days} days {nanos} ns"),
         other => format!("{other:?}"),
     }
-}
-
-fn is_query_sql(sql: &str) -> bool {
-    is_query_command(&detect_command(sql))
-}
-
-fn detect_command(sql: &str) -> String {
-    sql.split_whitespace()
-        .next()
-        .unwrap_or("OK")
-        .to_ascii_uppercase()
-}
-
-fn is_query_command(command: &str) -> bool {
-    matches!(
-        command,
-        "SELECT" | "SHOW" | "WITH" | "DESCRIBE" | "EXPLAIN" | "PRAGMA"
-    )
 }
 
 pub fn find_latest_snapshot_dir(snapshot_dir: &str, snapshot_prefix: &str) -> Option<String> {

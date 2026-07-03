@@ -582,6 +582,7 @@ fn pg_settings_rows() -> Vec<(&'static str, &'static str)> {
 mod tests {
     use super::{compat_result, rewrite_sql};
     use crate::db::SqlResult;
+    use crate::sql_route::{route_sql, SqlRoute};
     use duckdb::Connection;
 
     #[test]
@@ -687,6 +688,7 @@ mod tests {
             ",
         )
         .expect("rewrite sql");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
 
         let table_name: String = conn
             .query_row(&sql, [], |row| row.get("table_name"))
@@ -708,6 +710,7 @@ mod tests {
             ",
         )
         .expect("rewrite sql");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
 
         let column_name: String = conn
             .query_row(&sql, [], |row| row.get("column_name"))
@@ -722,6 +725,7 @@ mod tests {
             .unwrap();
         let sql =
             rewrite_sql("SELECT oid, nspname FROM pg_catalog.pg_namespace").expect("rewrite sql");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
 
         let schema_name: String = conn.query_row(&sql, [], |row| row.get("nspname")).unwrap();
         assert_eq!(schema_name, "main");

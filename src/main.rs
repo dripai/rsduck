@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod pg_compat;
 mod pg_server;
+mod sql_route;
 mod web_server;
 
 use std::path::Path;

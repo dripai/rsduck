@@ -1,6 +1,7 @@
 use axum::{
     extract::{Json, State},
-    response::Html,
+    http::header,
+    response::{Html, IntoResponse},
     routing::{get, post},
     Router,
 };
@@ -105,7 +106,7 @@ async fn sql_handler(State(state): State<WebState>, Json(req): Json<SqlReq>) -> 
 
 fn paged_sql(sql: &str, page: usize, page_size: usize) -> String {
     let sql = sql.trim().trim_end_matches(';').trim();
-    if !is_pageable_sql(sql) {
+    if !crate::sql_route::is_pageable_sql(sql).unwrap_or(false) {
         return sql.to_string();
     }
 
@@ -114,20 +115,18 @@ fn paged_sql(sql: &str, page: usize, page_size: usize) -> String {
     format!("SELECT * FROM ({sql}) __rsduck_page LIMIT {page_size} OFFSET {offset}")
 }
 
-fn is_pageable_sql(sql: &str) -> bool {
-    let command = sql
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    matches!(
-        command.as_str(),
-        "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "EXPLAIN" | "PRAGMA"
-    )
-}
-
 async fn index_page() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn codemirror_js() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        CODEMIRROR_JS,
+    )
 }
 
 async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
@@ -154,6 +153,7 @@ async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
 pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String, snapshot_prefix: String) -> Router {
     Router::new()
         .route("/", get(index_page))
+        .route("/assets/codemirror.bundle.js", get(codemirror_js))
         .route("/sql", post(sql_handler))
         .route("/snapshot", post(snapshot_handler))
         .with_state(WebState {
@@ -162,6 +162,8 @@ pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String, snapshot_prefix:
             snapshot_prefix: Arc::new(snapshot_prefix),
         })
 }
+
+const CODEMIRROR_JS: &str = include_str!("../web/dist/codemirror.bundle.js");
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html>
@@ -199,8 +201,19 @@ button, input, textarea { font: inherit; }
 .top-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .summary { color: #66758a; font-size: 12px; white-space: nowrap; }
 .editor { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid #d8dde6; }
-.editor textarea { flex: 1; width: 100%; min-height: 130px; resize: none; border: 0; outline: 0; padding: 12px 14px; font-family: Consolas, "Courier New", monospace; font-size: 14px; line-height: 1.55; color: #0f172a; background: #fff; }
+.editor-surface { flex: 1; min-height: 130px; background: #fff; overflow: hidden; }
+.editor-surface .cm-editor { height: 100%; }
+.editor-surface .cm-focused { outline: none; }
+.editor-surface .cm-selectionBackground { background: #7fb3ff !important; }
+.editor-surface .cm-line::selection,
+.editor-surface .cm-line *::selection,
+.editor-surface .cm-content::selection,
+.editor-surface .cm-content *::selection { background: #7fb3ff !important; color: inherit !important; }
 .toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid #e6e9ef; background: #f4f6f8; }
+.context-menu { position: fixed; z-index: 1000; min-width: 150px; padding: 4px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, .18); }
+.context-menu[hidden] { display: none; }
+.context-menu button { width: 100%; height: 30px; border: 0; border-radius: 3px; background: transparent; color: #1f2933; text-align: left; padding: 0 10px; cursor: pointer; }
+.context-menu button:hover { background: #edf4ff; color: #0b61c9; }
 .splitter { height: 8px; cursor: row-resize; background: #f4f6f8; border-top: 1px solid #d8dde6; border-bottom: 1px solid #d8dde6; position: relative; }
 .splitter::before { content: ""; position: absolute; left: 12px; right: 12px; top: 3px; height: 2px; border-radius: 1px; background: #b8c2d1; }
 .splitter:hover, .splitter.dragging { background: #eaf2ff; }
@@ -249,7 +262,7 @@ tbody tr:nth-child(even) { background: #fafbfc; }
       </div>
     </div>
     <section class="editor">
-      <textarea id="sql" spellcheck="false">SHOW TABLES;</textarea>
+      <div id="sqlEditor" class="editor-surface"></div>
       <div class="toolbar">
         <button class="primary-button" onclick="run()">Execute</button>
       </div>
@@ -268,11 +281,17 @@ tbody tr:nth-child(even) { background: #fafbfc; }
     </section>
   </main>
 </div>
+<div id="sqlContextMenu" class="context-menu" hidden>
+  <button type="button" onclick="executeContextSql()">Execute Selection</button>
+</div>
+<script src="/assets/codemirror.bundle.js"></script>
 <script>
 let currentPage = 0;
 let lastSql = '';
 let tables = [];
 let activeTable = '';
+let contextSql = '';
+let sqlEditor = null;
 const editorHeightKey = 'rsduck.editorHeight';
 
 function escapeHtml(value) {
@@ -285,6 +304,60 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function setSqlValue(value) {
+  sqlEditor.setValue(value);
+}
+
+function getSqlValue() {
+  return sqlEditor ? sqlEditor.getValue() : '';
+}
+
+function getSelectedSql() {
+  return sqlEditor ? sqlEditor.getSelectedText() : '';
+}
+
+function showSqlContextMenu(x, y) {
+  const menu = document.getElementById('sqlContextMenu');
+  menu.hidden = false;
+  const left = Math.min(x, window.innerWidth - menu.offsetWidth - 8);
+  const top = Math.min(y, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = Math.max(8, left) + 'px';
+  menu.style.top = Math.max(8, top) + 'px';
+}
+
+function hideSqlContextMenu() {
+  document.getElementById('sqlContextMenu').hidden = true;
+}
+
+function executeContextSql() {
+  const sql = contextSql;
+  hideSqlContextMenu();
+  if (sql) runSqlText(sql, true);
+}
+
+function setupSqlEditor() {
+  const parent = document.getElementById('sqlEditor');
+  sqlEditor = window.RsduckEditor.create({
+    parent,
+    initialDoc: 'SHOW TABLES;',
+    onRun: sql => runSqlText(sql, true)
+  });
+
+  parent.addEventListener('contextmenu', event => {
+    const sql = getSelectedSql();
+    if (!sql) {
+      hideSqlContextMenu();
+      return;
+    }
+    event.preventDefault();
+    contextSql = sql;
+    showSqlContextMenu(event.clientX, event.clientY);
+  });
+
+  document.addEventListener('click', hideSqlContextMenu);
+  window.addEventListener('resize', hideSqlContextMenu);
+}
+
 function quoteIdent(value) {
   return '"' + String(value).replace(/"/g, '""') + '"';
 }
@@ -294,8 +367,12 @@ function tableSql(schema, table) {
 }
 
 function shouldRefreshTables(sql) {
-  const command = sql.trim().split(/\s+/)[0]?.toUpperCase() || '';
-  return ['CREATE', 'DROP', 'ALTER', 'IMPORT'].includes(command);
+  const cleanSql = sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ')
+    .trim();
+  const command = cleanSql.split(/\s+/)[0]?.toUpperCase() || '';
+  return ['CREATE', 'DROP', 'ALTER', 'IMPORT', 'ATTACH', 'DETACH'].includes(command);
 }
 
 async function postSql(sql, page = 0, pageSize = 1000) {
@@ -382,13 +459,18 @@ function renderTables() {
 
 function selectTable(schema, table) {
   activeTable = schema + '.' + table;
-  document.getElementById('sql').value = tableSql(schema, table);
+  setSqlValue(tableSql(schema, table));
   renderTables();
   run();
 }
 
 async function run(resetPage = true) {
-  const sql = document.getElementById('sql').value.trim();
+  const sql = (getSelectedSql() || getSqlValue()).trim();
+  return runSqlText(sql, resetPage);
+}
+
+async function runSqlText(sql, resetPage = true) {
+  sql = sql.trim();
   if (!sql) return;
   if (resetPage || sql !== lastSql) currentPage = 0;
   lastSql = sql;
@@ -491,6 +573,7 @@ function setupEditorSplitter() {
   });
 }
 
+setupSqlEditor();
 setupEditorSplitter();
 loadTables().then(() => run());
 </script>

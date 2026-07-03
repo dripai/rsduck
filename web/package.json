@@ -1,0 +1,17 @@
+{
+  "name": "rsduck-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/editor.js --bundle --format=iife --global-name=RsduckCodeMirrorBundle --outfile=dist/codemirror.bundle.js --minify"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.8",
+    "codemirror": "^6.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
