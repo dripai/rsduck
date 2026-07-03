@@ -346,7 +346,7 @@ GitHub Actions workflow 位于：
 .github/workflows/ci.yml
 ```
 
-push 到远程后会执行：
+推送 `v*` tag 时会执行：
 
 ```text
 cargo fmt --check
@@ -364,25 +364,127 @@ workflow 会打包这些文件：
 
 ```text
 rsduck-windows-x64.zip
-rsduck-windows-service-x64.zip
+rsduck-windows-service-setup-x64.exe
 rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
-workflow run 里的 artifacts 是临时 CI 产物。GitHub Releases 里的下载文件会在推送 `v*` tag 时生成，例如 `v0.1.0`。
+workflow run 里的 artifacts 是临时 CI 产物。GitHub Releases 里的下载文件会由 tag 构建生成，例如 `v0.1.1`。普通 `master` 分支提交不会触发 release 构建。
 
-`rsduck-windows-service-x64.zip` 会包含 WinSW 服务包装器文件，以及用于安装或卸载 Windows 服务的 PowerShell 脚本。
+## 注册为服务
 
-Windows 服务包使用方式：
+### Windows
+
+从 Releases 下载 `rsduck-windows-service-setup-x64.exe`。这是最简单的 Windows 安装包：双击运行，选择安装目录，安装器会自动把 rsduck 注册为开机自启的 Windows 服务。
+
+安装器会把 `rsduck.exe`、`rsduck.toml`、`init.sql`、WinSW 服务文件、`logs`、`snapshot` 放到你选择的安装目录下，并把这个目录作为服务工作目录。
+
+如果只需要便携式控制台程序，不注册服务，使用 `rsduck-windows-x64.zip`。
+
+服务管理命令：
 
 ```powershell
-Expand-Archive .\rsduck-windows-service-x64.zip -DestinationPath C:\rsduck
-C:\rsduck\install-service.ps1
+Get-Service rsduck
+Start-Service rsduck
+Stop-Service rsduck
 ```
 
-卸载服务：
+卸载可以通过 Windows 应用/程序管理界面完成，也可以使用开始菜单里的 `Uninstall rsduck`。
 
-```powershell
-C:\rsduck\uninstall-service.ps1
+### Linux
+
+将发布包文件放到 `/opt/rsduck`：
+
+```bash
+sudo mkdir -p /opt/rsduck
+sudo tar -xzf rsduck-linux-x64.tar.gz -C /opt/rsduck
+sudo cp rsduck.toml init.sql /opt/rsduck/
 ```
+
+创建 `/etc/systemd/system/rsduck.service`：
+
+```ini
+[Unit]
+Description=rsduck in-memory DuckDB middleware service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rsduck
+ExecStart=/opt/rsduck/rsduck
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable rsduck
+sudo systemctl start rsduck
+sudo systemctl status rsduck
+```
+
+### macOS
+
+将发布包文件放到 `/usr/local/rsduck`：
+
+```bash
+sudo mkdir -p /usr/local/rsduck
+sudo tar -xzf rsduck-macos-arm64.tar.gz -C /usr/local/rsduck
+sudo cp rsduck.toml init.sql /usr/local/rsduck/
+```
+
+Intel 芯片的 macOS 使用 `rsduck-macos-x64.tar.gz`。
+
+创建 `/Library/LaunchDaemons/com.rsduck.plist`：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rsduck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/rsduck/rsduck</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/rsduck</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/usr/local/rsduck/rsduck.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/rsduck/rsduck.err.log</string>
+</dict>
+</plist>
+```
+
+加载并启动：
+
+```bash
+sudo chown root:wheel /Library/LaunchDaemons/com.rsduck.plist
+sudo chmod 644 /Library/LaunchDaemons/com.rsduck.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.rsduck.plist
+sudo launchctl enable system/com.rsduck
+sudo launchctl kickstart -k system/com.rsduck
+```
+
+停止并卸载：
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.rsduck.plist
+```
+
+关于关闭前快照：rsduck 当前处理的是 Ctrl+C/SIGINT。上面的 Linux `systemd` 配置会发送 SIGINT。macOS 下如果必须立即持久化最新内存数据，建议在 `launchctl bootout` 前先手工保存一次快照。

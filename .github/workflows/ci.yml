@@ -2,29 +2,8 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
-      - main
     tags:
       - "v*"
-    paths-ignore:
-      - "**/*.md"
-      - "doc/**"
-      - "*.png"
-      - "*.jpg"
-      - "*.jpeg"
-      - "*.gif"
-      - "*.svg"
-  pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "doc/**"
-      - "*.png"
-      - "*.jpg"
-      - "*.jpeg"
-      - "*.gif"
-      - "*.svg"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -121,7 +100,7 @@ jobs:
             -Uri "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe" `
             -OutFile "dist/rsduck-service.exe"
 
-      - name: Package Windows service asset
+      - name: Prepare Windows service installer files
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -135,14 +114,28 @@ jobs:
           Copy-Item packaging\windows-service\rsduck-service.xml service\rsduck-service.xml
           Copy-Item packaging\windows-service\install-service.ps1 service\install-service.ps1
           Copy-Item packaging\windows-service\uninstall-service.ps1 service\uninstall-service.ps1
-          Compress-Archive -Path service\* -DestinationPath dist\rsduck-windows-service-x64.zip
 
-      - name: Upload Windows service package artifact
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Package Windows service installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $sourceDir = (Resolve-Path service).Path
+          $outputDir = (Resolve-Path dist).Path
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc packaging\windows-installer\rsduck.iss "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "/DAppVersion=$version"
+
+      - name: Upload Windows service installer artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: rsduck-windows-service-x64.zip
-          path: dist/rsduck-windows-service-x64.zip
+          name: rsduck-windows-service-setup-x64.exe
+          path: dist/rsduck-windows-service-setup-x64.exe
           if-no-files-found: error
 
   github-release:

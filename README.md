@@ -346,7 +346,7 @@ The GitHub Actions workflow is located at:
 .github/workflows/ci.yml
 ```
 
-On push or pull request, it runs:
+When a `v*` tag is pushed, it runs:
 
 ```text
 cargo fmt --check
@@ -364,25 +364,127 @@ The workflow packages these files:
 
 ```text
 rsduck-windows-x64.zip
-rsduck-windows-service-x64.zip
+rsduck-windows-service-setup-x64.exe
 rsduck-linux-x64.tar.gz
 rsduck-macos-arm64.tar.gz
 rsduck-macos-x64.tar.gz
 ```
 
-Workflow run artifacts are temporary CI outputs. GitHub Release downloads are created when a `v*` tag is pushed, for example `v0.1.0`.
+Workflow run artifacts are temporary CI outputs. GitHub Release downloads are created from tag builds, for example `v0.1.1`. Branch pushes to `master` do not trigger release builds.
 
-`rsduck-windows-service-x64.zip` includes WinSW service wrapper files and PowerShell scripts for installing or uninstalling rsduck as a Windows service.
+## Service Registration
 
-Windows service package usage:
+### Windows
+
+Download `rsduck-windows-service-setup-x64.exe` from Releases. It is the easiest Windows package: double-click it, choose the install directory, and the installer registers rsduck as an automatic Windows service.
+
+The installer places `rsduck.exe`, `rsduck.toml`, `init.sql`, WinSW service files, `logs`, and `snapshot` under the selected directory. That directory is also used as the service working directory.
+
+For portable console usage without service registration, use `rsduck-windows-x64.zip`.
+
+Service commands:
 
 ```powershell
-Expand-Archive .\rsduck-windows-service-x64.zip -DestinationPath C:\rsduck
-C:\rsduck\install-service.ps1
+Get-Service rsduck
+Start-Service rsduck
+Stop-Service rsduck
 ```
 
-Uninstall:
+Uninstall from Windows Apps/Programs, or use the Start Menu item `Uninstall rsduck`.
 
-```powershell
-C:\rsduck\uninstall-service.ps1
+### Linux
+
+Place the release files under `/opt/rsduck`:
+
+```bash
+sudo mkdir -p /opt/rsduck
+sudo tar -xzf rsduck-linux-x64.tar.gz -C /opt/rsduck
+sudo cp rsduck.toml init.sql /opt/rsduck/
 ```
+
+Create `/etc/systemd/system/rsduck.service`:
+
+```ini
+[Unit]
+Description=rsduck in-memory DuckDB middleware service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rsduck
+ExecStart=/opt/rsduck/rsduck
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable rsduck
+sudo systemctl start rsduck
+sudo systemctl status rsduck
+```
+
+### macOS
+
+Place the release files under `/usr/local/rsduck`:
+
+```bash
+sudo mkdir -p /usr/local/rsduck
+sudo tar -xzf rsduck-macos-arm64.tar.gz -C /usr/local/rsduck
+sudo cp rsduck.toml init.sql /usr/local/rsduck/
+```
+
+On Intel macOS, use `rsduck-macos-x64.tar.gz` instead.
+
+Create `/Library/LaunchDaemons/com.rsduck.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rsduck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/rsduck/rsduck</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/rsduck</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/usr/local/rsduck/rsduck.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/rsduck/rsduck.err.log</string>
+</dict>
+</plist>
+```
+
+Load and start it:
+
+```bash
+sudo chown root:wheel /Library/LaunchDaemons/com.rsduck.plist
+sudo chmod 644 /Library/LaunchDaemons/com.rsduck.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.rsduck.plist
+sudo launchctl enable system/com.rsduck
+sudo launchctl kickstart -k system/com.rsduck
+```
+
+Stop and unload:
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.rsduck.plist
+```
+
+For graceful shutdown snapshots, rsduck currently handles Ctrl+C/SIGINT. The Linux `systemd` example sends SIGINT. On macOS, take a manual snapshot before `launchctl bootout` if the latest in-memory changes must be persisted immediately.
