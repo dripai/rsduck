@@ -1,12 +1,12 @@
 use crate::db::SqlResult;
 
-pub fn compat_result(sql: &str) -> Option<SqlResult> {
+pub fn compat_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     let normalized = normalize_sql(sql);
     pg_set_result(&normalized)
         .or_else(|| pg_show_result(&normalized))
-        .or_else(|| pg_scalar_result(&normalized))
+        .or_else(|| pg_scalar_result(&normalized, current_user))
         .or_else(|| pg_database_result(&normalized))
-        .or_else(|| pg_user_result(&normalized))
+        .or_else(|| pg_user_result(&normalized, current_user))
         .or_else(|| pg_settings_result(&normalized))
 }
 
@@ -20,6 +20,31 @@ pub fn rewrite_sql(sql: &str) -> Option<String> {
         || contains_relation(&normalized, "information_schema.columns")
     {
         return Some(pg_attribute_sql());
+    }
+    if contains_from_table(&normalized, "pg_index") {
+        return Some(pg_index_sql());
+    }
+    if contains_from_table(&normalized, "pg_constraint")
+        || contains_relation(&normalized, "information_schema.table_constraints")
+    {
+        return Some(pg_constraint_sql());
+    }
+    if contains_from_table(&normalized, "pg_attrdef") {
+        return Some(pg_attrdef_sql());
+    }
+    if contains_from_table(&normalized, "pg_depend") {
+        return Some(pg_depend_sql());
+    }
+    if contains_from_table(&normalized, "pg_description") {
+        return Some(pg_description_sql());
+    }
+    if contains_from_table(&normalized, "pg_views")
+        || contains_relation(&normalized, "information_schema.views")
+    {
+        return Some(pg_views_sql());
+    }
+    if contains_from_table(&normalized, "pg_indexes") {
+        return Some(pg_indexes_sql());
     }
     if contains_from_table(&normalized, "pg_class")
         || contains_from_table(&normalized, "pg_tables")
@@ -95,7 +120,7 @@ fn pg_show_result(sql: &str) -> Option<SqlResult> {
     Some(one_row(&[column], &[value]))
 }
 
-fn pg_scalar_result(sql: &str) -> Option<SqlResult> {
+fn pg_scalar_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     if let Some(result) = current_setting_result(sql) {
         return Some(result);
     }
@@ -126,7 +151,7 @@ fn pg_scalar_result(sql: &str) -> Option<SqlResult> {
         || select_sql.starts_with("current_role")
         || select_sql.starts_with("user")
     {
-        return Some(one_row(&["current_user"], &["postgres"]));
+        return Some(one_row(&["current_user"], &[current_user]));
     }
     if select_sql.starts_with("pg_backend_pid()")
         || select_sql.starts_with("pg_catalog.pg_backend_pid()")
@@ -151,18 +176,8 @@ fn pg_scalar_result(sql: &str) -> Option<SqlResult> {
     if select_sql.starts_with("pg_get_userbyid(")
         || select_sql.starts_with("pg_catalog.pg_get_userbyid(")
     {
-        return Some(one_row(&["pg_get_userbyid"], &["postgres"]));
+        return Some(one_row(&["pg_get_userbyid"], &[current_user]));
     }
-    if select_sql.starts_with("has_database_privilege(")
-        || select_sql.starts_with("has_schema_privilege(")
-        || select_sql.starts_with("has_table_privilege(")
-        || select_sql.starts_with("pg_catalog.has_database_privilege(")
-        || select_sql.starts_with("pg_catalog.has_schema_privilege(")
-        || select_sql.starts_with("pg_catalog.has_table_privilege(")
-    {
-        return Some(one_row(&["has_privilege"], &["t"]));
-    }
-
     None
 }
 
@@ -226,7 +241,7 @@ fn pg_database_result(sql: &str) -> Option<SqlResult> {
             &[
                 "1",
                 "postgres",
-                "postgres",
+                "admin",
                 "",
                 "f",
                 "t",
@@ -267,7 +282,7 @@ fn pg_database_result(sql: &str) -> Option<SqlResult> {
     ))
 }
 
-fn pg_user_result(sql: &str) -> Option<SqlResult> {
+fn pg_user_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     if contains_from_table(sql, "pg_user") {
         return Some(one_row(
             &[
@@ -280,7 +295,7 @@ fn pg_user_result(sql: &str) -> Option<SqlResult> {
                 "valuntil",
                 "useconfig",
             ],
-            &["postgres", "10", "t", "t", "t", "", "", ""],
+            &[current_user, "10", "t", "t", "f", "", "", ""],
         ));
     }
 
@@ -302,7 +317,19 @@ fn pg_user_result(sql: &str) -> Option<SqlResult> {
                 "rolconfig",
             ],
             &[
-                "10", "postgres", "t", "t", "t", "t", "t", "t", "-1", "", "", "t", "",
+                "10",
+                current_user,
+                "t",
+                "t",
+                "t",
+                "t",
+                "t",
+                "f",
+                "-1",
+                "",
+                "",
+                "t",
+                "",
             ],
         ));
     }
@@ -364,17 +391,22 @@ fn pg_settings_table_result() -> SqlResult {
 
 fn pg_namespace_sql() -> String {
     "
-    SELECT DISTINCT
-        CAST(database_oid AS VARCHAR) AS oid,
-        schema_name AS nspname,
-        '10' AS nspowner,
+    SELECT
+        CAST(oid AS VARCHAR) AS oid,
+        nspname,
+        CAST(nspowner AS VARCHAR) AS nspowner,
         '' AS nspacl,
         '' AS description,
-        schema_name AS schema_name,
-        schema_name AS schema_owner
-    FROM duckdb_schemas()
-    WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
-    ORDER BY schema_name
+        nspname AS schema_name,
+        'admin' AS schema_owner
+    FROM rsduck_catalog.pg_namespace
+    WHERE nspname NOT IN ('rsduck_catalog', 'rsduck_internal')
+    ORDER BY
+        CASE WHEN nspname = 'main' THEN 0
+             WHEN nspname IN ('pg_catalog', 'information_schema') THEN 2
+             ELSE 1
+        END,
+        nspname
     "
     .to_string()
 }
@@ -382,25 +414,25 @@ fn pg_namespace_sql() -> String {
 fn pg_class_sql() -> String {
     "
     SELECT
-        CAST(table_oid AS VARCHAR) AS oid,
-        table_name AS relname,
-        CAST(schema_oid AS VARCHAR) AS relnamespace,
-        '0' AS reltype,
+        CAST(c.oid AS VARCHAR) AS oid,
+        c.relname AS relname,
+        CAST(c.relnamespace AS VARCHAR) AS relnamespace,
+        CAST(c.reltype AS VARCHAR) AS reltype,
         '0' AS reloftype,
-        '10' AS relowner,
+        CAST(c.relowner AS VARCHAR) AS relowner,
         '0' AS relam,
         '0' AS relfilenode,
         '0' AS reltablespace,
         '0' AS relpages,
-        CAST(estimated_size AS VARCHAR) AS reltuples,
+        CAST(c.reltuples AS VARCHAR) AS reltuples,
         '0' AS relallvisible,
         '0' AS reltoastrelid,
-        CASE WHEN index_count > 0 THEN 't' ELSE 'f' END AS relhasindex,
+        CASE WHEN c.relhasindex THEN 't' ELSE 'f' END AS relhasindex,
         'f' AS relisshared,
-        CASE WHEN temporary THEN 't' ELSE 'p' END AS relpersistence,
-        'r' AS relkind,
-        CAST(column_count AS VARCHAR) AS relnatts,
-        CAST(check_constraint_count AS VARCHAR) AS relchecks,
+        c.relpersistence AS relpersistence,
+        c.relkind AS relkind,
+        CAST(c.relnatts AS VARCHAR) AS relnatts,
+        CAST((SELECT COUNT(*) FROM rsduck_catalog.pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'c') AS VARCHAR) AS relchecks,
         'f' AS relhasrules,
         'f' AS relhastriggers,
         'f' AS relhassubclass,
@@ -408,27 +440,32 @@ fn pg_class_sql() -> String {
         'f' AS relforcerowsecurity,
         't' AS relispopulated,
         'd' AS relreplident,
-        'f' AS relispartition,
+        CASE WHEN c.relispartition THEN 't' ELSE 'f' END AS relispartition,
         '0' AS relrewrite,
         '0' AS relfrozenxid,
         '0' AS relminmxid,
         '' AS relacl,
-        '' AS reloptions,
-        '' AS relpartbound,
-        schema_name AS nspname,
-        schema_name AS schemaname,
-        table_name AS tablename,
-        table_name AS table_name,
-        'postgres' AS tableowner,
+        c.reloptions AS reloptions,
+        c.relpartbound AS relpartbound,
+        n.nspname AS nspname,
+        n.nspname AS schemaname,
+        c.relname AS tablename,
+        c.relname AS table_name,
+        'admin' AS tableowner,
         '' AS tablespace,
-        CASE WHEN index_count > 0 THEN 't' ELSE 'f' END AS hasindexes,
+        CASE WHEN c.relhasindex THEN 't' ELSE 'f' END AS hasindexes,
         'f' AS hasrules,
         'f' AS hastriggers,
         'f' AS rowsecurity,
-        '' AS description
-    FROM duckdb_tables()
-    WHERE internal = false
-    ORDER BY schema_name, table_name
+        COALESCE(d.description, '') AS description
+    FROM rsduck_catalog.pg_class c
+    JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    LEFT JOIN rsduck_catalog.pg_description d
+      ON d.objoid = c.oid AND d.objsubid = 0
+    WHERE c.status = 'active'
+      AND ext.visibility = 'user'
+    ORDER BY n.nspname, c.relname
     "
     .to_string()
 }
@@ -436,74 +473,205 @@ fn pg_class_sql() -> String {
 fn pg_attribute_sql() -> String {
     "
     SELECT
-        CAST(table_oid * 10000 + column_index AS VARCHAR) AS oid,
-        CAST(table_oid AS VARCHAR) AS attrelid,
-        column_name AS attname,
-        CASE
-            WHEN lower(data_type) LIKE '%int%' THEN '23'
-            WHEN lower(data_type) IN ('float', 'real') THEN '700'
-            WHEN lower(data_type) IN ('double', 'double precision', 'decimal', 'numeric') THEN '701'
-            WHEN lower(data_type) IN ('boolean', 'bool') THEN '16'
-            WHEN lower(data_type) LIKE '%timestamp%' THEN '1114'
-            WHEN lower(data_type) = 'date' THEN '1082'
-            WHEN lower(data_type) = 'time' THEN '1083'
-            ELSE '25'
-        END AS atttypid,
+        CAST(a.attrelid * 10000 + a.attnum AS VARCHAR) AS oid,
+        CAST(a.attrelid AS VARCHAR) AS attrelid,
+        a.attname AS attname,
+        CAST(a.atttypid AS VARCHAR) AS atttypid,
         '-1' AS attstattarget,
         '-1' AS attlen,
-        CAST(column_index AS VARCHAR) AS attnum,
+        CAST(a.attnum AS VARCHAR) AS attnum,
         '0' AS attndims,
         '-1' AS attcacheoff,
-        '-1' AS atttypmod,
+        CAST(a.atttypmod AS VARCHAR) AS atttypmod,
         'f' AS attbyval,
         'x' AS attstorage,
         'i' AS attalign,
-        CASE WHEN is_nullable THEN 'f' ELSE 't' END AS attnotnull,
-        CASE WHEN column_default IS NULL THEN 'f' ELSE 't' END AS atthasdef,
+        CASE WHEN a.attnotnull THEN 't' ELSE 'f' END AS attnotnull,
+        CASE WHEN a.atthasdef THEN 't' ELSE 'f' END AS atthasdef,
         'f' AS atthasmissing,
-        '' AS attidentity,
-        '' AS attgenerated,
-        'f' AS attisdropped,
+        a.attidentity AS attidentity,
+        a.attgenerated AS attgenerated,
+        CASE WHEN a.attisdropped THEN 't' ELSE 'f' END AS attisdropped,
         't' AS attislocal,
         '0' AS attinhcount,
         '0' AS attcollation,
         '' AS attacl,
-        '' AS attoptions,
+        a.attoptions AS attoptions,
         '' AS attfdwoptions,
         '' AS attmissingval,
-        schema_name AS table_schema,
-        table_name AS table_name,
-        column_name AS column_name,
-        CAST(column_index AS VARCHAR) AS ordinal_position,
-        data_type AS data_type,
-        CASE WHEN is_nullable THEN 'YES' ELSE 'NO' END AS is_nullable,
-        COALESCE(column_default, '') AS column_default,
-        '' AS description
-    FROM duckdb_columns()
-    WHERE internal = false
-    ORDER BY schema_name, table_name, column_index
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        a.attname AS column_name,
+        CAST(a.attnum AS VARCHAR) AS ordinal_position,
+        t.rsduck_physical_type AS data_type,
+        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+        COALESCE(def.adbin, '') AS column_default,
+        COALESCE(d.description, '') AS description
+    FROM rsduck_catalog.pg_attribute a
+    JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid
+    JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN rsduck_catalog.pg_type t ON t.oid = a.atttypid
+    JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    LEFT JOIN rsduck_catalog.pg_attrdef def
+      ON def.adrelid = a.attrelid AND def.adnum = a.attnum
+    LEFT JOIN rsduck_catalog.pg_description d
+      ON d.objoid = a.attrelid AND d.objsubid = a.attnum
+    WHERE c.status = 'active'
+      AND ext.visibility = 'user'
+      AND a.attisdropped = FALSE
+    ORDER BY n.nspname, c.relname, a.attnum
     "
     .to_string()
 }
 
 fn pg_type_sql() -> String {
     "
-    SELECT *
-    FROM (
-        VALUES
-            ('16', 'bool', 'b', 't'),
-            ('20', 'int8', 'b', 't'),
-            ('21', 'int2', 'b', 't'),
-            ('23', 'int4', 'b', 't'),
-            ('25', 'text', 'b', 't'),
-            ('700', 'float4', 'b', 't'),
-            ('701', 'float8', 'b', 't'),
-            ('1043', 'varchar', 'b', 't'),
-            ('1082', 'date', 'b', 't'),
-            ('1083', 'time', 'b', 't'),
-            ('1114', 'timestamp', 'b', 't'),
-            ('1700', 'numeric', 'b', 't')
-    ) AS t(oid, typname, typtype, typisdefined)
+    SELECT
+        CAST(oid AS VARCHAR) AS oid,
+        typname,
+        CAST(typnamespace AS VARCHAR) AS typnamespace,
+        CAST(typowner AS VARCHAR) AS typowner,
+        CAST(typlen AS VARCHAR) AS typlen,
+        CASE WHEN typbyval THEN 't' ELSE 'f' END AS typbyval,
+        typtype,
+        typcategory,
+        CASE WHEN typisdefined THEN 't' ELSE 'f' END AS typisdefined,
+        CAST(typrelid AS VARCHAR) AS typrelid,
+        CAST(typelem AS VARCHAR) AS typelem,
+        CAST(typarray AS VARCHAR) AS typarray,
+        rsduck_physical_type
+    FROM rsduck_catalog.pg_type
+    ORDER BY oid
+    "
+    .to_string()
+}
+
+fn pg_index_sql() -> String {
+    "
+    SELECT
+        CAST(indexrelid AS VARCHAR) AS indexrelid,
+        CAST(indrelid AS VARCHAR) AS indrelid,
+        CAST(indnatts AS VARCHAR) AS indnatts,
+        CAST(indnkeyatts AS VARCHAR) AS indnkeyatts,
+        CASE WHEN indisunique THEN 't' ELSE 'f' END AS indisunique,
+        CASE WHEN indisprimary THEN 't' ELSE 'f' END AS indisprimary,
+        CASE WHEN indisvalid THEN 't' ELSE 'f' END AS indisvalid,
+        indkey,
+        indexprs,
+        indpred
+    FROM rsduck_catalog.pg_index
+    ORDER BY indexrelid
+    "
+    .to_string()
+}
+
+fn pg_constraint_sql() -> String {
+    "
+    SELECT
+        CAST(con.oid AS VARCHAR) AS oid,
+        con.conname,
+        CAST(con.connamespace AS VARCHAR) AS connamespace,
+        con.contype,
+        CAST(con.conrelid AS VARCHAR) AS conrelid,
+        CAST(con.conindid AS VARCHAR) AS conindid,
+        con.conkey,
+        CAST(con.confrelid AS VARCHAR) AS confrelid,
+        con.confkey,
+        CASE WHEN con.convalidated THEN 't' ELSE 'f' END AS convalidated,
+        con.conbin,
+        n.nspname AS constraint_schema,
+        con.conname AS constraint_name,
+        tn.nspname AS table_schema,
+        tc.relname AS table_name,
+        CASE con.contype
+            WHEN 'p' THEN 'PRIMARY KEY'
+            WHEN 'u' THEN 'UNIQUE'
+            WHEN 'c' THEN 'CHECK'
+            WHEN 'f' THEN 'FOREIGN KEY'
+            ELSE con.contype
+        END AS constraint_type
+    FROM rsduck_catalog.pg_constraint con
+    JOIN rsduck_catalog.pg_namespace n ON n.oid = con.connamespace
+    JOIN rsduck_catalog.pg_class tc ON tc.oid = con.conrelid
+    JOIN rsduck_catalog.pg_namespace tn ON tn.oid = tc.relnamespace
+    ORDER BY n.nspname, con.conname
+    "
+    .to_string()
+}
+
+fn pg_attrdef_sql() -> String {
+    "
+    SELECT
+        CAST(oid AS VARCHAR) AS oid,
+        CAST(adrelid AS VARCHAR) AS adrelid,
+        CAST(adnum AS VARCHAR) AS adnum,
+        adbin
+    FROM rsduck_catalog.pg_attrdef
+    ORDER BY adrelid, adnum
+    "
+    .to_string()
+}
+
+fn pg_depend_sql() -> String {
+    "
+    SELECT
+        CAST(classid AS VARCHAR) AS classid,
+        CAST(objid AS VARCHAR) AS objid,
+        CAST(objsubid AS VARCHAR) AS objsubid,
+        CAST(refclassid AS VARCHAR) AS refclassid,
+        CAST(refobjid AS VARCHAR) AS refobjid,
+        CAST(refobjsubid AS VARCHAR) AS refobjsubid,
+        deptype
+    FROM rsduck_catalog.pg_depend
+    ORDER BY classid, objid, refclassid, refobjid
+    "
+    .to_string()
+}
+
+fn pg_description_sql() -> String {
+    "
+    SELECT
+        CAST(objoid AS VARCHAR) AS objoid,
+        CAST(classoid AS VARCHAR) AS classoid,
+        CAST(objsubid AS VARCHAR) AS objsubid,
+        description
+    FROM rsduck_catalog.pg_description
+    ORDER BY objoid, objsubid
+    "
+    .to_string()
+}
+
+fn pg_views_sql() -> String {
+    "
+    SELECT
+        n.nspname AS schemaname,
+        c.relname AS viewname,
+        'admin' AS viewowner,
+        ext.generated_sql AS definition
+    FROM rsduck_catalog.pg_class c
+    JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    WHERE c.status = 'active'
+      AND c.relkind = 'v'
+      AND ext.visibility = 'user'
+    ORDER BY n.nspname, c.relname
+    "
+    .to_string()
+}
+
+fn pg_indexes_sql() -> String {
+    "
+    SELECT
+        tn.nspname AS schemaname,
+        tc.relname AS tablename,
+        inx.relname AS indexname,
+        '' AS tablespace,
+        'CREATE INDEX ' || inx.relname || ' ON ' || tn.nspname || '.' || tc.relname AS indexdef
+    FROM rsduck_catalog.pg_index i
+    JOIN rsduck_catalog.pg_class inx ON inx.oid = i.indexrelid
+    JOIN rsduck_catalog.pg_class tc ON tc.oid = i.indrelid
+    JOIN rsduck_catalog.pg_namespace tn ON tn.oid = tc.relnamespace
+    ORDER BY tn.nspname, tc.relname, inx.relname
     "
     .to_string()
 }
@@ -587,7 +755,7 @@ mod tests {
 
     #[test]
     fn navicat_datlastsysoid_probe_returns_pg_compat_row() {
-        let result = compat_result("SELECT DISTINCT datlastsysoid FROM pg_database;")
+        let result = compat_result("SELECT DISTINCT datlastsysoid FROM pg_database;", "admin")
             .expect("compat result");
 
         match result {
@@ -601,12 +769,12 @@ mod tests {
 
     #[test]
     fn regular_sql_is_not_intercepted() {
-        assert!(compat_result("SELECT * FROM kline_day").is_none());
+        assert!(compat_result("SELECT * FROM kline_day", "admin").is_none());
     }
 
     #[test]
     fn navicat_datestyle_probe_returns_pg_compat_row() {
-        let result = compat_result("SHOW DateStyle;").expect("compat result");
+        let result = compat_result("SHOW DateStyle;", "admin").expect("compat result");
 
         match result {
             SqlResult::Query { columns, rows } => {
@@ -626,6 +794,7 @@ mod tests {
             FROM pg_database d
             LEFT JOIN pg_shdescription des ON des.objoid = d.oid
             ",
+            "admin",
         )
         .expect("compat result");
 
@@ -633,7 +802,7 @@ mod tests {
             SqlResult::Query { columns, rows } => {
                 assert_eq!(&columns[0..3], ["oid", "databasename", "databaseowner"]);
                 assert_eq!(rows[0][1], "postgres");
-                assert_eq!(rows[0][2], "postgres");
+                assert_eq!(rows[0][2], "admin");
             }
             SqlResult::Execute { .. } => panic!("expected query result"),
         }
@@ -641,7 +810,7 @@ mod tests {
 
     #[test]
     fn pg_session_setting_probes_are_accepted() {
-        let show_result = compat_result("SHOW server_version;").expect("compat result");
+        let show_result = compat_result("SHOW server_version;", "admin").expect("compat result");
         match show_result {
             SqlResult::Query { columns, rows } => {
                 assert_eq!(columns, vec!["server_version"]);
@@ -651,7 +820,8 @@ mod tests {
         }
 
         let setting_result =
-            compat_result("SELECT current_setting('server_version_num');").expect("compat result");
+            compat_result("SELECT current_setting('server_version_num');", "admin")
+                .expect("compat result");
         match setting_result {
             SqlResult::Query { columns, rows } => {
                 assert_eq!(columns, vec!["current_setting"]);
@@ -660,7 +830,8 @@ mod tests {
             SqlResult::Execute { .. } => panic!("expected query result"),
         }
 
-        let set_result = compat_result("SET extra_float_digits = 3;").expect("compat result");
+        let set_result =
+            compat_result("SET extra_float_digits = 3;", "admin").expect("compat result");
         match set_result {
             SqlResult::Execute {
                 command,
@@ -674,10 +845,26 @@ mod tests {
     }
 
     #[test]
+    fn current_user_uses_authenticated_session_user() {
+        let result = compat_result("SELECT current_user;", "alice").expect("compat result");
+        match result {
+            SqlResult::Query { columns, rows } => {
+                assert_eq!(columns, vec!["current_user"]);
+                assert_eq!(rows, vec![vec!["alice"]]);
+            }
+            SqlResult::Execute { .. } => panic!("expected query result"),
+        }
+    }
+
+    #[test]
     fn pg_class_rewrite_returns_duckdb_tables() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE kline_day(code VARCHAR, close DOUBLE);")
-            .unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE kline_day(code VARCHAR, close DOUBLE)",
+        )
+        .unwrap();
 
         let sql = rewrite_sql(
             "
@@ -699,8 +886,12 @@ mod tests {
     #[test]
     fn pg_attribute_rewrite_returns_duckdb_columns() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE kline_day(code VARCHAR, close DOUBLE);")
-            .unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE kline_day(code VARCHAR, close DOUBLE)",
+        )
+        .unwrap();
 
         let sql = rewrite_sql(
             "
@@ -719,10 +910,34 @@ mod tests {
     }
 
     #[test]
+    fn pg_index_rewrite_returns_catalog_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE kline_day(code VARCHAR, close DOUBLE)",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE INDEX idx_kline_day_code ON kline_day(code)",
+        )
+        .unwrap();
+
+        let sql = rewrite_sql("SELECT indexrelid, indrelid FROM pg_catalog.pg_index")
+            .expect("rewrite sql");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
+
+        let indexrelid: String = conn
+            .query_row(&sql, [], |row| row.get("indexrelid"))
+            .unwrap();
+        assert!(!indexrelid.is_empty());
+    }
+
+    #[test]
     fn pg_namespace_rewrite_returns_duckdb_schemas() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE kline_day(code VARCHAR);")
-            .unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
         let sql =
             rewrite_sql("SELECT oid, nspname FROM pg_catalog.pg_namespace").expect("rewrite sql");
         assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);

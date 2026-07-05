@@ -1,3 +1,4 @@
+mod catalog;
 mod config;
 mod db;
 mod pg_compat;
@@ -6,12 +7,11 @@ mod sql_route;
 mod web_server;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u64) {
     let base = Path::new(base_dir);
@@ -86,23 +86,7 @@ async fn main() {
     });
 
     if cfg.web.enabled {
-        let pg_bind_for_web = cfg.pg.bind.clone();
-        let pg_client = loop {
-            match web_server::create_pg_client(&pg_bind_for_web).await {
-                Ok(client) => break client,
-                Err(e) => {
-                    warn!("Waiting for pg_server... ({e})");
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        };
-        info!("Web console PG client connected to {}", pg_bind_for_web);
-
-        let app = web_server::web_router(
-            Arc::new(pg_client),
-            cfg.snapshot.dir.clone(),
-            cfg.snapshot.prefix.clone(),
-        );
+        let app = web_server::web_router(cfg.snapshot.dir.clone(), cfg.snapshot.prefix.clone());
         let shutdown_snapshot_dir = cfg.snapshot.dir.clone();
         let shutdown_snapshot_prefix = cfg.snapshot.prefix.clone();
         let listener = TokioTcpListener::bind(&cfg.web.bind)

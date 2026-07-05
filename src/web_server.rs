@@ -1,14 +1,16 @@
 use axum::{
     extract::{Json, State},
-    http::header,
-    response::{Html, IntoResponse},
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 #[derive(Debug, Deserialize)]
 pub struct SqlReq {
@@ -27,31 +29,20 @@ pub struct SqlResp {
 
 #[derive(Clone)]
 pub struct WebState {
-    pub pg_client: Arc<Client>,
     pub snapshot_dir: Arc<String>,
     pub snapshot_prefix: Arc<String>,
 }
 
-pub async fn create_pg_client(pg_bind: &str) -> Result<Client, tokio_postgres::Error> {
-    let (host, port) = pg_bind
-        .rsplit_once(':')
-        .expect("pg bind must be host:port format");
-    let mut config = tokio_postgres::Config::new();
-    config
-        .host(host)
-        .port(port.parse().expect("invalid pg port"));
+async fn sql_handler(headers: HeaderMap, Json(req): Json<SqlReq>) -> Json<SqlResp> {
+    let Some((username, _)) = parse_basic_auth(&headers) else {
+        return Json(SqlResp {
+            columns: vec![],
+            rows: vec![],
+            success: false,
+            msg: "authentication required".into(),
+        });
+    };
 
-    let (client, connection) = config.connect(NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!("web console pg connection lost: {e}");
-        }
-    });
-
-    Ok(client)
-}
-
-async fn sql_handler(State(state): State<WebState>, Json(req): Json<SqlReq>) -> Json<SqlResp> {
     let sql = req.sql.trim().to_string();
     if sql.is_empty() {
         return Json(SqlResp {
@@ -64,37 +55,22 @@ async fn sql_handler(State(state): State<WebState>, Json(req): Json<SqlReq>) -> 
 
     let sql = paged_sql(&sql, req.page, req.page_size);
 
-    match state.pg_client.simple_query(&sql).await {
-        Ok(messages) => {
-            let mut columns = Vec::new();
-            let mut rows = Vec::new();
-            let mut last_msg = String::from("ok");
-
-            for msg in messages {
-                match msg {
-                    SimpleQueryMessage::Row(row) => {
-                        if columns.is_empty() {
-                            columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-                        }
-                        let line = (0..row.len())
-                            .map(|i| row.get(i).unwrap_or("").to_string())
-                            .collect();
-                        rows.push(line);
-                    }
-                    SimpleQueryMessage::CommandComplete(affected) => {
-                        last_msg = format!("{affected} row(s)");
-                    }
-                    _ => {}
-                }
-            }
-
-            Json(SqlResp {
-                columns,
-                rows,
-                success: true,
-                msg: last_msg,
-            })
-        }
+    match crate::db::execute_sql_as(username, sql).await {
+        Ok(crate::db::SqlResult::Query { columns, rows }) => Json(SqlResp {
+            columns,
+            rows,
+            success: true,
+            msg: "ok".into(),
+        }),
+        Ok(crate::db::SqlResult::Execute {
+            command,
+            affected_rows,
+        }) => Json(SqlResp {
+            columns: vec![],
+            rows: vec![],
+            success: true,
+            msg: format!("{command} {affected_rows} row(s)"),
+        }),
         Err(e) => Json(SqlResp {
             columns: vec![],
             rows: vec![],
@@ -129,11 +105,23 @@ async fn codemirror_js() -> impl IntoResponse {
     )
 }
 
-async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
+async fn snapshot_handler(State(state): State<WebState>, headers: HeaderMap) -> Json<SqlResp> {
+    let Some((username, _)) = parse_basic_auth(&headers) else {
+        return Json(SqlResp {
+            columns: vec![],
+            rows: vec![],
+            success: false,
+            msg: "authentication required".into(),
+        });
+    };
     let t0 = Instant::now();
 
-    match crate::db::save_snapshot(state.snapshot_dir.as_str(), state.snapshot_prefix.as_str())
-        .await
+    match crate::db::save_snapshot_as(
+        username,
+        state.snapshot_dir.as_str(),
+        state.snapshot_prefix.as_str(),
+    )
+    .await
     {
         Ok(path) => Json(SqlResp {
             columns: vec![],
@@ -150,17 +138,46 @@ async fn snapshot_handler(State(state): State<WebState>) -> Json<SqlResp> {
     }
 }
 
-pub fn web_router(pg_client: Arc<Client>, snapshot_dir: String, snapshot_prefix: String) -> Router {
+pub fn web_router(snapshot_dir: String, snapshot_prefix: String) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/assets/codemirror.bundle.js", get(codemirror_js))
         .route("/sql", post(sql_handler))
         .route("/snapshot", post(snapshot_handler))
+        .layer(middleware::from_fn(web_auth_middleware))
         .with_state(WebState {
-            pg_client,
             snapshot_dir: Arc::new(snapshot_dir),
             snapshot_prefix: Arc::new(snapshot_prefix),
         })
+}
+
+async fn web_auth_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
+    let Some((username, password)) = parse_basic_auth(req.headers()) else {
+        return web_unauthorized();
+    };
+
+    match crate::db::authenticate_user(username, password).await {
+        Ok(()) => next.run(req).await,
+        Err(_) => web_unauthorized(),
+    }
+}
+
+fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = value.strip_prefix("Basic ")?;
+    let decoded = BASE64_STANDARD.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+fn web_unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Basic realm=\"rsduck\"")],
+        "authentication required",
+    )
+        .into_response()
 }
 
 const CODEMIRROR_JS: &str = include_str!("../web/dist/codemirror.bundle.js");
@@ -580,3 +597,23 @@ loadTables().then(() => run());
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::parse_basic_auth;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn parses_basic_auth_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic YWRtaW46YWRtaW4="),
+        );
+
+        assert_eq!(
+            parse_basic_auth(&headers),
+            Some(("admin".to_string(), "admin".to_string()))
+        );
+    }
+}

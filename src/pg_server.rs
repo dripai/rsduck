@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{stream, Sink};
-use pgwire::api::auth::noop::NoopStartupHandler;
+use futures::{stream, Sink, SinkExt};
+use pgwire::api::auth::{
+    finish_authentication, save_startup_parameters_to_metadata, ServerParameterProvider,
+    StartupHandler,
+};
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
@@ -12,9 +16,11 @@ use pgwire::api::results::{
     QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::NoopQueryParser;
-use pgwire::api::{ClientInfo, PgWireHandlerFactory, Type};
-use pgwire::error::{PgWireError, PgWireResult};
-use pgwire::messages::PgWireBackendMessage;
+use pgwire::api::{ClientInfo, PgWireConnectionState, PgWireHandlerFactory, Type, METADATA_USER};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::response::ErrorResponse;
+use pgwire::messages::startup::Authentication;
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -23,13 +29,33 @@ use crate::db::SqlResult;
 
 pub struct DuckdbProcessor {
     query_parser: Arc<NoopQueryParser>,
+    parameters: Arc<RsduckServerParameterProvider>,
 }
 
 impl DuckdbProcessor {
     pub fn new() -> Self {
         Self {
             query_parser: Arc::new(NoopQueryParser::new()),
+            parameters: Arc::new(RsduckServerParameterProvider),
         }
+    }
+}
+
+#[derive(Debug)]
+struct RsduckServerParameterProvider;
+
+impl ServerParameterProvider for RsduckServerParameterProvider {
+    fn server_parameters<C>(&self, _client: &C) -> Option<HashMap<String, String>>
+    where
+        C: ClientInfo,
+    {
+        let mut params = HashMap::new();
+        params.insert("server_version".to_string(), "14.0".to_string());
+        params.insert("server_encoding".to_string(), "UTF8".to_string());
+        params.insert("client_encoding".to_string(), "UTF8".to_string());
+        params.insert("DateStyle".to_string(), "ISO, MDY".to_string());
+        params.insert("integer_datetimes".to_string(), "on".to_string());
+        Some(params)
     }
 }
 
@@ -62,24 +88,93 @@ fn exec_to_response<'a>(command: &str, affected_rows: usize) -> Response<'a> {
     Response::Execution(Tag::new(command).with_rows(affected_rows))
 }
 
-async fn execute_pg_sql(sql: String) -> Result<SqlResult, String> {
-    if let Some(result) = crate::pg_compat::compat_result(&sql) {
+async fn execute_pg_sql(sql: String, current_user: &str) -> Result<SqlResult, String> {
+    if let Some(result) = crate::pg_compat::compat_result(&sql, current_user) {
         return Ok(result);
     }
     if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(&sql) {
         return crate::db::execute_sql(rewritten_sql).await;
     }
 
-    crate::db::execute_sql(sql).await
+    crate::catalog::guard_external_sql(&sql)?;
+    crate::catalog::reject_unhandled_catalog_projection(&sql)?;
+    crate::db::execute_sql_as(current_user.to_string(), sql).await
 }
 
-impl NoopStartupHandler for DuckdbProcessor {}
+#[async_trait]
+impl StartupHandler for DuckdbProcessor {
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: PgWireFrontendMessage,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        match message {
+            PgWireFrontendMessage::Startup(ref startup) => {
+                save_startup_parameters_to_metadata(client, startup);
+                client.set_state(PgWireConnectionState::AuthenticationInProgress);
+                client
+                    .send(PgWireBackendMessage::Authentication(
+                        Authentication::CleartextPassword,
+                    ))
+                    .await?;
+            }
+            PgWireFrontendMessage::PasswordMessageFamily(password_message) => {
+                let password = password_message.into_password()?.password;
+                let username = client
+                    .metadata()
+                    .get(METADATA_USER)
+                    .cloned()
+                    .unwrap_or_default();
+                if username.is_empty() {
+                    send_auth_error(client, "Missing user in startup packet").await?;
+                    return Ok(());
+                }
+
+                match crate::db::authenticate_user(username, password).await {
+                    Ok(()) => {
+                        finish_authentication(client, self.parameters.as_ref()).await?;
+                    }
+                    Err(_) => {
+                        send_auth_error(client, "Password authentication failed").await?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+async fn send_auth_error<C>(client: &mut C, message: &str) -> PgWireResult<()>
+where
+    C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    let error_info = ErrorInfo::new(
+        "FATAL".to_string(),
+        "28P01".to_string(),
+        message.to_string(),
+    );
+    client
+        .feed(PgWireBackendMessage::ErrorResponse(ErrorResponse::from(
+            error_info,
+        )))
+        .await?;
+    client.close().await?;
+    Ok(())
+}
 
 #[async_trait]
 impl SimpleQueryHandler for DuckdbProcessor {
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         query: &'a str,
     ) -> PgWireResult<Vec<Response<'a>>>
     where
@@ -92,7 +187,12 @@ impl SimpleQueryHandler for DuckdbProcessor {
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        match execute_pg_sql(sql).await.map_err(|e| {
+        let current_user = client
+            .metadata()
+            .get(METADATA_USER)
+            .map(|value| value.as_str())
+            .unwrap_or("admin");
+        match execute_pg_sql(sql, current_user).await.map_err(|e| {
             PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
         })? {
             SqlResult::Query { columns, rows } => Ok(vec![query_to_response(columns, rows)?]),
@@ -137,7 +237,7 @@ impl ExtendedQueryHandler for DuckdbProcessor {
 
     async fn do_query<'a, C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         portal: &'a Portal<Self::Statement>,
         _max_rows: usize,
     ) -> PgWireResult<Response<'a>>
@@ -146,7 +246,12 @@ impl ExtendedQueryHandler for DuckdbProcessor {
     {
         let sql = portal.statement.statement.to_string();
 
-        match execute_pg_sql(sql).await.map_err(|e| {
+        let current_user = client
+            .metadata()
+            .get(METADATA_USER)
+            .map(|value| value.as_str())
+            .unwrap_or("admin");
+        match execute_pg_sql(sql, current_user).await.map_err(|e| {
             PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
         })? {
             SqlResult::Query { columns, rows } => query_to_response(columns, rows),

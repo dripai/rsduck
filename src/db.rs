@@ -28,9 +28,20 @@ pub enum SqlResult {
 
 enum SqlCommand {
     Run {
+        username: String,
         sql: String,
         route: SqlRoute,
         command: String,
+        resp: oneshot::Sender<Result<SqlResult, String>>,
+    },
+    Authenticate {
+        username: String,
+        password: String,
+        resp: oneshot::Sender<Result<(), String>>,
+    },
+    PrivilegeFunction {
+        username: String,
+        sql: String,
         resp: oneshot::Sender<Result<SqlResult, String>>,
     },
     Shutdown,
@@ -38,6 +49,7 @@ enum SqlCommand {
 
 enum SnapshotCommand {
     Save {
+        username: Option<String>,
         dir: String,
         prefix: String,
         resp: oneshot::Sender<Result<String, String>>,
@@ -114,21 +126,31 @@ pub fn init_db(snapshot_dir: Option<&str>, cfg: &DbConfig) {
 }
 
 pub async fn execute_sql(sql: String) -> Result<SqlResult, String> {
+    execute_sql_as("admin".to_string(), sql).await
+}
+
+pub async fn execute_sql_as(username: String, sql: String) -> Result<SqlResult, String> {
     let sql_trimmed = sql.trim().to_string();
     if sql_trimmed.is_empty() {
         return Err("empty sql".into());
+    }
+
+    if crate::catalog::looks_like_privilege_function(&sql_trimmed) {
+        return engine()
+            .evaluate_privilege_function(username, sql_trimmed)
+            .await;
     }
 
     let decision = route_sql(&sql_trimmed)?;
     match decision.route {
         SqlRoute::Read => {
             engine()
-                .query(sql_trimmed, decision.route, decision.command)
+                .query(username, sql_trimmed, decision.route, decision.command)
                 .await
         }
         SqlRoute::Write => {
             engine()
-                .execute(sql_trimmed, decision.route, decision.command)
+                .execute(username, sql_trimmed, decision.route, decision.command)
                 .await
         }
     }
@@ -136,8 +158,26 @@ pub async fn execute_sql(sql: String) -> Result<SqlResult, String> {
 
 pub async fn save_snapshot(snapshot_dir: &str, snapshot_prefix: &str) -> Result<String, String> {
     engine()
-        .save_snapshot(snapshot_dir.to_string(), snapshot_prefix.to_string())
+        .save_snapshot(None, snapshot_dir.to_string(), snapshot_prefix.to_string())
         .await
+}
+
+pub async fn save_snapshot_as(
+    username: String,
+    snapshot_dir: &str,
+    snapshot_prefix: &str,
+) -> Result<String, String> {
+    engine()
+        .save_snapshot(
+            Some(username),
+            snapshot_dir.to_string(),
+            snapshot_prefix.to_string(),
+        )
+        .await
+}
+
+pub async fn authenticate_user(username: String, password: String) -> Result<(), String> {
+    engine().authenticate(username, password).await
 }
 
 pub fn shutdown_workers() {
@@ -153,26 +193,34 @@ fn engine() -> &'static DbEngine {
 impl DbEngine {
     async fn query(
         &self,
+        username: String,
         sql: String,
         route: SqlRoute,
         command: String,
     ) -> Result<SqlResult, String> {
         let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
-        send_sql(&self.read_txs[idx], sql, route, command, "read").await
+        send_sql(&self.read_txs[idx], username, sql, route, command, "read").await
     }
 
     async fn execute(
         &self,
+        username: String,
         sql: String,
         route: SqlRoute,
         command: String,
     ) -> Result<SqlResult, String> {
-        send_sql(&self.write_tx, sql, route, command, "write").await
+        send_sql(&self.write_tx, username, sql, route, command, "write").await
     }
 
-    async fn save_snapshot(&self, dir: String, prefix: String) -> Result<String, String> {
+    async fn save_snapshot(
+        &self,
+        username: Option<String>,
+        dir: String,
+        prefix: String,
+    ) -> Result<String, String> {
         let (resp_tx, resp_rx) = oneshot::channel();
         match self.snapshot_tx.try_send(SnapshotCommand::Save {
+            username,
             dir,
             prefix,
             resp: resp_tx,
@@ -182,6 +230,42 @@ impl DbEngine {
                 .unwrap_or_else(|_| Err("snapshot worker stopped".into())),
             Err(TrySendError::Full(_)) => Err("snapshot queue is full".into()),
             Err(TrySendError::Disconnected(_)) => Err("snapshot worker stopped".into()),
+        }
+    }
+
+    async fn authenticate(&self, username: String, password: String) -> Result<(), String> {
+        let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self.read_txs[idx].try_send(SqlCommand::Authenticate {
+            username,
+            password,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err("read worker stopped".into())),
+            Err(TrySendError::Full(_)) => Err("read queue is full".into()),
+            Err(TrySendError::Disconnected(_)) => Err("read worker stopped".into()),
+        }
+    }
+
+    async fn evaluate_privilege_function(
+        &self,
+        username: String,
+        sql: String,
+    ) -> Result<SqlResult, String> {
+        let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self.read_txs[idx].try_send(SqlCommand::PrivilegeFunction {
+            username,
+            sql,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err("read worker stopped".into())),
+            Err(TrySendError::Full(_)) => Err("read queue is full".into()),
+            Err(TrySendError::Disconnected(_)) => Err("read worker stopped".into()),
         }
     }
 
@@ -204,6 +288,7 @@ impl DbEngine {
 
 async fn send_sql(
     tx: &SyncSender<SqlCommand>,
+    username: String,
     sql: String,
     route: SqlRoute,
     command: String,
@@ -211,6 +296,7 @@ async fn send_sql(
 ) -> Result<SqlResult, String> {
     let (resp_tx, resp_rx) = oneshot::channel();
     match tx.try_send(SqlCommand::Run {
+        username,
         sql,
         route,
         command,
@@ -242,13 +328,50 @@ where
             while let Ok(command) = rx.recv() {
                 match command {
                     SqlCommand::Run {
+                        username,
                         sql,
                         route,
                         command,
                         resp,
                     } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            execute_sql_blocking(&conn, &sql, route, &command, max_result_rows)
+                            execute_sql_blocking(
+                                &conn,
+                                &username,
+                                &sql,
+                                route,
+                                &command,
+                                max_result_rows,
+                            )
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result);
+                    }
+                    SqlCommand::Authenticate {
+                        username,
+                        password,
+                        resp,
+                    } => {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            crate::catalog::authenticate_user(&conn, &username, &password)
+                                .map(|_| ())
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result);
+                    }
+                    SqlCommand::PrivilegeFunction {
+                        username,
+                        sql,
+                        resp,
+                    } => {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let (column, allowed) = crate::catalog::evaluate_privilege_function(
+                                &conn, &username, &sql,
+                            )?;
+                            Ok(SqlResult::Query {
+                                columns: vec![column],
+                                rows: vec![vec![if allowed { "t" } else { "f" }.to_string()]],
+                            })
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result);
@@ -277,8 +400,16 @@ where
             info!("DuckDB snapshot worker started: {thread_log_name}");
             while let Ok(command) = rx.recv() {
                 match command {
-                    SnapshotCommand::Save { dir, prefix, resp } => {
+                    SnapshotCommand::Save {
+                        username,
+                        dir,
+                        prefix,
+                        resp,
+                    } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
+                            if let Some(username) = username.as_deref() {
+                                crate::catalog::authorize_snapshot(&conn, username)?;
+                            }
                             save_snapshot_blocking(&conn, &dir, &prefix)
                         }))
                         .unwrap_or_else(|e| Err(format!("snapshot worker panicked: {e:?}")));
@@ -303,12 +434,16 @@ fn restore_or_initialize(
         conn.execute_batch(&import_database_sql(path))
             .map_err(|e| format!("import snapshot failed: {e}"))?;
         info!("Snapshot restored in {:.2?}", t0.elapsed());
+        crate::catalog::validate_after_start(conn)?;
         return Ok(());
     }
+
+    crate::catalog::bootstrap_fresh(conn)?;
 
     let init_sql_path = init_sql_path.trim();
     if init_sql_path.is_empty() {
         info!("No snapshot dir found and init_sql is empty, starting empty in-memory DuckDB");
+        crate::catalog::validate_after_start(conn)?;
         return Ok(());
     }
 
@@ -320,14 +455,15 @@ fn restore_or_initialize(
     let t0 = Instant::now();
     info!("Initializing DuckDB from init_sql: {}", init_sql_path);
     let sql = fs::read_to_string(path).map_err(|e| format!("read init_sql failed: {e}"))?;
-    conn.execute_batch(&sql)
-        .map_err(|e| format!("execute init_sql failed: {e}"))?;
+    crate::catalog::execute_init_sql(conn, &sql)?;
+    crate::catalog::validate_after_start(conn)?;
     info!("init_sql executed in {:.2?}", t0.elapsed());
     Ok(())
 }
 
 fn execute_sql_blocking(
     conn: &Connection,
+    username: &str,
     sql: &str,
     route: SqlRoute,
     command: &str,
@@ -338,10 +474,19 @@ fn execute_sql_blocking(
         return Err("empty sql".into());
     }
 
+    crate::catalog::authorize_sql(conn, username, sql_trimmed)?;
+
     match route {
         SqlRoute::Read => query_sql_blocking(conn, sql_trimmed, max_result_rows),
         SqlRoute::Write => {
-            let affected_rows = conn.execute(sql_trimmed, []).map_err(|e| e.to_string())?;
+            let affected_rows = match crate::catalog::execute_catalog_aware_write_as(
+                conn,
+                username,
+                sql_trimmed,
+            )? {
+                Some(affected_rows) => affected_rows,
+                None => conn.execute(sql_trimmed, []).map_err(|e| e.to_string())?,
+            };
             Ok(SqlResult::Execute {
                 command: command.to_string(),
                 affected_rows,
@@ -590,15 +735,21 @@ mod tests {
         ));
 
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE table_a(id INTEGER, name VARCHAR);
-            INSERT INTO table_a VALUES (1, 'alpha'), (2, 'beta');
-            CREATE TABLE table_b(id INTEGER, amount DOUBLE);
-            INSERT INTO table_b VALUES (10, 1.5);
-            ",
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE table_a(id INTEGER, name VARCHAR)",
         )
         .unwrap();
+        conn.execute_batch("INSERT INTO table_a VALUES (1, 'alpha'), (2, 'beta');")
+            .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE table_b(id INTEGER, amount DOUBLE)",
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO table_b VALUES (10, 1.5);")
+            .unwrap();
 
         let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
         let restored = Connection::open_in_memory().unwrap();
