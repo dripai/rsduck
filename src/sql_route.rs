@@ -15,6 +15,13 @@ pub struct SqlRouteDecision {
 }
 
 pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
+    if crate::catalog::looks_like_managed_partition_create(sql) {
+        return Ok(SqlRouteDecision {
+            route: SqlRoute::Write,
+            command: "CREATE".to_string(),
+        });
+    }
+
     let dialect = DuckDbDialect {};
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| format!("sql parse failed: {e}"))?;
@@ -219,6 +226,16 @@ mod tests {
     fn routes_ddl_and_dml_to_write() {
         assert_eq!(
             route_sql("CREATE TABLE t(id INTEGER)").unwrap().route,
+            SqlRoute::Write
+        );
+        assert_eq!(
+            route_sql(
+                "CREATE TABLE logs(id BIGINT, access_time TIMESTAMP)
+                 PARTITION BY RANGE (access_time)
+                 WITH (partition_unit = 'day', retention = '30')"
+            )
+            .unwrap()
+            .route,
             SqlRoute::Write
         );
         assert_eq!(

@@ -884,6 +884,32 @@ mod tests {
     }
 
     #[test]
+    fn pg_class_rewrite_returns_partitioned_table_relkind() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+
+        let sql =
+            rewrite_sql("SELECT relname, relkind FROM pg_catalog.pg_class").expect("rewrite sql");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
+
+        let relkind: String = conn
+            .query_row(
+                &format!("SELECT relkind FROM ({sql}) WHERE relname = 'ods_access_log'"),
+                [],
+                |row| row.get("relkind"),
+            )
+            .unwrap();
+        assert_eq!(relkind, "p");
+    }
+
+    #[test]
     fn pg_attribute_rewrite_returns_duckdb_columns() {
         let conn = Connection::open_in_memory().unwrap();
         crate::catalog::bootstrap_fresh(&conn).unwrap();

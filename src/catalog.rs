@@ -1,13 +1,15 @@
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
 use duckdb::Connection;
 use rand_core::OsRng;
 use sqlparser::ast::{
-    AlterTable, AlterTableOperation, ColumnOption, CommentObject, CreateIndex, CreateTable,
-    CreateView, Expr, ObjectName, ObjectNamePart, ObjectType, SchemaName, Statement,
-    TableConstraint,
+    Action, AlterTable, AlterTableOperation, AlterUser, ColumnOption, CommentObject, CreateIndex,
+    CreateTable, CreateUser, CreateView, Expr, Grant, GrantObjects, GranteeName, GranteesType,
+    Insert, ObjectName, ObjectNamePart, ObjectType, Privileges, Revoke, SchemaName, SetExpr,
+    Statement, TableConstraint, TableObject, Value,
 };
-use sqlparser::dialect::DuckDbDialect;
+use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use tracing::warn;
 
@@ -45,6 +47,38 @@ struct RelationMeta {
     reltype: i64,
     relkind: String,
     relispartition: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedPartitionCreate {
+    base_sql: String,
+    partition_key: String,
+    partition_unit: String,
+    retention_count: i32,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionedRelation {
+    oid: i64,
+    schema: String,
+    name: String,
+    partition_key: String,
+    partition_key_type: String,
+    partition_unit: String,
+    columns: Vec<CatalogColumn>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionRoute {
+    partition_value: String,
+    route_ts: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionBounds {
+    value: String,
+    lower_bound: NaiveDateTime,
+    upper_bound: NaiveDateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +131,7 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
     }
 
     validate_physical_relations(conn)?;
+    validate_partitioned_relations(conn)?;
     Ok(())
 }
 
@@ -147,6 +182,189 @@ fn validate_physical_relations(conn: &Connection) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_partitioned_relations(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.oid, n.nspname, c.relname \
+             FROM rsduck_catalog.pg_class c \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.status = 'active' AND c.relkind = 'p' \
+             ORDER BY c.oid",
+        )
+        .map_err(|e| format!("prepare partitioned relation validation failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query partitioned relation validation failed: {e}"))?;
+    let mut parents = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read partitioned relation validation failed: {e}"))?
+    {
+        parents.push((
+            row.get::<_, i64>(0)
+                .map_err(|e| format!("read partitioned rel oid failed: {e}"))?,
+            row.get::<_, String>(1)
+                .map_err(|e| format!("read partitioned rel schema failed: {e}"))?,
+            row.get::<_, String>(2)
+                .map_err(|e| format!("read partitioned rel name failed: {e}"))?,
+        ));
+    }
+
+    for (parent_oid, schema, relname) in parents {
+        if let Err(reason) = validate_partitioned_relation(conn, parent_oid, &schema, &relname) {
+            warn!(
+                "Catalog partitioned relation unavailable after startup validation: {}.{}: {}",
+                schema, relname, reason
+            );
+            mark_relation_unavailable(conn, parent_oid, &reason)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_partitioned_relation(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    relname: &str,
+) -> Result<(), String> {
+    let partitions = active_partition_children(conn, parent_oid)?;
+    if partitions.is_empty() {
+        return Err("managed partitioned table has no active partitions".into());
+    }
+
+    let mut active_physical = Vec::with_capacity(partitions.len());
+    for partition in &partitions {
+        if partition.child_status != "active" {
+            let reason = format!(
+                "active partition child is not active: {}.{} status={}",
+                partition.schema, partition.relname, partition.child_status
+            );
+            mark_partition_failed(conn, parent_oid, partition.child_oid, &reason)?;
+            return Err(reason);
+        }
+        if let Err(reason) = validate_table_physical(
+            conn,
+            partition.child_oid,
+            &partition.schema,
+            &partition.relname,
+        ) {
+            mark_relation_unavailable(conn, partition.child_oid, &reason)?;
+            mark_partition_failed(conn, parent_oid, partition.child_oid, &reason)?;
+            return Err(format!(
+                "active partition child unavailable: {}.{}: {reason}",
+                partition.schema, partition.relname
+            ));
+        }
+        active_physical.push((partition.schema.as_str(), partition.relname.as_str()));
+    }
+
+    let expected_sql = partition_entrypoint_sql(schema, relname, &active_physical);
+    let generated_sql: String = conn
+        .query_row(
+            &format!(
+                "SELECT generated_sql FROM rsduck_catalog.rs_relation_ext WHERE relid = {parent_oid}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read partition entrypoint SQL failed: {e}"))?;
+
+    if generated_sql.trim() != expected_sql {
+        rebuild_partition_entrypoint(conn, parent_oid, &expected_sql)?;
+    } else if validate_view_physical(conn, parent_oid, schema, relname).is_err() {
+        rebuild_partition_entrypoint(conn, parent_oid, &expected_sql)?;
+    }
+    validate_view_physical(conn, parent_oid, schema, relname)
+}
+
+#[derive(Debug)]
+struct ActivePartitionChild {
+    child_oid: i64,
+    schema: String,
+    relname: String,
+    child_status: String,
+}
+
+fn active_partition_children(
+    conn: &Connection,
+    parent_oid: i64,
+) -> Result<Vec<ActivePartitionChild>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.child_relid, n.nspname, c.relname, c.status \
+             FROM rsduck_catalog.rs_partition p \
+             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE p.parent_relid = {parent_oid} AND p.status = 'active' \
+             ORDER BY p.is_null_partition, p.partition_value"
+        ))
+        .map_err(|e| format!("prepare active partition lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query active partition lookup failed: {e}"))?;
+    let mut partitions = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read active partition lookup failed: {e}"))?
+    {
+        partitions.push(ActivePartitionChild {
+            child_oid: row
+                .get(0)
+                .map_err(|e| format!("read active partition child oid failed: {e}"))?,
+            schema: row
+                .get(1)
+                .map_err(|e| format!("read active partition schema failed: {e}"))?,
+            relname: row
+                .get(2)
+                .map_err(|e| format!("read active partition relation failed: {e}"))?,
+            child_status: row
+                .get(3)
+                .map_err(|e| format!("read active partition child status failed: {e}"))?,
+        });
+    }
+    Ok(partitions)
+}
+
+fn rebuild_partition_entrypoint(
+    conn: &Connection,
+    parent_oid: i64,
+    expected_sql: &str,
+) -> Result<(), String> {
+    conn.execute(expected_sql, [])
+        .map_err(|e| format!("rebuild partition entrypoint failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_relation_ext \
+             SET generated_sql = '{}', updated_at = CURRENT_TIMESTAMP \
+             WHERE relid = {parent_oid}",
+            sql_string(expected_sql)
+        ),
+        [],
+    )
+    .map_err(|e| format!("record rebuilt partition entrypoint failed: {e}"))?;
+    Ok(())
+}
+
+fn mark_partition_failed(
+    conn: &Connection,
+    parent_oid: i64,
+    child_oid: i64,
+    reason: &str,
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_partition \
+             SET status = 'failed', error_message = '{}' \
+             WHERE parent_relid = {parent_oid} AND child_relid = {child_oid}",
+            sql_string(reason)
+        ),
+        [],
+    )
+    .map_err(|e| format!("mark partition failed failed: {e}"))?;
     Ok(())
 }
 
@@ -281,6 +499,9 @@ pub fn execute_catalog_aware_write_as(
     sql: &str,
 ) -> Result<Option<usize>, String> {
     let principal = principal_for_username(conn, username)?;
+    if let Some(partitioned) = parse_managed_partition_create(sql)? {
+        return create_range_partitioned_table(conn, &partitioned, principal.user_id).map(Some);
+    }
     let (statement, normalized_sql) = parse_one_statement(sql)?;
     execute_catalog_statement(conn, &statement, &normalized_sql, principal.user_id)
 }
@@ -293,10 +514,24 @@ pub fn guard_external_sql(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn looks_like_managed_partition_create(sql: &str) -> bool {
+    normalize_for_guard(sql).starts_with("create table ")
+        && find_keyword_phrase(sql, "partition by range").is_some()
+}
+
 pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(), String> {
     let principal = principal_for_username(conn, username)?;
     if principal.is_admin() {
         return Ok(());
+    }
+
+    if let Some(partitioned) = parse_managed_partition_create(sql)? {
+        let (statement, _) = parse_one_statement(&partitioned.base_sql)?;
+        let Statement::CreateTable(create_table) = statement else {
+            return Err("managed partitioned table base DDL must be CREATE TABLE".into());
+        };
+        let (schema, _) = relation_name(&create_table.name)?;
+        return require_schema_action(conn, &principal, &schema, "ddl");
     }
 
     let (statement, normalized_sql) = parse_one_statement(sql)?;
@@ -347,6 +582,10 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
             }
         }
         Statement::CreateSchema { .. } => require_system_action(conn, &principal, "manage_catalog"),
+        Statement::CreateUser(_)
+        | Statement::AlterUser(_)
+        | Statement::Grant(_)
+        | Statement::Revoke(_) => require_system_action(conn, &principal, "manage_user"),
         Statement::CreateTable(create_table) => {
             let (schema, _) = relation_name(&create_table.name)?;
             require_schema_action(conn, &principal, &schema, "ddl")
@@ -713,6 +952,12 @@ fn execute_catalog_statement(
             if_not_exists,
             ..
         } => create_schema(conn, schema_name, *if_not_exists, owner_user_id).map(Some),
+        Statement::CreateUser(create_user) => {
+            create_user_account(conn, create_user, sql, owner_user_id).map(Some)
+        }
+        Statement::AlterUser(alter_user) => {
+            alter_user_account(conn, alter_user, sql, owner_user_id).map(Some)
+        }
         Statement::CreateTable(create_table) => {
             create_table_relation(conn, create_table, sql, owner_user_id).map(Some)
         }
@@ -756,6 +1001,17 @@ fn execute_catalog_statement(
             sql,
         )
         .map(Some),
+        Statement::Insert(insert) => {
+            insert_partitioned_relation(conn, insert, sql).map(|affected| {
+                if affected == 0 {
+                    None
+                } else {
+                    Some(affected)
+                }
+            })
+        }
+        Statement::Grant(grant) => grant_privileges(conn, grant, sql, owner_user_id).map(Some),
+        Statement::Revoke(revoke) => revoke_privileges(conn, revoke, sql).map(Some),
         Statement::AlterSchema(_) | Statement::AlterIndex { .. } | Statement::AlterView { .. } => {
             Err(format!(
                 "catalog mutation is not implemented for this statement: {}",
@@ -801,6 +1057,116 @@ fn create_schema(
             .map_err(|e| format!("execute DuckDB CREATE SCHEMA failed: {e}"))?;
         finish_journal(conn, journal_id)?;
         Ok(0)
+    })
+}
+
+fn create_user_account(
+    conn: &Connection,
+    create_user: &CreateUser,
+    sql: &str,
+    owner_user_id: i64,
+) -> Result<usize, String> {
+    if create_user.or_replace {
+        return Err("CREATE OR REPLACE USER is not supported".into());
+    }
+    let username = create_user.name.value.trim();
+    validate_username(username)?;
+    let password = quoted_literals(sql)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "CREATE USER requires PASSWORD '<password>'".to_string())?;
+    let password_hash = hash_password(&password)?;
+
+    run_catalog_tx(conn, || {
+        if user_exists(conn, username)? {
+            if create_user.if_not_exists {
+                return Ok(0);
+            }
+            return Err(format!("user already exists: {username}"));
+        }
+        let user_id = allocate_oid(conn)?;
+        let journal_id = insert_journal(conn, "create_user", user_id, sql)?;
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, status, is_builtin, created_at, updated_at, last_login_at) \
+                 VALUES ({user_id}, '{}', '{}', 'argon2id', 'active', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+                sql_string(username),
+                sql_string(&password_hash)
+            ),
+            [],
+        )
+        .map_err(|e| format!("write rs_user failed: {e}"))?;
+        let reader_role = role_id_by_name(conn, "reader")?;
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.rs_user_role(user_id, role_id, granted_by, created_at) \
+                 VALUES ({user_id}, {reader_role}, {owner_user_id}, CURRENT_TIMESTAMP)"
+            ),
+            [],
+        )
+        .map_err(|e| format!("write default user role failed: {e}"))?;
+        finish_journal(conn, journal_id)?;
+        Ok(1)
+    })
+}
+
+fn alter_user_account(
+    conn: &Connection,
+    alter_user: &AlterUser,
+    sql: &str,
+    _owner_user_id: i64,
+) -> Result<usize, String> {
+    if alter_user.rename_to.is_some()
+        || alter_user.reset_password
+        || alter_user.abort_all_queries
+        || alter_user.add_role_delegation.is_some()
+        || alter_user.remove_role_delegation.is_some()
+        || alter_user.enroll_mfa
+        || alter_user.set_default_mfa_method.is_some()
+        || alter_user.remove_mfa_method.is_some()
+        || alter_user.modify_mfa_method.is_some()
+        || alter_user.add_mfa_method_otp.is_some()
+        || alter_user.set_policy.is_some()
+        || alter_user.unset_policy.is_some()
+        || !alter_user.set_tag.options.is_empty()
+        || !alter_user.unset_tag.is_empty()
+        || !alter_user.set_props.options.is_empty()
+        || !alter_user.unset_props.is_empty()
+    {
+        return Err("ALTER USER only supports PASSWORD changes".into());
+    }
+
+    let username = alter_user.name.value.trim();
+    validate_username(username)?;
+    let Some(password) = &alter_user.password else {
+        return Err("ALTER USER requires PASSWORD '<password>'".into());
+    };
+    let password = password
+        .password
+        .as_ref()
+        .ok_or_else(|| "ALTER USER PASSWORD NULL is not supported".to_string())?;
+    let password_hash = hash_password(password)?;
+
+    run_catalog_tx(conn, || {
+        let Some(user_id) = user_id_by_name_opt(conn, username)? else {
+            if alter_user.if_exists {
+                return Ok(0);
+            }
+            return Err(format!("user does not exist: {username}"));
+        };
+        let journal_id = insert_journal(conn, "alter_user_password", user_id, sql)?;
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.rs_user \
+                 SET password_hash = '{}', password_algo = 'argon2id', updated_at = CURRENT_TIMESTAMP \
+                 WHERE user_id = {user_id}",
+                sql_string(&password_hash)
+            ),
+            [],
+        )
+        .map_err(|e| format!("update user password failed: {e}"))?;
+        finish_journal(conn, journal_id)?;
+        Ok(1)
     })
 }
 
@@ -857,6 +1223,428 @@ fn create_table_relation(
         finish_journal(conn, journal_id)?;
         Ok(0)
     })
+}
+
+fn create_range_partitioned_table(
+    conn: &Connection,
+    partitioned: &ManagedPartitionCreate,
+    owner_user_id: i64,
+) -> Result<usize, String> {
+    let (statement, _) = parse_one_statement(&partitioned.base_sql)?;
+    let Statement::CreateTable(create_table) = statement else {
+        return Err("managed partitioned table base DDL must be CREATE TABLE".into());
+    };
+    if create_table.query.is_some() {
+        return Err("CREATE TABLE AS is not supported by managed partitioned table".into());
+    }
+    if create_table.temporary {
+        return Err("temporary managed partitioned table is not supported".into());
+    }
+    if !create_table.constraints.is_empty() {
+        return Err(
+            "table constraints on managed partitioned table are not implemented yet".into(),
+        );
+    }
+
+    let (schema, table) = relation_name(&create_table.name)?;
+    reject_reserved_schema(&schema)?;
+    let (partition_key_type, _) = validate_partition_key(
+        &create_table,
+        &partitioned.partition_key,
+        &partitioned.partition_unit,
+    )?;
+    let null_partition = physical_partition_name(&table, "_null");
+    let view_sql =
+        partition_entrypoint_sql(&schema, &table, &[("rsduck_internal", &null_partition)]);
+
+    run_catalog_tx(conn, || {
+        if relation_exists(conn, &schema, &table)? {
+            if create_table.if_not_exists {
+                return Ok(0);
+            }
+            return Err(format!("relation already exists: {schema}.{table}"));
+        }
+        if relation_exists(conn, "rsduck_internal", &null_partition)? {
+            return Err(format!(
+                "managed physical partition relation already exists: rsduck_internal.{null_partition}"
+            ));
+        }
+
+        ensure_user_schema_exists(conn, &schema)?;
+        let parent_oid = allocate_oid(conn)?;
+        let parent_type_oid = allocate_oid(conn)?;
+        let child_oid = allocate_oid(conn)?;
+        let child_type_oid = allocate_oid(conn)?;
+        let journal_id = insert_journal(
+            conn,
+            "create_range_partitioned_table",
+            parent_oid,
+            &partitioned.base_sql,
+        )?;
+
+        let create_null_sql = physical_partition_create_sql(&null_partition, &create_table);
+        conn.execute(&create_null_sql, [])
+            .map_err(|e| format!("execute DuckDB CREATE null partition failed: {e}"))?;
+        conn.execute(&view_sql, [])
+            .map_err(|e| format!("execute DuckDB CREATE partition entrypoint failed: {e}"))?;
+
+        let columns = load_duckdb_columns(conn, "rsduck_internal", &null_partition)?;
+        insert_relation_rows(
+            conn,
+            parent_oid,
+            parent_type_oid,
+            &schema,
+            &table,
+            "p",
+            "range_partitioned_table",
+            "user",
+            &view_sql,
+            &columns,
+            owner_user_id,
+        )?;
+        update_partition_relation_ext(
+            conn,
+            parent_oid,
+            &partitioned.partition_key,
+            &partition_key_type,
+            &partitioned.partition_unit,
+            partitioned.retention_count,
+            &view_sql,
+        )?;
+
+        insert_relation_rows(
+            conn,
+            child_oid,
+            child_type_oid,
+            "rsduck_internal",
+            &null_partition,
+            "r",
+            "physical_partition",
+            "internal",
+            "",
+            &columns,
+            owner_user_id,
+        )?;
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.pg_class \
+                 SET relispartition = TRUE, relpartbound = '_null' \
+                 WHERE oid = {child_oid}"
+            ),
+            [],
+        )
+        .map_err(|e| format!("mark null partition pg_class failed: {e}"))?;
+        update_partition_relation_ext(
+            conn,
+            child_oid,
+            &partitioned.partition_key,
+            &partition_key_type,
+            "null",
+            0,
+            "",
+        )?;
+
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.rs_partition(parent_relid, child_relid, partition_value, \
+                 partition_unit, lower_bound, upper_bound, is_null_partition, status, row_count, min_ts, \
+                 max_ts, checksum, created_at, activated_at, dropped_at, error_message) \
+                 VALUES ({parent_oid}, {child_oid}, '_null', 'null', NULL, NULL, TRUE, 'active', 0, \
+                 NULL, NULL, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, '')"
+            ),
+            [],
+        )
+        .map_err(|e| format!("write null partition metadata failed: {e}"))?;
+
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+                 VALUES ({PG_CLASS_CLASSOID}, {parent_oid}, 0, {PG_CLASS_CLASSOID}, {child_oid}, 0, 'n')"
+            ),
+            [],
+        )
+        .map_err(|e| format!("write partition dependency failed: {e}"))?;
+
+        finish_journal(conn, journal_id)?;
+        Ok(0)
+    })
+}
+
+fn insert_partitioned_relation(
+    conn: &Connection,
+    insert: &Insert,
+    sql: &str,
+) -> Result<usize, String> {
+    let TableObject::TableName(table_name) = &insert.table else {
+        return Ok(0);
+    };
+    let (schema, table) = relation_name(table_name)?;
+    reject_reserved_schema(&schema)?;
+    let Some(relation) = partitioned_relation(conn, &schema, &table)? else {
+        return Ok(0);
+    };
+    if insert.source.is_none() {
+        return Err("INSERT into managed partitioned table requires VALUES".into());
+    }
+    if !insert.assignments.is_empty()
+        || insert.returning.is_some()
+        || insert.on.is_some()
+        || insert.overwrite
+        || insert.partitioned.is_some()
+        || insert.format_clause.is_some()
+    {
+        return Err("unsupported INSERT form for managed partitioned table".into());
+    }
+
+    let target_columns = insert_target_columns(insert, &relation)?;
+    let partition_key_idx = target_columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case(&relation.partition_key));
+    let source = insert.source.as_ref().expect("source checked");
+    if source.with.is_some()
+        || source.order_by.is_some()
+        || source.limit_clause.is_some()
+        || source.fetch.is_some()
+        || !source.locks.is_empty()
+        || source.for_clause.is_some()
+        || source.settings.is_some()
+        || source.format_clause.is_some()
+        || !source.pipe_operators.is_empty()
+    {
+        return Err("INSERT into managed partitioned table supports VALUES only".into());
+    }
+    let SetExpr::Values(values) = source.body.as_ref() else {
+        return Err("INSERT into managed partitioned table supports VALUES only".into());
+    };
+
+    run_catalog_tx(conn, || {
+        let journal_id = insert_journal(conn, "insert_partitioned_rows", relation.oid, sql)?;
+        let mut groups: Vec<(String, Option<NaiveDateTime>, Vec<Vec<String>>)> = Vec::new();
+        for row in &values.rows {
+            if row.content.len() != target_columns.len() {
+                return Err(format!(
+                    "INSERT column count mismatch: target={}, row={}",
+                    target_columns.len(),
+                    row.content.len()
+                ));
+            }
+            let route = if let Some(idx) = partition_key_idx {
+                partition_route_for_expr(
+                    &row.content[idx],
+                    &relation.partition_key_type,
+                    &relation.partition_unit,
+                )
+            } else {
+                PartitionRoute {
+                    partition_value: "_null".to_string(),
+                    route_ts: None,
+                }
+            };
+            let mut exprs = row
+                .content
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if route.partition_value == "_null" {
+                if let Some(idx) = partition_key_idx {
+                    exprs[idx] = "NULL".to_string();
+                }
+            }
+
+            if let Some((_, existing_ts, rows)) = groups
+                .iter_mut()
+                .find(|(partition_value, _, _)| partition_value == &route.partition_value)
+            {
+                if existing_ts.is_none() {
+                    *existing_ts = route.route_ts;
+                }
+                rows.push(exprs);
+            } else {
+                groups.push((route.partition_value, route.route_ts, vec![exprs]));
+            }
+        }
+
+        let mut affected = 0usize;
+        for (partition_value, route_ts, rows) in groups {
+            let child_relname = ensure_active_partition(conn, &relation, &partition_value)?;
+            let values_sql = rows
+                .iter()
+                .map(|row| format!("({})", row.join(", ")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_sql = format!(
+                "INSERT INTO {} ({}) VALUES {values_sql}",
+                quote_qualified("rsduck_internal", &child_relname),
+                target_columns
+                    .iter()
+                    .map(|column| quote_ident(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            conn.execute(&insert_sql, [])
+                .map_err(|e| format!("insert partition rows failed: {e}"))?;
+            update_partition_stats(
+                conn,
+                relation.oid,
+                &partition_value,
+                rows.len() as i64,
+                route_ts,
+            )?;
+            affected += rows.len();
+        }
+
+        refresh_partition_entrypoint(conn, relation.oid, &relation.schema, &relation.name)?;
+        finish_journal(conn, journal_id)?;
+        Ok(affected)
+    })
+}
+
+fn partitioned_relation(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> Result<Option<PartitionedRelation>, String> {
+    let Some(meta) = find_relation_meta(conn, schema, table)? else {
+        return Ok(None);
+    };
+    if meta.relkind != "p" {
+        return Ok(None);
+    }
+    let (partition_key, partition_key_type, partition_unit): (String, String, String) = conn
+        .query_row(
+            &format!(
+                "SELECT partition_key, partition_key_type, partition_unit \
+                 FROM rsduck_catalog.rs_relation_ext \
+                 WHERE relid = {} AND managed_kind = 'range_partitioned_table'",
+                meta.oid
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("read partitioned relation metadata failed: {e}"))?;
+    Ok(Some(PartitionedRelation {
+        oid: meta.oid,
+        schema: schema.to_string(),
+        name: table.to_string(),
+        partition_key,
+        partition_key_type,
+        partition_unit,
+        columns: catalog_columns(conn, meta.oid)?,
+    }))
+}
+
+fn insert_target_columns(
+    insert: &Insert,
+    relation: &PartitionedRelation,
+) -> Result<Vec<String>, String> {
+    if insert.columns.is_empty() {
+        return Ok(relation
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect());
+    }
+    insert
+        .columns
+        .iter()
+        .map(single_name_part)
+        .map(|result| {
+            let column = result?;
+            if relation
+                .columns
+                .iter()
+                .any(|catalog_column| catalog_column.name.eq_ignore_ascii_case(&column))
+            {
+                Ok(column)
+            } else {
+                Err(format!("INSERT references unknown column: {column}"))
+            }
+        })
+        .collect()
+}
+
+fn partition_route_for_expr(
+    expr: &Expr,
+    partition_key_type: &str,
+    partition_unit: &str,
+) -> PartitionRoute {
+    let Some(dt) = partition_datetime_from_expr(expr, partition_key_type) else {
+        return PartitionRoute {
+            partition_value: "_null".to_string(),
+            route_ts: None,
+        };
+    };
+    PartitionRoute {
+        partition_value: partition_value_for_datetime(dt, partition_unit),
+        route_ts: Some(dt),
+    }
+}
+
+fn partition_datetime_from_expr(expr: &Expr, partition_key_type: &str) -> Option<NaiveDateTime> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::Null => None,
+            Value::SingleQuotedString(value)
+            | Value::TripleSingleQuotedString(value)
+            | Value::EscapedStringLiteral(value)
+            | Value::UnicodeStringLiteral(value) => {
+                parse_partition_datetime(value, partition_key_type)
+            }
+            _ => None,
+        },
+        Expr::TypedString(value) => match &value.value.value {
+            Value::SingleQuotedString(text)
+            | Value::TripleSingleQuotedString(text)
+            | Value::EscapedStringLiteral(text)
+            | Value::UnicodeStringLiteral(text) => {
+                parse_partition_datetime(text, partition_key_type)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_partition_datetime(value: &str, partition_key_type: &str) -> Option<NaiveDateTime> {
+    let value = value.trim();
+    if partition_key_type == "date" {
+        return NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| date.and_hms_opt(0, 0, 0));
+    }
+    parse_timestamp_literal(value)
+}
+
+fn parse_timestamp_literal(value: &str) -> Option<NaiveDateTime> {
+    for pattern in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(value, pattern) {
+            return Some(dt);
+        }
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+}
+
+fn partition_value_for_datetime(dt: NaiveDateTime, partition_unit: &str) -> String {
+    match partition_unit {
+        "hour" => format!(
+            "{:04}{:02}{:02}{:02}",
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour()
+        ),
+        "day" => format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
+        "month" => format!("{:04}{:02}", dt.year(), dt.month()),
+        "year" => format!("{:04}", dt.year()),
+        _ => "_null".to_string(),
+    }
 }
 
 fn create_view_relation(
@@ -1048,11 +1836,6 @@ fn alter_table_relation(
     run_catalog_tx(conn, || {
         let rel_oid = relation_oid(conn, &schema, &table)?;
         let relkind = relation_kind(conn, rel_oid)?;
-        if relkind != "r" {
-            return Err(format!(
-                "ALTER TABLE ADD COLUMN only supports ordinary tables, got relkind={relkind}"
-            ));
-        }
         if column_exists(conn, rel_oid, &column_def.name.value)? {
             if *if_not_exists {
                 return Ok(0);
@@ -1064,6 +1847,22 @@ fn alter_table_relation(
         }
 
         let journal_id = insert_journal(conn, "alter_table_add_column", rel_oid, sql)?;
+        if relkind == "p" {
+            alter_partitioned_table_add_column(
+                conn,
+                rel_oid,
+                &schema,
+                &table,
+                &column_def.to_string(),
+            )?;
+            finish_journal(conn, journal_id)?;
+            return Ok(0);
+        }
+        if relkind != "r" {
+            return Err(format!(
+                "ALTER TABLE ADD COLUMN only supports ordinary or partitioned tables, got relkind={relkind}"
+            ));
+        }
         conn.execute(sql, [])
             .map_err(|e| format!("execute DuckDB ALTER TABLE ADD COLUMN failed: {e}"))?;
         let physical_columns = load_duckdb_columns(conn, &schema, &table)?;
@@ -1084,6 +1883,72 @@ fn alter_table_relation(
     })
 }
 
+fn alter_partitioned_table_add_column(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    table: &str,
+    column_def_sql: &str,
+) -> Result<(), String> {
+    let children = active_partition_children(conn, parent_oid)?;
+    if children.is_empty() {
+        return Err("partitioned table has no active physical partitions".into());
+    }
+
+    let mut parent_column: Option<CatalogColumn> = None;
+    for child in &children {
+        conn.execute(
+            &format!(
+                "ALTER TABLE {} ADD COLUMN {column_def_sql}",
+                quote_qualified(&child.schema, &child.relname)
+            ),
+            [],
+        )
+        .map_err(|e| {
+            format!(
+                "execute DuckDB ALTER TABLE ADD COLUMN on partition {}.{} failed: {e}",
+                child.schema, child.relname
+            )
+        })?;
+
+        let physical_columns = load_duckdb_columns(conn, &child.schema, &child.relname)?;
+        let column = physical_columns
+            .last()
+            .ok_or_else(|| {
+                format!(
+                    "DuckDB partition has no columns: {}.{}",
+                    child.schema, child.relname
+                )
+            })?
+            .clone();
+        insert_attribute_row(conn, child.child_oid, &column)?;
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.pg_class SET relnatts = relnatts + 1 WHERE oid = {}",
+                child.child_oid
+            ),
+            [],
+        )
+        .map_err(|e| format!("update child relnatts failed: {e}"))?;
+
+        if parent_column.is_none() {
+            parent_column = Some(column);
+        }
+    }
+
+    let parent_column = parent_column
+        .ok_or_else(|| "partitioned table has no active physical partitions".to_string())?;
+    insert_attribute_row(conn, parent_oid, &parent_column)?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.pg_class SET relnatts = relnatts + 1 WHERE oid = {parent_oid}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("update parent relnatts failed: {e}"))?;
+    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+}
+
 fn drop_objects(
     conn: &Connection,
     object_type: ObjectType,
@@ -1095,6 +1960,9 @@ fn drop_objects(
 ) -> Result<usize, String> {
     if names.is_empty() {
         return Err("DROP requires at least one object name".into());
+    }
+    if object_type == ObjectType::User {
+        return drop_user_accounts(conn, if_exists, names, sql);
     }
 
     run_catalog_tx(conn, || {
@@ -1121,13 +1989,351 @@ fn drop_objects(
 
             let journal_id = insert_journal(conn, "drop_relation", meta.oid, sql)?;
             drop_relation_dependencies(conn, &meta, cascade)?;
-            execute_physical_drop(conn, object_type, &schema, &relname)?;
-            delete_relation_catalog(conn, &meta)?;
+            if meta.relkind == "p" {
+                drop_partitioned_relation(conn, &meta, &schema, &relname)?;
+            } else {
+                execute_physical_drop(conn, object_type, &schema, &relname)?;
+                delete_relation_catalog(conn, &meta)?;
+            }
             finish_journal(conn, journal_id)?;
             affected += 1;
         }
         Ok(affected)
     })
+}
+
+fn drop_user_accounts(
+    conn: &Connection,
+    if_exists: bool,
+    names: &[ObjectName],
+    sql: &str,
+) -> Result<usize, String> {
+    run_catalog_tx(conn, || {
+        let mut affected = 0;
+        for name in names {
+            let username = single_name_part(name)?;
+            if username.eq_ignore_ascii_case("admin") {
+                return Err("default admin user cannot be dropped".into());
+            }
+            let Some(user_id) = user_id_by_name_opt(conn, &username)? else {
+                if if_exists {
+                    continue;
+                }
+                return Err(format!("user does not exist: {username}"));
+            };
+            let journal_id = insert_journal(conn, "drop_user", user_id, sql)?;
+            for statement in [
+                format!("DELETE FROM rsduck_catalog.rs_user_role WHERE user_id = {user_id}"),
+                format!(
+                    "DELETE FROM rsduck_catalog.rs_privilege \
+                     WHERE principal_type = 'user' AND principal_id = {user_id}"
+                ),
+                format!("DELETE FROM rsduck_catalog.rs_user WHERE user_id = {user_id}"),
+            ] {
+                conn.execute(&statement, [])
+                    .map_err(|e| format!("drop user catalog rows failed: {e}"))?;
+            }
+            finish_journal(conn, journal_id)?;
+            affected += 1;
+        }
+        Ok(affected)
+    })
+}
+
+fn drop_partitioned_relation(
+    conn: &Connection,
+    meta: &RelationMeta,
+    schema: &str,
+    relname: &str,
+) -> Result<(), String> {
+    let children = partition_child_metas(conn, meta.oid)?;
+    conn.execute(
+        &format!("DROP VIEW {}", quote_qualified(schema, relname)),
+        [],
+    )
+    .map_err(|e| format!("execute DuckDB DROP partition entrypoint failed: {e}"))?;
+    for child in children {
+        conn.execute(
+            &format!(
+                "DROP TABLE {}",
+                quote_qualified(&child.schema, &child.relname)
+            ),
+            [],
+        )
+        .map_err(|e| {
+            format!(
+                "execute DuckDB DROP physical partition {}.{} failed: {e}",
+                child.schema, child.relname
+            )
+        })?;
+        delete_relation_catalog(conn, &child.meta)?;
+    }
+    delete_relation_catalog(conn, meta)
+}
+
+#[derive(Debug)]
+struct PartitionChildMeta {
+    meta: RelationMeta,
+    schema: String,
+    relname: String,
+}
+
+fn partition_child_metas(
+    conn: &Connection,
+    parent_oid: i64,
+) -> Result<Vec<PartitionChildMeta>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT c.oid, c.reltype, c.relkind, c.relispartition, n.nspname, c.relname \
+             FROM rsduck_catalog.rs_partition p \
+             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE p.parent_relid = {parent_oid} \
+             ORDER BY p.is_null_partition, p.partition_value"
+        ))
+        .map_err(|e| format!("prepare partition child lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query partition child lookup failed: {e}"))?;
+    let mut children = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read partition child lookup failed: {e}"))?
+    {
+        children.push(PartitionChildMeta {
+            meta: RelationMeta {
+                oid: row
+                    .get(0)
+                    .map_err(|e| format!("read partition child oid failed: {e}"))?,
+                reltype: row
+                    .get(1)
+                    .map_err(|e| format!("read partition child reltype failed: {e}"))?,
+                relkind: row
+                    .get(2)
+                    .map_err(|e| format!("read partition child relkind failed: {e}"))?,
+                relispartition: row
+                    .get(3)
+                    .map_err(|e| format!("read partition child flag failed: {e}"))?,
+            },
+            schema: row
+                .get(4)
+                .map_err(|e| format!("read partition child schema failed: {e}"))?,
+            relname: row
+                .get(5)
+                .map_err(|e| format!("read partition child name failed: {e}"))?,
+        });
+    }
+    Ok(children)
+}
+
+fn grant_privileges(
+    conn: &Connection,
+    grant: &Grant,
+    sql: &str,
+    grantor_id: i64,
+) -> Result<usize, String> {
+    let targets = grant_targets(conn, grant.objects.as_ref())?;
+    let actions = privilege_actions(&grant.privileges, &targets)?;
+    let principals = grant_principals(conn, &grant.grantees)?;
+
+    run_catalog_tx(conn, || {
+        let journal_id = insert_journal(conn, "grant_privilege", 0, sql)?;
+        let mut affected = 0;
+        for (principal_type, principal_id) in &principals {
+            for (object_type, object_id) in &targets {
+                for action in &actions {
+                    affected += upsert_privilege(
+                        conn,
+                        principal_type,
+                        *principal_id,
+                        object_type,
+                        *object_id,
+                        action,
+                        grantor_id,
+                    )?;
+                }
+            }
+        }
+        finish_journal(conn, journal_id)?;
+        Ok(affected)
+    })
+}
+
+fn revoke_privileges(conn: &Connection, revoke: &Revoke, sql: &str) -> Result<usize, String> {
+    let targets = grant_targets(conn, revoke.objects.as_ref())?;
+    let actions = privilege_actions(&revoke.privileges, &targets)?;
+    let principals = grant_principals(conn, &revoke.grantees)?;
+
+    run_catalog_tx(conn, || {
+        let journal_id = insert_journal(conn, "revoke_privilege", 0, sql)?;
+        let mut affected = 0;
+        for (principal_type, principal_id) in &principals {
+            for (object_type, object_id) in &targets {
+                for action in &actions {
+                    affected += conn
+                        .execute(
+                            &format!(
+                                "DELETE FROM rsduck_catalog.rs_privilege \
+                                 WHERE principal_type = '{}' AND principal_id = {} \
+                                   AND object_type = '{}' AND object_id = {} AND action = '{}'",
+                                sql_string(principal_type),
+                                principal_id,
+                                sql_string(object_type),
+                                object_id,
+                                sql_string(action)
+                            ),
+                            [],
+                        )
+                        .map_err(|e| format!("delete privilege failed: {e}"))?;
+                }
+            }
+        }
+        finish_journal(conn, journal_id)?;
+        Ok(affected)
+    })
+}
+
+fn grant_targets(
+    conn: &Connection,
+    objects: Option<&GrantObjects>,
+) -> Result<Vec<(String, i64)>, String> {
+    let Some(objects) = objects else {
+        return Ok(vec![("system".to_string(), 0)]);
+    };
+    match objects {
+        GrantObjects::Tables(names) | GrantObjects::Views(names) => names
+            .iter()
+            .map(|name| {
+                let (schema, relation) = relation_name(name)?;
+                let relid = relation_oid(conn, &schema, &relation)?;
+                Ok(("relation".to_string(), relid))
+            })
+            .collect(),
+        GrantObjects::Schemas(names) => names
+            .iter()
+            .map(|name| {
+                let schema = single_name_part(name)?;
+                Ok(("schema".to_string(), namespace_oid(conn, &schema)?))
+            })
+            .collect(),
+        GrantObjects::Databases(_) => Ok(vec![("system".to_string(), 0)]),
+        _ => Err(format!("GRANT target is not supported: {objects}")),
+    }
+}
+
+fn grant_principals(
+    conn: &Connection,
+    grantees: &[sqlparser::ast::Grantee],
+) -> Result<Vec<(String, i64)>, String> {
+    if grantees.is_empty() {
+        return Err("GRANT/REVOKE requires at least one grantee".into());
+    }
+    grantees
+        .iter()
+        .map(|grantee| {
+            let name = match &grantee.name {
+                Some(GranteeName::ObjectName(name)) => single_name_part(name)?,
+                Some(GranteeName::UserHost { user, .. }) => user.value.clone(),
+                None => return Err("grantee name is required".into()),
+            };
+            match grantee.grantee_type {
+                GranteesType::Role => Ok(("role".to_string(), role_id_by_name(conn, &name)?)),
+                GranteesType::None | GranteesType::User => {
+                    Ok(("user".to_string(), user_id_by_name(conn, &name)?))
+                }
+                _ => Err(format!("unsupported grantee type: {}", grantee)),
+            }
+        })
+        .collect()
+}
+
+fn privilege_actions(
+    privileges: &Privileges,
+    targets: &[(String, i64)],
+) -> Result<Vec<String>, String> {
+    let object_type = targets
+        .first()
+        .map(|(object_type, _)| object_type.as_str())
+        .unwrap_or("system");
+    let mut actions = Vec::new();
+    match privileges {
+        Privileges::All { .. } => match object_type {
+            "relation" => actions.extend(["read", "write", "ddl"].map(str::to_string)),
+            "schema" => actions.extend(["read", "ddl"].map(str::to_string)),
+            "system" => actions
+                .extend(["manage_snapshot", "manage_catalog", "manage_user"].map(str::to_string)),
+            _ => return Err(format!("unsupported privilege object type: {object_type}")),
+        },
+        Privileges::Actions(items) => {
+            for item in items {
+                let action = match (object_type, item) {
+                    (_, Action::Select { .. } | Action::Read | Action::Usage) => "read",
+                    (
+                        "relation",
+                        Action::Insert { .. } | Action::Update { .. } | Action::Delete,
+                    ) => "write",
+                    ("relation", Action::Create { .. } | Action::Drop | Action::Ownership) => "ddl",
+                    ("schema", Action::Create { .. } | Action::Drop | Action::Ownership) => "ddl",
+                    ("system", Action::Create { .. } | Action::Ownership) => "manage_user",
+                    _ => {
+                        return Err(format!(
+                            "unsupported privilege action for {object_type}: {item}"
+                        ))
+                    }
+                };
+                if !actions.iter().any(|existing| existing == action) {
+                    actions.push(action.to_string());
+                }
+            }
+        }
+    }
+    if actions.is_empty() {
+        return Err("GRANT/REVOKE produced no supported privilege actions".into());
+    }
+    Ok(actions)
+}
+
+fn upsert_privilege(
+    conn: &Connection,
+    principal_type: &str,
+    principal_id: i64,
+    object_type: &str,
+    object_id: i64,
+    action: &str,
+    grantor_id: i64,
+) -> Result<usize, String> {
+    let count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_privilege \
+                 WHERE principal_type = '{}' AND principal_id = {} \
+                   AND object_type = '{}' AND object_id = {} AND action = '{}'",
+                sql_string(principal_type),
+                principal_id,
+                sql_string(object_type),
+                object_id,
+                sql_string(action)
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check existing privilege failed: {e}"))?;
+    if count > 0 {
+        return Ok(0);
+    }
+    let privilege_id = allocate_oid(conn)?;
+    conn.execute(
+        &format!(
+            "INSERT INTO rsduck_catalog.rs_privilege(privilege_id, principal_type, principal_id, object_type, object_id, action, granted_by, created_at) \
+             VALUES ({privilege_id}, '{}', {principal_id}, '{}', {object_id}, '{}', {grantor_id}, CURRENT_TIMESTAMP)",
+            sql_string(principal_type),
+            sql_string(object_type),
+            sql_string(action)
+        ),
+        [],
+    )
+    .map_err(|e| format!("insert privilege failed: {e}"))?;
+    Ok(1)
 }
 
 fn comment_object(
@@ -1293,6 +2499,358 @@ fn insert_attribute_row(
         )
         .map_err(|e| format!("write pg_attrdef failed: {e}"))?;
     }
+    Ok(())
+}
+
+fn update_partition_relation_ext(
+    conn: &Connection,
+    rel_oid: i64,
+    partition_key: &str,
+    partition_key_type: &str,
+    partition_unit: &str,
+    retention_count: i32,
+    generated_sql: &str,
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_relation_ext \
+             SET partition_key = '{}', partition_key_type = '{}', partition_unit = '{}', \
+                 retention_count = {retention_count}, generated_sql = '{}', updated_at = CURRENT_TIMESTAMP \
+             WHERE relid = {rel_oid}",
+            sql_string(partition_key),
+            sql_string(partition_key_type),
+            sql_string(partition_unit),
+            sql_string(generated_sql)
+        ),
+        [],
+    )
+    .map_err(|e| format!("update partition relation extension failed: {e}"))?;
+    Ok(())
+}
+
+fn validate_partition_key(
+    create_table: &CreateTable,
+    partition_key: &str,
+    partition_unit: &str,
+) -> Result<(String, i64), String> {
+    if !matches!(partition_unit, "hour" | "day" | "month" | "year") {
+        return Err(format!(
+            "partition_unit must be one of hour, day, month, year: {partition_unit}"
+        ));
+    }
+
+    let column = create_table
+        .columns
+        .iter()
+        .find(|column| column.name.value.eq_ignore_ascii_case(partition_key))
+        .ok_or_else(|| format!("partition key column does not exist: {partition_key}"))?;
+    if column
+        .options
+        .iter()
+        .any(|option| matches!(option.option, ColumnOption::NotNull))
+    {
+        return Err("partition key column must allow NULL for null partition routing".into());
+    }
+
+    let type_text = column.data_type.to_string();
+    let type_lower = type_text.to_ascii_lowercase();
+    let key_type = if type_lower == "date" {
+        if partition_unit == "hour" {
+            return Err("DATE partition key does not support partition_unit = 'hour'".into());
+        }
+        "date"
+    } else if type_lower.starts_with("timestamp") || type_lower == "datetime" {
+        "timestamp"
+    } else {
+        return Err(format!(
+            "partition key must be DATE or TIMESTAMP, got {type_text}"
+        ));
+    };
+    Ok((
+        key_type.to_string(),
+        pg_type_oid_for_duckdb_type(&type_text)?,
+    ))
+}
+
+fn physical_partition_name(parent: &str, partition_value: &str) -> String {
+    let suffix = partition_value.trim_start_matches('_');
+    format!("{parent}_{suffix}")
+}
+
+fn physical_partition_create_sql(partition_name: &str, create_table: &CreateTable) -> String {
+    let columns = create_table
+        .columns
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE TABLE {} ({columns})",
+        quote_qualified("rsduck_internal", partition_name)
+    )
+}
+
+fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str)]) -> String {
+    let selects = partitions
+        .iter()
+        .map(|(partition_schema, partition_name)| {
+            format!(
+                "SELECT * FROM {}",
+                quote_qualified(partition_schema, partition_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "CREATE OR REPLACE VIEW {} AS {selects}",
+        quote_qualified(schema, table)
+    )
+}
+
+fn ensure_active_partition(
+    conn: &Connection,
+    relation: &PartitionedRelation,
+    partition_value: &str,
+) -> Result<String, String> {
+    if let Some(child) = active_partition_by_value(conn, relation.oid, partition_value)? {
+        return Ok(child.relname);
+    }
+    if partition_value == "_null" {
+        return Err("managed partitioned table is missing active null partition".into());
+    }
+    create_range_partition(conn, relation, partition_value)
+}
+
+fn active_partition_by_value(
+    conn: &Connection,
+    parent_oid: i64,
+    partition_value: &str,
+) -> Result<Option<ActivePartitionChild>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.child_relid, n.nspname, c.relname, c.status \
+             FROM rsduck_catalog.rs_partition p \
+             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE p.parent_relid = {parent_oid} \
+               AND p.partition_value = '{}' \
+               AND p.status = 'active'",
+            sql_string(partition_value)
+        ))
+        .map_err(|e| format!("prepare partition lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query partition lookup failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read partition lookup failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ActivePartitionChild {
+        child_oid: row
+            .get(0)
+            .map_err(|e| format!("read partition child oid failed: {e}"))?,
+        schema: row
+            .get(1)
+            .map_err(|e| format!("read partition schema failed: {e}"))?,
+        relname: row
+            .get(2)
+            .map_err(|e| format!("read partition relation failed: {e}"))?,
+        child_status: row
+            .get(3)
+            .map_err(|e| format!("read partition child status failed: {e}"))?,
+    }))
+}
+
+fn create_range_partition(
+    conn: &Connection,
+    relation: &PartitionedRelation,
+    partition_value: &str,
+) -> Result<String, String> {
+    let bounds = partition_bounds(partition_value, &relation.partition_unit)?;
+    let child_relname = physical_partition_name(&relation.name, partition_value);
+    if relation_exists(conn, "rsduck_internal", &child_relname)? {
+        return Err(format!(
+            "managed physical partition relation already exists: rsduck_internal.{child_relname}"
+        ));
+    }
+
+    let child_oid = allocate_oid(conn)?;
+    let child_type_oid = allocate_oid(conn)?;
+    let create_sql = format!(
+        "CREATE TABLE {} AS SELECT * FROM {} WHERE 1 = 0",
+        quote_qualified("rsduck_internal", &child_relname),
+        quote_qualified(&relation.schema, &relation.name)
+    );
+    conn.execute(&create_sql, [])
+        .map_err(|e| format!("execute DuckDB CREATE partition failed: {e}"))?;
+    let columns = load_duckdb_columns(conn, "rsduck_internal", &child_relname)?;
+    insert_relation_rows(
+        conn,
+        child_oid,
+        child_type_oid,
+        "rsduck_internal",
+        &child_relname,
+        "r",
+        "physical_partition",
+        "internal",
+        "",
+        &columns,
+        ADMIN_USER_ID,
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.pg_class \
+             SET relispartition = TRUE, relpartbound = '{}' \
+             WHERE oid = {child_oid}",
+            sql_string(&format!("[{}, {})", bounds.lower_bound, bounds.upper_bound))
+        ),
+        [],
+    )
+    .map_err(|e| format!("mark physical partition pg_class failed: {e}"))?;
+    update_partition_relation_ext(
+        conn,
+        child_oid,
+        &relation.partition_key,
+        &relation.partition_key_type,
+        &relation.partition_unit,
+        0,
+        "",
+    )?;
+    conn.execute(
+        &format!(
+            "INSERT INTO rsduck_catalog.rs_partition(parent_relid, child_relid, partition_value, \
+             partition_unit, lower_bound, upper_bound, is_null_partition, status, row_count, min_ts, \
+             max_ts, checksum, created_at, activated_at, dropped_at, error_message) \
+             VALUES ({}, {child_oid}, '{}', '{}', TIMESTAMP '{}', TIMESTAMP '{}', FALSE, 'active', \
+             0, NULL, NULL, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, '')",
+            relation.oid,
+            sql_string(&bounds.value),
+            sql_string(&relation.partition_unit),
+            bounds.lower_bound,
+            bounds.upper_bound
+        ),
+        [],
+    )
+    .map_err(|e| format!("write range partition metadata failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+             VALUES ({PG_CLASS_CLASSOID}, {}, 0, {PG_CLASS_CLASSOID}, {child_oid}, 0, 'n')",
+            relation.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("write range partition dependency failed: {e}"))?;
+    Ok(child_relname)
+}
+
+fn partition_bounds(
+    partition_value: &str,
+    partition_unit: &str,
+) -> Result<PartitionBounds, String> {
+    let lower_bound = match partition_unit {
+        "hour" => NaiveDateTime::parse_from_str(partition_value, "%Y%m%d%H")
+            .map_err(|_| format!("invalid hour partition_value: {partition_value}"))?,
+        "day" => NaiveDate::parse_from_str(partition_value, "%Y%m%d")
+            .map_err(|_| format!("invalid day partition_value: {partition_value}"))?
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| format!("invalid day partition_value: {partition_value}"))?,
+        "month" => NaiveDate::parse_from_str(&format!("{partition_value}01"), "%Y%m%d")
+            .map_err(|_| format!("invalid month partition_value: {partition_value}"))?
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| format!("invalid month partition_value: {partition_value}"))?,
+        "year" => NaiveDate::parse_from_str(&format!("{partition_value}0101"), "%Y%m%d")
+            .map_err(|_| format!("invalid year partition_value: {partition_value}"))?
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| format!("invalid year partition_value: {partition_value}"))?,
+        _ => return Err(format!("unsupported partition_unit: {partition_unit}")),
+    };
+    let upper_bound = match partition_unit {
+        "hour" => lower_bound + Duration::hours(1),
+        "day" => lower_bound + Duration::days(1),
+        "month" => add_months(lower_bound, 1)?,
+        "year" => add_months(lower_bound, 12)?,
+        _ => return Err(format!("unsupported partition_unit: {partition_unit}")),
+    };
+    Ok(PartitionBounds {
+        value: partition_value.to_string(),
+        lower_bound,
+        upper_bound,
+    })
+}
+
+fn add_months(value: NaiveDateTime, months: u32) -> Result<NaiveDateTime, String> {
+    let total_month = value.year() * 12 + value.month0() as i32 + months as i32;
+    let year = total_month.div_euclid(12);
+    let month0 = total_month.rem_euclid(12) as u32;
+    NaiveDate::from_ymd_opt(year, month0 + 1, value.day())
+        .and_then(|date| date.and_hms_opt(value.hour(), value.minute(), value.second()))
+        .ok_or_else(|| format!("invalid month arithmetic for {value}"))
+}
+
+fn refresh_partition_entrypoint(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    relname: &str,
+) -> Result<(), String> {
+    let partitions = active_partition_children(conn, parent_oid)?;
+    let active_physical = partitions
+        .iter()
+        .map(|partition| (partition.schema.as_str(), partition.relname.as_str()))
+        .collect::<Vec<_>>();
+    let sql = partition_entrypoint_sql(schema, relname, &active_physical);
+    rebuild_partition_entrypoint(conn, parent_oid, &sql)?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.pg_depend \
+             WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
+               AND refclassid = {PG_CLASS_CLASSOID}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete partition dependencies failed: {e}"))?;
+    for partition in partitions {
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+                 VALUES ({PG_CLASS_CLASSOID}, {parent_oid}, 0, {PG_CLASS_CLASSOID}, {}, 0, 'n')",
+                partition.child_oid
+            ),
+            [],
+        )
+        .map_err(|e| format!("write partition dependency failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn update_partition_stats(
+    conn: &Connection,
+    parent_oid: i64,
+    partition_value: &str,
+    inserted_rows: i64,
+    route_ts: Option<NaiveDateTime>,
+) -> Result<(), String> {
+    let ts_update = route_ts
+        .map(|dt| {
+            format!(
+                ", min_ts = CASE WHEN min_ts IS NULL OR TIMESTAMP '{dt}' < min_ts THEN TIMESTAMP '{dt}' ELSE min_ts END, \
+                 max_ts = CASE WHEN max_ts IS NULL OR TIMESTAMP '{dt}' > max_ts THEN TIMESTAMP '{dt}' ELSE max_ts END"
+            )
+        })
+        .unwrap_or_default();
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_partition \
+             SET row_count = row_count + {inserted_rows}{ts_update} \
+             WHERE parent_relid = {parent_oid} AND partition_value = '{}'",
+            sql_string(partition_value)
+        ),
+        [],
+    )
+    .map_err(|e| format!("update partition stats failed: {e}"))?;
     Ok(())
 }
 
@@ -1500,7 +3058,7 @@ fn load_duckdb_columns(
         columns.push(CatalogColumn {
             name,
             pg_type_oid: pg_type_oid_for_duckdb_type(&duckdb_type)?,
-            attnum: column_index + 1,
+            attnum: column_index,
             not_null: !is_nullable,
             default_expr,
         });
@@ -1933,10 +3491,362 @@ fn catalog_epoch(conn: &Connection) -> Result<i64, String> {
     .map_err(|e| format!("read catalog epoch failed: {e}"))
 }
 
+fn parse_managed_partition_create(sql: &str) -> Result<Option<ManagedPartitionCreate>, String> {
+    if !looks_like_managed_partition_create(sql) {
+        return Ok(None);
+    }
+
+    let partition_idx = find_keyword_phrase(sql, "partition by range")
+        .ok_or_else(|| "PARTITION BY RANGE clause is required".to_string())?;
+    let mut cursor = partition_idx + "partition by range".len();
+    cursor = skip_ascii_ws(sql, cursor);
+    if !sql[cursor..].starts_with('(') {
+        return Err("PARTITION BY RANGE requires a single parenthesized column".into());
+    }
+    let (partition_key_text, after_partition_key) = parse_parenthesized_segment(sql, cursor)?;
+    let partition_key = parse_simple_identifier_text(&partition_key_text)?;
+
+    let with_idx = find_keyword_phrase_from(sql, "with", after_partition_key)
+        .ok_or_else(|| "managed partitioned table requires WITH options".to_string())?;
+    let mut with_cursor = with_idx + "with".len();
+    with_cursor = skip_ascii_ws(sql, with_cursor);
+    if !sql[with_cursor..].starts_with('(') {
+        return Err("managed partitioned table WITH options must be parenthesized".into());
+    }
+    let (options_text, after_options) = parse_parenthesized_segment(sql, with_cursor)?;
+    let trailing = sql[after_options..].trim();
+    if !trailing.is_empty() && trailing != ";" {
+        return Err(format!(
+            "unexpected text after managed partition options: {trailing}"
+        ));
+    }
+
+    let (partition_unit, retention_count) = parse_partition_options(&options_text)?;
+    let base_sql = sql[..partition_idx]
+        .trim_end()
+        .trim_end_matches(';')
+        .to_string();
+    Ok(Some(ManagedPartitionCreate {
+        base_sql,
+        partition_key,
+        partition_unit,
+        retention_count,
+    }))
+}
+
+fn parse_partition_options(options_text: &str) -> Result<(String, i32), String> {
+    let mut partition_unit = None;
+    let mut retention = None;
+    for option in split_top_level_commas(options_text) {
+        let Some((key, value)) = split_key_value(&option) else {
+            return Err(format!("invalid managed partition option: {option}"));
+        };
+        let key = parse_simple_identifier_text(key)?.to_ascii_lowercase();
+        let value = parse_option_value(value)?;
+        match key.as_str() {
+            "partition_unit" => {
+                if partition_unit.replace(value).is_some() {
+                    return Err("duplicate partition_unit option".into());
+                }
+            }
+            "retention" => {
+                if retention.replace(value).is_some() {
+                    return Err("duplicate retention option".into());
+                }
+            }
+            _ => return Err(format!("unsupported managed partition option: {key}")),
+        }
+    }
+
+    let partition_unit = partition_unit
+        .ok_or_else(|| "managed partitioned table requires partition_unit".to_string())?;
+    if !matches!(partition_unit.as_str(), "hour" | "day" | "month" | "year") {
+        return Err(format!(
+            "partition_unit must be one of hour, day, month, year: {partition_unit}"
+        ));
+    }
+    let retention_text =
+        retention.ok_or_else(|| "managed partitioned table requires retention".to_string())?;
+    let retention_count: i32 = retention_text
+        .parse()
+        .map_err(|_| format!("retention must be a positive integer: {retention_text}"))?;
+    if retention_count <= 0 {
+        return Err(format!(
+            "retention must be a positive integer: {retention_text}"
+        ));
+    }
+    Ok((partition_unit, retention_count))
+}
+
+fn parse_simple_identifier_text(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("empty identifier".into());
+    }
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        return Ok(value[1..value.len() - 1].replace("\"\"", "\""));
+    }
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Ok(value.to_string())
+    } else {
+        Err(format!("expected a single identifier, got: {value}"))
+    }
+}
+
+fn parse_option_value(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return Ok(value[1..value.len() - 1].replace("''", "'"));
+    }
+    parse_simple_identifier_text(value)
+}
+
+fn split_top_level_commas(value: &str) -> Vec<String> {
+    split_top_level(value, ',')
+}
+
+fn split_key_value(value: &str) -> Option<(&str, &str)> {
+    let idx = find_top_level_char(value, '=')?;
+    Some((&value[..idx], &value[idx + 1..]))
+}
+
+fn parse_parenthesized_segment(sql: &str, open_idx: usize) -> Result<(String, usize), String> {
+    let bytes = sql.as_bytes();
+    if bytes.get(open_idx) != Some(&b'(') {
+        return Err("expected '('".into());
+    }
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = open_idx;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((sql[open_idx + 1..idx].to_string(), idx + 1));
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    Err("unclosed parenthesized segment".into())
+}
+
+fn split_top_level(value: &str, delimiter: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = value.as_bytes();
+    let delimiter = delimiter as u8;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if byte == delimiter && depth == 0 => {
+                parts.push(value[start..idx].trim().to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    parts.push(value[start..].trim().to_string());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn find_top_level_char(value: &str, target: char) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let target = target as u8;
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if byte == target && depth == 0 => return Some(idx),
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn find_keyword_phrase(sql: &str, phrase: &str) -> Option<usize> {
+    find_keyword_phrase_from(sql, phrase, 0)
+}
+
+fn find_keyword_phrase_from(sql: &str, phrase: &str, start: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let phrase = phrase.to_ascii_lowercase();
+    let bytes = sql.as_bytes();
+    let lower_bytes = lower.as_bytes();
+    let phrase_bytes = phrase.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = start.min(bytes.len());
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            b'"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let end = idx + phrase_bytes.len();
+        if end <= lower_bytes.len()
+            && &lower_bytes[idx..end] == phrase_bytes
+            && is_keyword_boundary(bytes, idx, end)
+        {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_keyword_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+    let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+    before_ok && after_ok
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
 fn parse_one_statement(sql: &str) -> Result<(Statement, String), String> {
-    let dialect = DuckDbDialect {};
-    let statements =
-        Parser::parse_sql(&dialect, sql).map_err(|e| format!("catalog sql parse failed: {e}"))?;
+    let normalized = sql.trim_start().to_ascii_lowercase();
+    let statements = if normalized.starts_with("comment on ") {
+        let dialect = PostgreSqlDialect {};
+        Parser::parse_sql(&dialect, sql)
+    } else {
+        let dialect = DuckDbDialect {};
+        Parser::parse_sql(&dialect, sql)
+    }
+    .map_err(|e| format!("catalog sql parse failed: {e}"))?;
     if statements.len() != 1 {
         return Err(format!(
             "only one SQL statement is supported, got {}",
@@ -2054,6 +3964,62 @@ fn ensure_user_schema_exists(conn: &Connection, schema: &str) -> Result<(), Stri
     } else {
         Err(format!("schema does not exist: {schema}"))
     }
+}
+
+fn validate_username(username: &str) -> Result<(), String> {
+    if username.is_empty() {
+        return Err("username cannot be empty".into());
+    }
+    if !username
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(format!(
+            "username contains unsupported characters: {username}"
+        ));
+    }
+    Ok(())
+}
+
+fn user_exists(conn: &Connection, username: &str) -> Result<bool, String> {
+    Ok(user_id_by_name_opt(conn, username)?.is_some())
+}
+
+fn user_id_by_name(conn: &Connection, username: &str) -> Result<i64, String> {
+    user_id_by_name_opt(conn, username)?.ok_or_else(|| format!("user does not exist: {username}"))
+}
+
+fn user_id_by_name_opt(conn: &Connection, username: &str) -> Result<Option<i64>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT user_id FROM rsduck_catalog.rs_user WHERE lower(username) = lower('{}')",
+            sql_string(username)
+        ))
+        .map_err(|e| format!("prepare user lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query user lookup failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read user lookup failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    row.get(0)
+        .map(Some)
+        .map_err(|e| format!("read user id failed: {e}"))
+}
+
+fn role_id_by_name(conn: &Connection, role_name: &str) -> Result<i64, String> {
+    conn.query_row(
+        &format!(
+            "SELECT role_id FROM rsduck_catalog.rs_role WHERE lower(role_name) = lower('{}')",
+            sql_string(role_name)
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("role does not exist: {role_name}: {e}"))
 }
 
 fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
@@ -2378,6 +4344,10 @@ fn delete_relation_catalog(conn: &Connection, meta: &RelationMeta) -> Result<(),
             meta.oid
         ),
         format!(
+            "DELETE FROM rsduck_catalog.rs_partition WHERE parent_relid = {} OR child_relid = {}",
+            meta.oid, meta.oid
+        ),
+        format!(
             "DELETE FROM rsduck_catalog.pg_type WHERE oid = {} OR typrelid = {}",
             meta.reltype, meta.oid
         ),
@@ -2607,13 +4577,17 @@ fn statement_command(statement: &Statement) -> &'static str {
         Statement::CreateSchema { .. }
         | Statement::CreateTable(_)
         | Statement::CreateView(_)
-        | Statement::CreateIndex(_) => "CREATE",
+        | Statement::CreateIndex(_)
+        | Statement::CreateUser(_) => "CREATE",
         Statement::Drop { .. } => "DROP",
         Statement::AlterTable(_)
         | Statement::AlterSchema(_)
         | Statement::AlterIndex { .. }
-        | Statement::AlterView { .. } => "ALTER",
+        | Statement::AlterView { .. }
+        | Statement::AlterUser(_) => "ALTER",
         Statement::Comment { .. } => "COMMENT",
+        Statement::Grant(_) => "GRANT",
+        Statement::Revoke(_) => "REVOKE",
         _ => "SQL",
     }
 }
@@ -2832,6 +4806,544 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_count, 1);
+    }
+
+    #[test]
+    fn alter_table_add_column_updates_catalog_and_duckdb() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+
+        execute_catalog_aware_write(
+            &conn,
+            "ALTER TABLE quotes ADD COLUMN volume BIGINT DEFAULT 0",
+        )
+        .unwrap();
+
+        let (attnum, has_default): (i32, bool) = conn
+            .query_row(
+                "SELECT a.attnum, a.atthasdef \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname = 'quotes' AND a.attname = 'volume'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attnum, 3);
+        assert!(has_default);
+
+        conn.execute("INSERT INTO quotes(code, close) VALUES ('A', 1.0)", [])
+            .unwrap();
+        let volume: i64 = conn
+            .query_row("SELECT volume FROM quotes WHERE code = 'A'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(volume, 0);
+    }
+
+    #[test]
+    fn comment_on_table_and_column_writes_pg_description() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+
+        execute_catalog_aware_write(&conn, "COMMENT ON TABLE quotes IS 'quotes table'").unwrap();
+        execute_catalog_aware_write(&conn, "COMMENT ON COLUMN quotes.close IS 'close price'")
+            .unwrap();
+
+        let table_comment: String = conn
+            .query_row(
+                "SELECT d.description \
+                 FROM rsduck_catalog.pg_description d \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = d.objoid \
+                 WHERE c.relname = 'quotes' AND d.objsubid = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_comment, "quotes table");
+
+        let column_comment: String = conn
+            .query_row(
+                "SELECT d.description \
+                 FROM rsduck_catalog.pg_description d \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = d.objoid \
+                 JOIN rsduck_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid \
+                 WHERE c.relname = 'quotes' AND a.attname = 'close'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(column_comment, "close price");
+    }
+
+    #[test]
+    fn drop_index_and_table_updates_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+        execute_catalog_aware_write(&conn, "CREATE INDEX idx_quotes_code ON quotes(code)").unwrap();
+
+        execute_catalog_aware_write(&conn, "DROP INDEX idx_quotes_code").unwrap();
+        let remaining_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'idx_quotes_code'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_index_count, 0);
+        let relhasindex: bool = conn
+            .query_row(
+                "SELECT relhasindex FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!relhasindex);
+
+        execute_catalog_aware_write(&conn, "DROP TABLE quotes").unwrap();
+        let remaining_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_table_count, 0);
+
+        let physical_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'quotes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_count, 0);
+    }
+
+    #[test]
+    fn drop_table_with_dependent_index_requires_cascade() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+        execute_catalog_aware_write(&conn, "CREATE INDEX idx_quotes_code ON quotes(code)").unwrap();
+
+        let err = execute_catalog_aware_write(&conn, "DROP TABLE quotes").unwrap_err();
+        assert!(err.contains("dependent objects"));
+
+        execute_catalog_aware_write(&conn, "DROP TABLE quotes CASCADE").unwrap();
+        let remaining_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname IN ('quotes', 'idx_quotes_code')",
+                [],
+                |row| row.get(0),
+        )
+        .unwrap();
+        assert_eq!(remaining_count, 0);
+    }
+
+    #[test]
+    fn create_managed_partitioned_table_creates_null_partition_and_entrypoint() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                user_id VARCHAR(64),
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (
+                partition_unit = 'day',
+                retention = '30'
+             )",
+        )
+        .unwrap();
+
+        let (relkind, managed_kind, partition_key, partition_unit, retention): (
+            String,
+            String,
+            String,
+            String,
+            i32,
+        ) = conn
+            .query_row(
+                "SELECT c.relkind, ext.managed_kind, ext.partition_key, ext.partition_unit, ext.retention_count \
+                 FROM rsduck_catalog.pg_class c \
+                 JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid \
+                 WHERE c.relname = 'ods_access_log'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(relkind, "p");
+        assert_eq!(managed_kind, "range_partitioned_table");
+        assert_eq!(partition_key, "access_time");
+        assert_eq!(partition_unit, "day");
+        assert_eq!(retention, 30);
+
+        let null_partition_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.rs_partition p \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
+                 WHERE c.relname = 'ods_access_log_null' \
+                   AND p.partition_value = '_null' \
+                   AND p.partition_unit = 'null' \
+                   AND p.is_null_partition = TRUE \
+                   AND p.status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_partition_count, 1);
+
+        conn.execute(
+            "INSERT INTO rsduck_internal.ods_access_log_null(id, user_id, access_time, content) \
+             VALUES (1, 'u1', NULL, 'dirty')",
+            [],
+        )
+        .unwrap();
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM ods_access_log WHERE access_time IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "dirty");
+    }
+
+    #[test]
+    fn insert_into_partitioned_table_creates_partitions_and_routes_dirty_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                user_id VARCHAR(64),
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+
+        let affected = execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, user_id, access_time, content) VALUES
+             (1, 'u1', TIMESTAMP '2026-07-01 10:00:00', 'ok-1'),
+             (2, 'u2', '2026-07-02 08:30:00', 'ok-2'),
+             (3, 'u3', NULL, 'null-key'),
+             (4, 'u4', 'bad-time', 'dirty-key')",
+        )
+        .unwrap();
+        assert_eq!(affected, Some(4));
+
+        let partition_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
+                 WHERE parent_relid = (
+                    SELECT oid FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'
+                 ) AND status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(partition_count, 3);
+
+        let ordinary_partition_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class \
+                 WHERE relname IN ('ods_access_log_20260701', 'ods_access_log_20260702') \
+                   AND relispartition = TRUE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ordinary_partition_count, 2);
+
+        let visible_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(visible_rows, 4);
+
+        let dirty_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ods_access_log WHERE access_time IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dirty_rows, 2);
+
+        let july_1_count: i64 = conn
+            .query_row(
+                "SELECT row_count FROM rsduck_catalog.rs_partition WHERE partition_value = '20260701'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(july_1_count, 1);
+
+        let null_count: i64 = conn
+            .query_row(
+                "SELECT row_count FROM rsduck_catalog.rs_partition WHERE partition_value = '_null'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_count, 2);
+    }
+
+    #[test]
+    fn alter_partitioned_table_add_column_updates_parent_and_partitions() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'),
+             (2, NULL, 'dirty')",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(
+            &conn,
+            "ALTER TABLE ods_access_log ADD COLUMN source TEXT DEFAULT 'web'",
+        )
+        .unwrap();
+
+        let parent_attr_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname = 'ods_access_log' AND a.attname = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_attr_count, 1);
+
+        let child_attr_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname IN ('ods_access_log_20260701', 'ods_access_log_null') \
+                   AND a.attname = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(child_attr_count, 2);
+
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM ods_access_log WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "web");
+
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content, source) VALUES
+             (3, TIMESTAMP '2026-07-02 09:00:00', 'ok-2', 'api')",
+        )
+        .unwrap();
+        let inserted_source: String = conn
+            .query_row(
+                "SELECT source FROM ods_access_log WHERE id = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inserted_source, "api");
+    }
+
+    #[test]
+    fn drop_partitioned_table_removes_entrypoint_partitions_and_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00'),
+             (2, NULL)",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(&conn, "DROP TABLE ods_access_log").unwrap();
+
+        let class_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class \
+                 WHERE relname IN ('ods_access_log', 'ods_access_log_20260701', 'ods_access_log_null')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(class_count, 0);
+        let partition_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(partition_count, 0);
+        let view_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_views() WHERE schema_name = 'main' AND view_name = 'ods_access_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_count, 0);
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() \
+                 WHERE schema_name = 'rsduck_internal' \
+                   AND table_name IN ('ods_access_log_20260701', 'ods_access_log_null')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn partitioned_table_validation_rejects_invalid_key_rules() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE bad_hour(id BIGINT, trade_date DATE)
+             PARTITION BY RANGE (trade_date)
+             WITH (partition_unit = 'hour', retention = '7')",
+        )
+        .unwrap_err();
+        assert!(err.contains("DATE partition key does not support"));
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE bad_not_null(id BIGINT, access_time TIMESTAMP NOT NULL)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '7')",
+        )
+        .unwrap_err();
+        assert!(err.contains("must allow NULL"));
+    }
+
+    #[test]
+    fn startup_validation_rebuilds_partition_entrypoint_from_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        conn.execute("DROP VIEW ods_access_log", []).unwrap();
+
+        validate_after_start(&conn).unwrap();
+
+        let view_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_views() WHERE schema_name = 'main' AND view_name = 'ods_access_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_count, 1);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+    }
+
+    #[test]
+    fn startup_validation_marks_partition_parent_unavailable_when_child_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        conn.execute("DROP VIEW ods_access_log", []).unwrap();
+        conn.execute("DROP TABLE rsduck_internal.ods_access_log_null", [])
+            .unwrap();
+
+        validate_after_start(&conn).unwrap();
+
+        let parent_status: String = conn
+            .query_row(
+                "SELECT status FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_status, "unavailable");
+
+        let partition_status: String = conn
+            .query_row(
+                "SELECT status FROM rsduck_catalog.rs_partition WHERE partition_value = '_null'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(partition_status, "failed");
     }
 
     #[test]
