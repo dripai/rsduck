@@ -902,10 +902,26 @@ pub fn execute_catalog_aware_write_as(
 
 pub fn guard_external_sql(sql: &str) -> Result<(), String> {
     let normalized = normalize_for_guard(sql);
-    if normalized.contains("rsduck_catalog.") || normalized.contains("rsduck_internal.") {
-        return Err("reserved schema is managed by rsduck catalog".into());
+    for schema in [
+        "rsduck_catalog",
+        "rsduck_internal",
+        "pg_catalog",
+        "information_schema",
+    ] {
+        if normalized.contains(&format!("{schema}."))
+            && (!matches!(schema, "pg_catalog" | "information_schema")
+                || !is_catalog_projection_read(&normalized))
+        {
+            return Err(format!(
+                "reserved schema is managed by rsduck catalog: {schema}"
+            ));
+        }
     }
     Ok(())
+}
+
+fn is_catalog_projection_read(normalized_sql: &str) -> bool {
+    normalized_sql.starts_with("select ") || normalized_sql.starts_with("with ")
 }
 
 pub fn looks_like_managed_partition_create(sql: &str) -> bool {

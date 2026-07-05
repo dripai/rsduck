@@ -879,6 +879,21 @@ mod tests {
     }
 
     #[test]
+    fn reserved_pg_catalog_write_is_rejected_through_db_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+        let sql = "INSERT INTO pg_catalog.pg_class VALUES (1)";
+        let decision = route_sql(sql).unwrap();
+        let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "reserved schema is managed by rsduck catalog: pg_catalog"
+        );
+    }
+
+    #[test]
     fn unsupported_catalog_relation_reports_relation_name() {
         let conn = Connection::open_in_memory().unwrap();
         crate::catalog::bootstrap_fresh(&conn).unwrap();
