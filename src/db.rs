@@ -452,6 +452,7 @@ fn restore_or_initialize(
     if let Some(path) = snapshot_dir {
         let t0 = Instant::now();
         info!("Restoring from snapshot dir: {}", path);
+        prepare_snapshot_parquet_extension(conn, Path::new(path).parent())?;
         conn.execute_batch(&import_database_sql(path))
             .map_err(|e| format!("import snapshot failed: {e}"))?;
         info!("Snapshot restored in {:.2?}", t0.elapsed());
@@ -599,6 +600,7 @@ fn save_snapshot_blocking(
         ));
     }
 
+    prepare_snapshot_parquet_extension(conn, Some(Path::new(snapshot_dir)))?;
     let tmp_path_text = tmp_path.display().to_string();
     conn.execute_batch(&export_database_sql(&tmp_path_text))
         .map_err(|e| {
@@ -614,6 +616,25 @@ fn save_snapshot_blocking(
         format!("rename snapshot dir failed: {e}")
     })?;
     Ok(final_path.display().to_string())
+}
+
+fn prepare_snapshot_parquet_extension(
+    conn: &Connection,
+    base_dir: Option<&Path>,
+) -> Result<(), String> {
+    let extension_dir = match base_dir {
+        Some(path) => path.join(".rsduck_duckdb_extensions"),
+        None => std::env::temp_dir().join(".rsduck_duckdb_extensions"),
+    };
+    std::fs::create_dir_all(&extension_dir)
+        .map_err(|e| format!("create DuckDB extension dir failed: {e}"))?;
+    let extension_dir_text = extension_dir.display().to_string();
+    conn.execute_batch(&format!(
+        "SET extension_directory = '{}'; INSTALL parquet; LOAD parquet;",
+        escape_sql_string(&extension_dir_text)
+    ))
+    .map_err(|e| format!("prepare parquet extension failed: {e}"))?;
+    Ok(())
 }
 
 fn write_snapshot_manifest(
