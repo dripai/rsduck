@@ -674,7 +674,9 @@ fn validate_partitioned_relation(
     } else if validate_view_physical(conn, parent_oid, schema, relname).is_err() {
         rebuild_partition_entrypoint(conn, parent_oid, &expected_sql)?;
     }
-    validate_view_physical(conn, parent_oid, schema, relname)
+    validate_view_physical(conn, parent_oid, schema, relname)?;
+    sync_partition_dependencies(conn, parent_oid, &partitions)?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1784,6 +1786,7 @@ fn create_table_relation(
             return Err(format!("relation already exists: {schema}.{table}"));
         }
 
+        validate_create_table_column_types(create_table)?;
         ensure_user_schema_exists(conn, &schema)?;
         let rel_oid = allocate_oid(conn)?;
         let type_oid = allocate_oid(conn)?;
@@ -1835,11 +1838,6 @@ fn create_range_partitioned_table(
 
     let (schema, table) = relation_name(&create_table.name)?;
     reject_reserved_schema(&schema)?;
-    let (partition_key_type, _) = validate_partition_key(
-        &create_table,
-        &partitioned.partition_key,
-        &partitioned.partition_unit,
-    )?;
     let null_partition = physical_partition_name(&table, "_null");
     let view_sql =
         partition_entrypoint_sql(&schema, &table, &[("rsduck_internal", &null_partition)]);
@@ -1857,6 +1855,12 @@ fn create_range_partitioned_table(
             ));
         }
 
+        validate_create_table_column_types(&create_table)?;
+        let (partition_key_type, _) = validate_partition_key(
+            &create_table,
+            &partitioned.partition_key,
+            &partitioned.partition_unit,
+        )?;
         ensure_user_schema_exists(conn, &schema)?;
         let parent_oid = allocate_oid(conn)?;
         let parent_type_oid = allocate_oid(conn)?;
@@ -3285,6 +3289,7 @@ fn grant_targets(
             .iter()
             .map(|name| {
                 let (schema, relation) = relation_name(name)?;
+                reject_reserved_schema(&schema)?;
                 let relid = relation_oid(conn, &schema, &relation)?;
                 Ok(("relation".to_string(), relid))
             })
@@ -3293,6 +3298,7 @@ fn grant_targets(
             .iter()
             .map(|name| {
                 let schema = single_name_part(name)?;
+                reject_reserved_schema(&schema)?;
                 Ok(("schema".to_string(), namespace_oid(conn, &schema)?))
             })
             .collect(),
@@ -3428,6 +3434,7 @@ fn comment_object(
         let (objoid, classoid, objsubid) = match object_type {
             CommentObject::Schema => {
                 let schema = single_name_part(object_name)?;
+                reject_reserved_schema(&schema)?;
                 match namespace_oid(conn, &schema) {
                     Ok(oid) => (oid, PG_NAMESPACE_CLASSOID, 0),
                     Err(_) if if_exists => return Ok(0),
@@ -3436,6 +3443,7 @@ fn comment_object(
             }
             CommentObject::Table | CommentObject::View | CommentObject::Index => {
                 let (schema, relname) = relation_name(object_name)?;
+                reject_reserved_schema(&schema)?;
                 match find_relation_meta(conn, &schema, &relname)? {
                     Some(meta) => (meta.oid, PG_CLASS_CLASSOID, 0),
                     None if if_exists => return Ok(0),
@@ -3444,6 +3452,7 @@ fn comment_object(
             }
             CommentObject::Column => {
                 let (schema, relname, column) = column_comment_target(object_name)?;
+                reject_reserved_schema(&schema)?;
                 let Some(meta) = find_relation_meta(conn, &schema, &relname)? else {
                     if if_exists {
                         return Ok(0);
@@ -3652,6 +3661,14 @@ fn validate_partition_key(
     ))
 }
 
+fn validate_create_table_column_types(create_table: &CreateTable) -> Result<(), String> {
+    for column in &create_table.columns {
+        let type_text = column.data_type.to_string();
+        pg_type_oid_for_duckdb_type(&type_text)?;
+    }
+    Ok(())
+}
+
 fn physical_partition_name(parent: &str, partition_value: &str) -> String {
     let suffix = partition_value.trim_start_matches('_');
     format!("{parent}_{suffix}")
@@ -3668,6 +3685,35 @@ fn physical_partition_create_sql(partition_name: &str, create_table: &CreateTabl
         "CREATE TABLE {} ({columns})",
         quote_qualified("rsduck_internal", partition_name)
     )
+}
+
+fn physical_partition_create_from_catalog_sql(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+    columns: &[CatalogColumn],
+) -> Result<String, String> {
+    let mut column_defs = Vec::with_capacity(columns.len());
+    for column in columns {
+        let mut definition = format!(
+            "{} {}",
+            quote_ident(&column.name),
+            duckdb_type_for_pg_type_oid(conn, column.pg_type_oid)?
+        );
+        if column.not_null {
+            definition.push_str(" NOT NULL");
+        }
+        if let Some(default_expr) = &column.default_expr {
+            definition.push_str(" DEFAULT ");
+            definition.push_str(default_expr);
+        }
+        column_defs.push(definition);
+    }
+    Ok(format!(
+        "CREATE TABLE {} ({})",
+        quote_qualified(schema, relation),
+        column_defs.join(", ")
+    ))
 }
 
 fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str)]) -> String {
@@ -3794,11 +3840,12 @@ fn create_range_partition(
 
     let child_oid = allocate_oid(conn)?;
     let child_type_oid = allocate_oid(conn)?;
-    let create_sql = format!(
-        "CREATE TABLE {} AS SELECT * FROM {} WHERE 1 = 0",
-        quote_qualified("rsduck_internal", &child_relname),
-        quote_qualified(&relation.schema, &relation.name)
-    );
+    let create_sql = physical_partition_create_from_catalog_sql(
+        conn,
+        "rsduck_internal",
+        &child_relname,
+        &relation.columns,
+    )?;
     conn.execute(&create_sql, [])
         .map_err(|e| format!("execute DuckDB CREATE partition failed: {e}"))?;
     let columns = load_duckdb_columns(conn, "rsduck_internal", &child_relname)?;
@@ -4088,6 +4135,15 @@ fn refresh_partition_entrypoint(
         .collect::<Vec<_>>();
     let sql = partition_entrypoint_sql(schema, relname, &active_physical);
     rebuild_partition_entrypoint(conn, parent_oid, &sql)?;
+    sync_partition_dependencies(conn, parent_oid, &partitions)?;
+    Ok(())
+}
+
+fn sync_partition_dependencies(
+    conn: &Connection,
+    parent_oid: i64,
+    partitions: &[ActivePartitionChild],
+) -> Result<(), String> {
     conn.execute(
         &format!(
             "DELETE FROM rsduck_catalog.pg_depend \
@@ -4606,6 +4662,17 @@ fn pg_type_oid_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> {
             "unsupported DuckDB type for rsduck catalog: {duckdb_type}"
         ))
     }
+}
+
+fn duckdb_type_for_pg_type_oid(conn: &Connection, pg_type_oid: i64) -> Result<String, String> {
+    conn.query_row(
+        &format!(
+            "SELECT rsduck_physical_type FROM rsduck_catalog.pg_type WHERE oid = {pg_type_oid}"
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("lookup DuckDB type for pg_type oid {pg_type_oid} failed: {e}"))
 }
 
 fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
@@ -6327,7 +6394,7 @@ mod tests {
         allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh,
         evaluate_privilege_function, execute_catalog_aware_write, execute_catalog_aware_write_as,
         hash_password, namespace_oid, relation_oid, sql_string, validate_after_start,
-        verify_password,
+        verify_password, PG_CLASS_CLASSOID,
     };
     use duckdb::Connection;
 
@@ -6679,6 +6746,36 @@ mod tests {
     }
 
     #[test]
+    fn grant_on_reserved_schema_is_rejected_without_privilege_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE USER reader_user PASSWORD='pw'").unwrap();
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "GRANT CREATE ON SCHEMA rsduck_catalog TO reader_user",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "reserved schema is managed by rsduck catalog: rsduck_catalog"
+        );
+
+        let reserved_privilege_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.rs_privilege p \
+                 JOIN rsduck_catalog.pg_namespace n ON n.oid = p.object_id \
+                 WHERE p.object_type = 'schema' \
+                   AND n.nspname IN ('pg_catalog', 'information_schema', 'rsduck_catalog', 'rsduck_internal')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved_privilege_count, 0);
+    }
+
+    #[test]
     fn create_table_writes_pg_class_and_attributes() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -6759,6 +6856,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(physical_count, 0);
+    }
+
+    #[test]
+    fn create_partitioned_table_rejects_unsupported_type_without_leftovers() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE bad_metric(id BIGINT, access_time TIMESTAMP, flag TINYINT)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported DuckDB type"));
+        assert!(err.contains("TINYINT"));
+
+        let catalog_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname LIKE 'bad_metric%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(catalog_count, 0);
+
+        let physical_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() \
+                 WHERE table_name IN ('bad_metric', 'bad_metric_null')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_table_count, 0);
+        let physical_view_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'bad_metric'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_view_count, 0);
     }
 
     #[test]
@@ -6986,6 +7126,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(column_comment, "close price");
+    }
+
+    #[test]
+    fn comment_on_reserved_schema_is_rejected() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "COMMENT ON SCHEMA rsduck_catalog IS 'internal catalog'",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "reserved schema is managed by rsduck catalog: rsduck_catalog"
+        );
+
+        let comment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_description d \
+                 JOIN rsduck_catalog.pg_namespace n ON n.oid = d.objoid \
+                 WHERE n.nspname = 'rsduck_catalog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(comment_count, 0);
     }
 
     #[test]
@@ -7322,6 +7490,51 @@ mod tests {
     }
 
     #[test]
+    fn new_partition_preserves_parent_column_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                access_time TIMESTAMP,
+                source TEXT DEFAULT 'web'
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00')",
+        )
+        .unwrap();
+
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM ods_access_log WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "web");
+
+        let physical_default: Option<String> = conn
+            .query_row(
+                "SELECT column_default FROM duckdb_columns() \
+                 WHERE schema_name = 'rsduck_internal' \
+                   AND table_name = 'ods_access_log_20260701' \
+                   AND column_name = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_default.as_deref(), Some("'web'"));
+    }
+
+    #[test]
     fn alter_partitioned_table_add_column_updates_parent_and_partitions() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -7566,6 +7779,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "active");
+    }
+
+    #[test]
+    fn startup_validation_rebuilds_partition_dependencies_from_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        let parent_oid: i64 = conn
+            .query_row(
+                "SELECT oid FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active_partition_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
+                     WHERE parent_relid = {parent_oid} AND status = 'active'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            &format!(
+                "DELETE FROM rsduck_catalog.pg_depend \
+                 WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
+                   AND refclassid = {PG_CLASS_CLASSOID}"
+            ),
+            [],
+        )
+        .unwrap();
+        super::refresh_catalog_checksum(&conn).unwrap();
+
+        validate_after_start(&conn).unwrap();
+
+        let dependency_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
+                     WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
+                       AND refclassid = {PG_CLASS_CLASSOID}"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dependency_count, active_partition_count);
     }
 
     #[test]

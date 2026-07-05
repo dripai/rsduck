@@ -1143,21 +1143,29 @@ fn information_schema_columns_sql() -> String {
 fn pg_type_sql() -> String {
     "
     SELECT
-        CAST(oid AS VARCHAR) AS oid,
-        typname,
-        CAST(typnamespace AS VARCHAR) AS typnamespace,
-        CAST(typowner AS VARCHAR) AS typowner,
-        CAST(typlen AS VARCHAR) AS typlen,
-        CASE WHEN typbyval THEN 't' ELSE 'f' END AS typbyval,
-        typtype,
-        typcategory,
-        CASE WHEN typisdefined THEN 't' ELSE 'f' END AS typisdefined,
-        CAST(typrelid AS VARCHAR) AS typrelid,
-        CAST(typelem AS VARCHAR) AS typelem,
-        CAST(typarray AS VARCHAR) AS typarray,
-        rsduck_physical_type
-    FROM rsduck_catalog.pg_type
-    ORDER BY oid
+        CAST(t.oid AS VARCHAR) AS oid,
+        t.typname,
+        CAST(t.typnamespace AS VARCHAR) AS typnamespace,
+        CAST(t.typowner AS VARCHAR) AS typowner,
+        CAST(t.typlen AS VARCHAR) AS typlen,
+        CASE WHEN t.typbyval THEN 't' ELSE 'f' END AS typbyval,
+        t.typtype,
+        t.typcategory,
+        CASE WHEN t.typisdefined THEN 't' ELSE 'f' END AS typisdefined,
+        CAST(t.typrelid AS VARCHAR) AS typrelid,
+        CAST(t.typelem AS VARCHAR) AS typelem,
+        CAST(t.typarray AS VARCHAR) AS typarray,
+        t.rsduck_physical_type
+    FROM rsduck_catalog.pg_type t
+    LEFT JOIN rsduck_catalog.pg_class c ON c.oid = t.typrelid
+    LEFT JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    WHERE t.typtype = 'b'
+       OR (
+           t.typtype = 'c'
+           AND c.status IN ('active', 'unavailable')
+           AND COALESCE(ext.visibility, 'user') = 'user'
+       )
+    ORDER BY t.oid
     "
     .to_string()
 }
@@ -1416,12 +1424,16 @@ fn information_schema_constraint_column_usage_sql() -> String {
 fn pg_attrdef_sql() -> String {
     "
     SELECT
-        CAST(oid AS VARCHAR) AS oid,
-        CAST(adrelid AS VARCHAR) AS adrelid,
-        CAST(adnum AS VARCHAR) AS adnum,
-        adbin
-    FROM rsduck_catalog.pg_attrdef
-    ORDER BY adrelid, adnum
+        CAST(d.oid AS VARCHAR) AS oid,
+        CAST(d.adrelid AS VARCHAR) AS adrelid,
+        CAST(d.adnum AS VARCHAR) AS adnum,
+        d.adbin
+    FROM rsduck_catalog.pg_attrdef d
+    JOIN rsduck_catalog.pg_class c ON c.oid = d.adrelid
+    JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    WHERE c.status IN ('active', 'unavailable')
+      AND ext.visibility = 'user'
+    ORDER BY d.adrelid, d.adnum
     "
     .to_string()
 }
@@ -2327,6 +2339,72 @@ mod tests {
             )
             .unwrap();
         assert_eq!(view_type, "VIEW");
+    }
+
+    #[test]
+    fn pg_type_projection_hides_internal_partition_row_types() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00')",
+        )
+        .unwrap();
+
+        let type_sql = rewrite_sql(
+            "SELECT typname FROM pg_catalog.pg_type WHERE typname LIKE 'ods_access_log%'",
+        )
+        .expect("rewrite pg_type sql");
+        let type_names = conn
+            .prepare(&type_sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>("typname"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(type_names, vec!["ods_access_log".to_string()]);
+    }
+
+    #[test]
+    fn pg_attrdef_projection_hides_internal_partition_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(
+                id BIGINT,
+                access_time TIMESTAMP,
+                source TEXT DEFAULT 'web'
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00')",
+        )
+        .unwrap();
+
+        let attrdef_sql =
+            rewrite_sql("SELECT adbin FROM pg_catalog.pg_attrdef").expect("rewrite pg_attrdef sql");
+        let defaults = conn
+            .prepare(&attrdef_sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>("adbin"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(defaults, vec!["'web'".to_string()]);
     }
 
     #[test]
