@@ -595,10 +595,10 @@ async function postSql(sql, page = 0, pageSize = 1000) {
 
 async function loadTables(showErrors = true) {
   const sql = `
-    SELECT schema_name, table_name, column_count, estimated_size
-    FROM duckdb_tables()
-    WHERE internal = false
-    ORDER BY schema_name, table_name
+    SELECT table_schema, table_name, table_type
+    FROM information_schema.tables
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'rsduck_catalog', 'rsduck_internal')
+    ORDER BY table_schema, table_name
   `;
   const data = await postSql(sql, 0, 10000);
   if (!data.success) {
@@ -609,16 +609,14 @@ async function loadTables(showErrors = true) {
     return;
   }
 
-  const schemaIdx = data.columns.findIndex(c => c.toLowerCase() === 'schema_name');
+  const schemaIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_schema');
   const tableIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_name');
-  const columnIdx = data.columns.findIndex(c => c.toLowerCase() === 'column_count');
-  const sizeIdx = data.columns.findIndex(c => c.toLowerCase() === 'estimated_size');
+  const typeIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_type');
 
   tables = data.rows.map(row => ({
     schema: row[schemaIdx] || 'main',
     name: row[tableIdx] || '',
-    columns: columnIdx >= 0 ? row[columnIdx] : '',
-    size: sizeIdx >= 0 ? row[sizeIdx] : ''
+    type: typeIdx >= 0 ? row[typeIdx] : ''
   })).filter(item => item.name);
 
   renderTables();
@@ -652,7 +650,7 @@ function renderTables() {
     html += '<div class="schema-name">' + escapeHtml(schema) + '</div>';
     for (const item of items) {
       const key = item.schema + '.' + item.name;
-      const meta = item.columns ? item.columns + ' cols' : '';
+      const meta = item.type || '';
       html += '<button class="table-row ' + (key === activeTable ? 'active' : '') + '" ';
       html += 'title="' + escapeHtml(key) + '" ';
       html += 'onclick="selectTable(' + escapeHtml(JSON.stringify(item.schema)) + ',' + escapeHtml(JSON.stringify(item.name)) + ')">';
