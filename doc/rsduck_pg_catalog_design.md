@@ -585,7 +585,7 @@ rsduck_internal.ods_access_log_null
 - PG wire 和 Web 登录都必须通过 `rs_user` 认证。
 - `disabled` 和 `locked` 用户不得登录。
 - 密码校验必须在 SQL 执行前完成。
-- 内置 bootstrap admin 只能用于首次初始化或显式恢复场景，生产环境必须要求修改默认密码或禁用默认密码登录。
+- 内置 bootstrap admin 默认账号为 `admin`，默认密码为 `admin`。生产部署应由管理员自行修改默认密码。
 
 ### 5.16 `rsduck_catalog.rs_role`
 
@@ -897,7 +897,44 @@ username + password/token
 - session principal 必须绑定 `user_id`、`username`、roles、system privileges。
 - 密码 hash 算法必须可版本化，便于后续升级。
 
-### 8.2 授权动作
+### 8.2 Bootstrap 默认账号
+
+首次 catalog bootstrap 必须创建默认管理员：
+
+```text
+username = admin
+password = admin
+role = admin
+status = active
+is_builtin = true
+```
+
+写入规则：
+
+```text
+rs_user:
+  username = 'admin'
+  password_hash = hash('admin')
+  password_algo = 'argon2id'
+  status = 'active'
+  is_builtin = true
+
+rs_role:
+  role_name = 'admin'
+  is_builtin = true
+
+rs_user_role:
+  admin user -> admin role
+```
+
+规则：
+
+- 默认密码不为空，不使用无密码登录。
+- rsduck 不强制首次登录修改密码。
+- 管理员应在生产部署后通过管理命令或 Web 控制台自行修改默认密码。
+- 默认管理员账号不得被删除；如需禁用，必须先确保存在另一个 active admin 用户。
+
+### 8.3 授权动作
 
 SQL router 在执行前必须把请求归类成 action：
 
@@ -923,7 +960,7 @@ SQL router 在执行前必须把请求归类成 action：
 - 对 managed physical partition table 的直接读写默认拒绝，即使用户拥有 parent 分区表权限。
 - 分区表查询入口的权限继承自 parent relation，不继承 physical partition table。
 
-### 8.3 Reserved Schema 权限
+### 8.4 Reserved Schema 权限
 
 reserved schema 权限规则：
 
@@ -940,7 +977,7 @@ reserved schema 权限规则：
 - 内部 mutation planner 不通过用户 SQL 权限绕行，而是使用 internal execution context。
 - 诊断模式查询必须写审计日志。
 
-### 8.4 PG 兼容投影
+### 8.5 PG 兼容投影
 
 PG 兼容对象必须反映 rsduck session 用户，但不实现完整 PG ACL：
 
@@ -950,7 +987,7 @@ PG 兼容对象必须反映 rsduck session 用户，但不实现完整 PG ACL：
 - `pg_roles` 和 `pg_user` 从 `rs_user` / `rs_role` 派生兼容行。
 - `relowner`、`nspowner` 当前只用于兼容展示，不作为授权判断来源。
 
-### 8.5 审计要求
+### 8.6 审计要求
 
 以下操作必须记录审计事件：
 
