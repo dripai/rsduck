@@ -116,6 +116,7 @@ fn statement_command(statement: &Statement) -> &'static str {
         Statement::Delete(_) => "DELETE",
         Statement::CreateView(_) => "CREATE",
         Statement::CreateTable(_) => "CREATE",
+        Statement::CreateUser(_) => "CREATE",
         Statement::CreateVirtualTable { .. } => "CREATE",
         Statement::CreateIndex(_) => "CREATE",
         Statement::CreateRole(_) => "CREATE",
@@ -130,6 +131,7 @@ fn statement_command(statement: &Statement) -> &'static str {
         Statement::AlterSchema(_) => "ALTER",
         Statement::AlterIndex { .. } => "ALTER",
         Statement::AlterView { .. } => "ALTER",
+        Statement::AlterUser(_) => "ALTER",
         Statement::AlterFunction(_) => "ALTER",
         Statement::AlterType(_) => "ALTER",
         Statement::AlterCollation(_) => "ALTER",
@@ -227,6 +229,18 @@ mod tests {
         assert_eq!(
             route_sql("CREATE TABLE t(id INTEGER)").unwrap().route,
             SqlRoute::Write
+        );
+        assert_eq!(
+            route_sql("CREATE USER alice PASSWORD='pw'")
+                .unwrap()
+                .command,
+            "CREATE"
+        );
+        assert_eq!(
+            route_sql("ALTER USER alice PASSWORD 'newpw'")
+                .unwrap()
+                .command,
+            "ALTER"
         );
         assert_eq!(
             route_sql(

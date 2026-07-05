@@ -5,9 +5,9 @@ use duckdb::Connection;
 use rand_core::OsRng;
 use sqlparser::ast::{
     Action, AlterTable, AlterTableOperation, AlterUser, ColumnOption, CommentObject, CreateIndex,
-    CreateTable, CreateUser, CreateView, Expr, Grant, GrantObjects, GranteeName, GranteesType,
-    Insert, ObjectName, ObjectNamePart, ObjectType, Privileges, Revoke, SchemaName, SetExpr,
-    Statement, TableConstraint, TableObject, Value,
+    CreateTable, CreateUser, CreateView, Expr, ForeignKeyConstraint, Grant, GrantObjects,
+    GranteeName, GranteesType, Insert, ObjectName, ObjectNamePart, ObjectType, Privileges, Revoke,
+    SchemaName, SetExpr, Statement, TableConstraint, TableObject, Value,
 };
 use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -30,6 +30,7 @@ const ROLE_READER_ID: i64 = 24;
 
 const FIRST_USER_OID: i64 = 10_000;
 const PG_CLASS_CLASSOID: i64 = 1259;
+const PG_CONSTRAINT_CLASSOID: i64 = 2606;
 const PG_NAMESPACE_CLASSOID: i64 = 2615;
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,13 @@ struct RelationMeta {
 }
 
 #[derive(Debug, Clone)]
+struct RelationAccessMeta {
+    oid: i64,
+    status: String,
+    error_message: String,
+}
+
+#[derive(Debug, Clone)]
 struct ManagedPartitionCreate {
     base_sql: String,
     partition_key: String,
@@ -65,6 +73,7 @@ struct PartitionedRelation {
     partition_key: String,
     partition_key_type: String,
     partition_unit: String,
+    retention_count: i32,
     columns: Vec<CatalogColumn>,
 }
 
@@ -130,9 +139,185 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
         return Err(format!("rsduck catalog status is not ready: {status}"));
     }
 
+    validate_catalog_journal_state(conn)?;
+    validate_catalog_integrity(conn)?;
     validate_physical_relations(conn)?;
     validate_partitioned_relations(conn)?;
     Ok(())
+}
+
+fn validate_catalog_journal_state(conn: &Connection) -> Result<(), String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_catalog_journal \
+             WHERE status IN ('pending', 'failed')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check catalog journal state failed: {e}"))?;
+    if count == 0 {
+        return Ok(());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT journal_id, mutation_type, status, error_message \
+             FROM rsduck_catalog.rs_catalog_journal \
+             WHERE status IN ('pending', 'failed') \
+             ORDER BY journal_id \
+             LIMIT 5",
+        )
+        .map_err(|e| format!("prepare unfinished catalog journal summary failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query unfinished catalog journal summary failed: {e}"))?;
+    let mut summaries = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read unfinished catalog journal summary failed: {e}"))?
+    {
+        let journal_id: i64 = row
+            .get(0)
+            .map_err(|e| format!("read journal id failed: {e}"))?;
+        let mutation_type: String = row
+            .get(1)
+            .map_err(|e| format!("read journal mutation type failed: {e}"))?;
+        let status: String = row
+            .get(2)
+            .map_err(|e| format!("read journal status failed: {e}"))?;
+        let error_message: String = row
+            .get(3)
+            .map_err(|e| format!("read journal error message failed: {e}"))?;
+        summaries.push(format!(
+            "#{journal_id} {mutation_type} {status}: {error_message}"
+        ));
+    }
+
+    Err(format!(
+        "catalog journal contains unfinished mutations: {}",
+        summaries.join("; ")
+    ))
+}
+
+fn validate_catalog_integrity(conn: &Connection) -> Result<(), String> {
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*) \
+         FROM rsduck_catalog.pg_class c \
+         LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.oid IS NULL",
+        "pg_class.relnamespace must reference pg_namespace",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*) \
+         FROM rsduck_catalog.pg_attribute a \
+         LEFT JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+         WHERE c.oid IS NULL",
+        "pg_attribute.attrelid must reference pg_class",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*) \
+         FROM rsduck_catalog.pg_attribute a \
+         LEFT JOIN rsduck_catalog.pg_type t ON t.oid = a.atttypid \
+         WHERE t.oid IS NULL",
+        "pg_attribute.atttypid must reference pg_type",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*) FROM ( \
+             SELECT c.relnamespace, lower(c.relname) AS relname \
+             FROM rsduck_catalog.pg_class c \
+             WHERE c.status = 'active' \
+             GROUP BY c.relnamespace, lower(c.relname) \
+             HAVING COUNT(*) > 1 \
+         ) duplicate_relations",
+        "active relation names must be unique per namespace",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
+             WHERE classid NOT IN ({PG_CLASS_CLASSOID}, {PG_CONSTRAINT_CLASSOID}, {PG_NAMESPACE_CLASSOID}) \
+                OR refclassid NOT IN ({PG_CLASS_CLASSOID}, {PG_CONSTRAINT_CLASSOID}, {PG_NAMESPACE_CLASSOID})"
+        ),
+        "pg_depend classid/refclassid must reference supported catalog classes",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_class c ON c.oid = d.objid \
+             WHERE d.classid = {PG_CLASS_CLASSOID} AND c.oid IS NULL"
+        ),
+        "pg_depend class object must reference pg_class",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_class c ON c.oid = d.refobjid \
+             WHERE d.refclassid = {PG_CLASS_CLASSOID} AND c.oid IS NULL"
+        ),
+        "pg_depend referenced class object must reference pg_class",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
+             WHERE d.classid = {PG_CONSTRAINT_CLASSOID} AND con.oid IS NULL"
+        ),
+        "pg_depend constraint object must reference pg_constraint",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_constraint con ON con.oid = d.refobjid \
+             WHERE d.refclassid = {PG_CONSTRAINT_CLASSOID} AND con.oid IS NULL"
+        ),
+        "pg_depend referenced constraint object must reference pg_constraint",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = d.objid \
+             WHERE d.classid = {PG_NAMESPACE_CLASSOID} AND n.oid IS NULL"
+        ),
+        "pg_depend namespace object must reference pg_namespace",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        &format!(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.pg_depend d \
+             LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = d.refobjid \
+             WHERE d.refclassid = {PG_NAMESPACE_CLASSOID} AND n.oid IS NULL"
+        ),
+        "pg_depend referenced namespace object must reference pg_namespace",
+    )?;
+    Ok(())
+}
+
+fn ensure_catalog_count_zero(conn: &Connection, sql: &str, violation: &str) -> Result<(), String> {
+    let count: i64 = conn
+        .query_row(sql, [], |row| row.get(0))
+        .map_err(|e| format!("catalog integrity check failed: {violation}: {e}"))?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "catalog integrity violation: {violation}; invalid rows={count}"
+        ))
+    }
 }
 
 fn validate_physical_relations(conn: &Connection) -> Result<(), String> {
@@ -433,10 +618,9 @@ fn validate_catalog_columns_match_duckdb(
             .name
             .eq_ignore_ascii_case(&physical_column.name)
             || catalog_column.pg_type_oid != physical_column.pg_type_oid
-            || catalog_column.attnum != physical_column.attnum
         {
             return Err(format!(
-                "column mismatch at attnum {}: catalog={} duckdb={}",
+                "column mismatch at catalog attnum {}: catalog={} duckdb={}",
                 catalog_column.attnum, catalog_column.name, physical_column.name
             ));
         }
@@ -521,9 +705,6 @@ pub fn looks_like_managed_partition_create(sql: &str) -> bool {
 
 pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(), String> {
     let principal = principal_for_username(conn, username)?;
-    if principal.is_admin() {
-        return Ok(());
-    }
 
     if let Some(partitioned) = parse_managed_partition_create(sql)? {
         let (statement, _) = parse_one_statement(&partitioned.base_sql)?;
@@ -628,6 +809,7 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
             }
         }
         Statement::Set(_) | Statement::Use(_) | Statement::Pragma { .. } => Ok(()),
+        _ if principal.is_admin() => Ok(()),
         _ => Err(format!(
             "permission denied for statement type: {}",
             statement_command(&statement)
@@ -683,13 +865,11 @@ pub fn evaluate_privilege_function(
     if normalized.contains("has_database_privilege(")
         || normalized.contains("pg_catalog.has_database_privilege(")
     {
-        let target_user = if args.len() >= 3 {
-            args[0].clone()
-        } else {
-            current_user.to_string()
-        };
-        let principal = principal_for_username(conn, &target_user)?;
-        return Ok(("has_database_privilege".to_string(), principal.is_admin()));
+        let (target_user, database, privilege) = privilege_args(current_user, &args)?;
+        return Ok((
+            "has_database_privilege".to_string(),
+            has_database_privilege(conn, &target_user, &database, &privilege)?,
+        ));
     }
     Err("unsupported privilege function".into())
 }
@@ -862,7 +1042,7 @@ fn require_relation_action(
     action: &str,
 ) -> Result<(), String> {
     let (schema, relname) = relation;
-    let rel_oid = relation_oid(conn, schema, relname)?;
+    let rel_oid = available_relation_oid(conn, schema, relname)?;
     let namespace_oid = namespace_oid(conn, schema)?;
     if principal.is_admin()
         || has_explicit_privilege(conn, principal, "relation", rel_oid, action)?
@@ -903,6 +1083,26 @@ fn has_schema_action(
     let namespace_oid = namespace_oid(conn, schema)?;
     Ok(principal.is_admin()
         || has_explicit_privilege(conn, &principal, "schema", namespace_oid, action)?)
+}
+
+fn has_database_privilege(
+    conn: &Connection,
+    username: &str,
+    database: &str,
+    privilege: &str,
+) -> Result<bool, String> {
+    if !database.eq_ignore_ascii_case("postgres") {
+        return Ok(false);
+    }
+    let principal = principal_for_username(conn, username)?;
+    if principal.is_admin() {
+        return Ok(true);
+    }
+    if privilege.contains("connect") {
+        return Ok(true);
+    }
+    let action = database_privilege_action(privilege);
+    has_explicit_privilege(conn, &principal, "system", 0, action)
 }
 
 fn has_explicit_privilege(
@@ -1493,6 +1693,7 @@ fn insert_partitioned_relation(
             affected += rows.len();
         }
 
+        expire_old_partitions(conn, &relation)?;
         refresh_partition_entrypoint(conn, relation.oid, &relation.schema, &relation.name)?;
         finish_journal(conn, journal_id)?;
         Ok(affected)
@@ -1510,16 +1711,21 @@ fn partitioned_relation(
     if meta.relkind != "p" {
         return Ok(None);
     }
-    let (partition_key, partition_key_type, partition_unit): (String, String, String) = conn
+    let (partition_key, partition_key_type, partition_unit, retention_count): (
+        String,
+        String,
+        String,
+        i32,
+    ) = conn
         .query_row(
             &format!(
-                "SELECT partition_key, partition_key_type, partition_unit \
+                "SELECT partition_key, partition_key_type, partition_unit, retention_count \
                  FROM rsduck_catalog.rs_relation_ext \
                  WHERE relid = {} AND managed_kind = 'range_partitioned_table'",
                 meta.oid
             ),
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|e| format!("read partitioned relation metadata failed: {e}"))?;
     Ok(Some(PartitionedRelation {
@@ -1529,6 +1735,7 @@ fn partitioned_relation(
         partition_key,
         partition_key_type,
         partition_unit,
+        retention_count,
         columns: catalog_columns(conn, meta.oid)?,
     }))
 }
@@ -1693,9 +1900,30 @@ fn create_view_relation(
             &columns,
             owner_user_id,
         )?;
+        insert_view_dependencies(conn, rel_oid, sql)?;
         finish_journal(conn, journal_id)?;
         Ok(0)
     })
+}
+
+fn insert_view_dependencies(conn: &Connection, view_oid: i64, sql: &str) -> Result<(), String> {
+    for (schema, relation) in extract_read_relations(&normalize_for_guard(sql)) {
+        let ref_oid = relation_oid(conn, &schema, &relation)?;
+        if ref_oid == view_oid {
+            continue;
+        }
+        insert_depend_if_missing(
+            conn,
+            PG_CLASS_CLASSOID,
+            view_oid,
+            0,
+            PG_CLASS_CLASSOID,
+            ref_oid,
+            0,
+            "n",
+        )?;
+    }
+    Ok(())
 }
 
 fn create_index_relation(
@@ -1820,67 +2048,87 @@ fn alter_table_relation(
         return Err("ALTER TABLE currently supports exactly one operation".into());
     }
 
-    let AlterTableOperation::AddColumn {
-        if_not_exists,
-        column_def,
-        column_position,
-        ..
-    } = &alter_table.operations[0]
-    else {
-        return Err("only ALTER TABLE ADD COLUMN is implemented by rsduck catalog".into());
-    };
-    if column_position.is_some() {
-        return Err("ALTER TABLE ADD COLUMN position is not supported by rsduck catalog".into());
-    }
-
-    run_catalog_tx(conn, || {
-        let rel_oid = relation_oid(conn, &schema, &table)?;
-        let relkind = relation_kind(conn, rel_oid)?;
-        if column_exists(conn, rel_oid, &column_def.name.value)? {
-            if *if_not_exists {
-                return Ok(0);
+    match &alter_table.operations[0] {
+        AlterTableOperation::AddColumn {
+            if_not_exists,
+            column_def,
+            column_position,
+            ..
+        } => {
+            if column_position.is_some() {
+                return Err(
+                    "ALTER TABLE ADD COLUMN position is not supported by rsduck catalog".into(),
+                );
             }
-            return Err(format!(
-                "column already exists: {}.{}.{}",
-                schema, table, column_def.name
-            ));
-        }
 
-        let journal_id = insert_journal(conn, "alter_table_add_column", rel_oid, sql)?;
-        if relkind == "p" {
-            alter_partitioned_table_add_column(
-                conn,
-                rel_oid,
-                &schema,
-                &table,
-                &column_def.to_string(),
-            )?;
-            finish_journal(conn, journal_id)?;
-            return Ok(0);
+            run_catalog_tx(conn, || {
+                let rel_oid = relation_oid(conn, &schema, &table)?;
+                let relkind = relation_kind(conn, rel_oid)?;
+                if column_exists(conn, rel_oid, &column_def.name.value)? {
+                    if *if_not_exists {
+                        return Ok(0);
+                    }
+                    return Err(format!(
+                        "column already exists: {}.{}.{}",
+                        schema, table, column_def.name
+                    ));
+                }
+
+                let journal_id = insert_journal(conn, "alter_table_add_column", rel_oid, sql)?;
+                if relkind == "p" {
+                    alter_partitioned_table_add_column(
+                        conn,
+                        rel_oid,
+                        &schema,
+                        &table,
+                        &column_def.to_string(),
+                    )?;
+                    finish_journal(conn, journal_id)?;
+                    return Ok(0);
+                }
+                if relkind != "r" {
+                    return Err(format!(
+                        "ALTER TABLE ADD COLUMN only supports ordinary or partitioned tables, got relkind={relkind}"
+                    ));
+                }
+                conn.execute(sql, [])
+                    .map_err(|e| format!("execute DuckDB ALTER TABLE ADD COLUMN failed: {e}"))?;
+                let physical_columns = load_duckdb_columns(conn, &schema, &table)?;
+                let mut column = physical_columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(&column_def.name.value))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("DuckDB did not expose added column: {}", column_def.name)
+                    })?;
+                column.attnum = next_attribute_num(conn, rel_oid)?;
+                insert_attribute_row(conn, rel_oid, &column)?;
+                set_relnatts_to_active_attribute_count(conn, rel_oid)?;
+                finish_journal(conn, journal_id)?;
+                Ok(0)
+            })
         }
-        if relkind != "r" {
-            return Err(format!(
-                "ALTER TABLE ADD COLUMN only supports ordinary or partitioned tables, got relkind={relkind}"
-            ));
+        AlterTableOperation::DropColumn {
+            column_names,
+            if_exists,
+            drop_behavior,
+            ..
+        } => {
+            if drop_behavior.is_some() {
+                return Err("ALTER TABLE DROP COLUMN CASCADE/RESTRICT is not supported".into());
+            }
+            run_catalog_tx(conn, || {
+                let rel_oid = relation_oid(conn, &schema, &table)?;
+                let journal_id = insert_journal(conn, "alter_table_drop_column", rel_oid, sql)?;
+                alter_table_drop_columns(conn, rel_oid, &schema, &table, column_names, *if_exists)?;
+                finish_journal(conn, journal_id)?;
+                Ok(0)
+            })
         }
-        conn.execute(sql, [])
-            .map_err(|e| format!("execute DuckDB ALTER TABLE ADD COLUMN failed: {e}"))?;
-        let physical_columns = load_duckdb_columns(conn, &schema, &table)?;
-        let column = physical_columns
-            .iter()
-            .find(|column| column.name.eq_ignore_ascii_case(&column_def.name.value))
-            .ok_or_else(|| format!("DuckDB did not expose added column: {}", column_def.name))?;
-        insert_attribute_row(conn, rel_oid, column)?;
-        conn.execute(
-            &format!(
-                "UPDATE rsduck_catalog.pg_class SET relnatts = relnatts + 1 WHERE oid = {rel_oid}"
-            ),
-            [],
-        )
-        .map_err(|e| format!("update relnatts failed: {e}"))?;
-        finish_journal(conn, journal_id)?;
-        Ok(0)
-    })
+        _ => Err(
+            "only ALTER TABLE ADD COLUMN and DROP COLUMN are implemented by rsduck catalog".into(),
+        ),
+    }
 }
 
 fn alter_partitioned_table_add_column(
@@ -1895,6 +2143,7 @@ fn alter_partitioned_table_add_column(
         return Err("partitioned table has no active physical partitions".into());
     }
 
+    let new_attnum = next_attribute_num(conn, parent_oid)?;
     let mut parent_column: Option<CatalogColumn> = None;
     for child in &children {
         conn.execute(
@@ -1921,15 +2170,10 @@ fn alter_partitioned_table_add_column(
                 )
             })?
             .clone();
+        let mut column = column;
+        column.attnum = new_attnum;
         insert_attribute_row(conn, child.child_oid, &column)?;
-        conn.execute(
-            &format!(
-                "UPDATE rsduck_catalog.pg_class SET relnatts = relnatts + 1 WHERE oid = {}",
-                child.child_oid
-            ),
-            [],
-        )
-        .map_err(|e| format!("update child relnatts failed: {e}"))?;
+        set_relnatts_to_active_attribute_count(conn, child.child_oid)?;
 
         if parent_column.is_none() {
             parent_column = Some(column);
@@ -1939,14 +2183,275 @@ fn alter_partitioned_table_add_column(
     let parent_column = parent_column
         .ok_or_else(|| "partitioned table has no active physical partitions".to_string())?;
     insert_attribute_row(conn, parent_oid, &parent_column)?;
+    set_relnatts_to_active_attribute_count(conn, parent_oid)?;
+    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+}
+
+fn alter_table_drop_columns(
+    conn: &Connection,
+    rel_oid: i64,
+    schema: &str,
+    table: &str,
+    column_names: &[sqlparser::ast::Ident],
+    if_exists: bool,
+) -> Result<(), String> {
+    if column_names.is_empty() {
+        return Err("ALTER TABLE DROP COLUMN requires at least one column".into());
+    }
+    let relkind = relation_kind(conn, rel_oid)?;
+    let columns = drop_column_targets(conn, rel_oid, schema, table, column_names, if_exists)?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    if relkind == "p" {
+        return alter_partitioned_table_drop_columns(conn, rel_oid, schema, table, &columns);
+    }
+    if relkind != "r" {
+        return Err(format!(
+            "ALTER TABLE DROP COLUMN only supports ordinary or partitioned tables, got relkind={relkind}"
+        ));
+    }
+
+    for (column_name, attnum) in columns {
+        ensure_column_can_drop(conn, rel_oid, attnum, schema, table, &column_name)?;
+        conn.execute(
+            &format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                quote_qualified(schema, table),
+                quote_ident(&column_name)
+            ),
+            [],
+        )
+        .map_err(|e| format!("execute DuckDB ALTER TABLE DROP COLUMN failed: {e}"))?;
+        mark_column_dropped(conn, rel_oid, attnum)?;
+    }
+    set_relnatts_to_active_attribute_count(conn, rel_oid)
+}
+
+fn alter_partitioned_table_drop_columns(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    table: &str,
+    columns: &[(String, i32)],
+) -> Result<(), String> {
+    let partition_key: String = conn
+        .query_row(
+            &format!(
+                "SELECT partition_key FROM rsduck_catalog.rs_relation_ext WHERE relid = {parent_oid}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read partition key failed: {e}"))?;
+    for (column_name, attnum) in columns {
+        if column_name.eq_ignore_ascii_case(&partition_key) {
+            return Err(format!(
+                "cannot drop partition key column: {schema}.{table}.{column_name}"
+            ));
+        }
+        ensure_column_can_drop(conn, parent_oid, *attnum, schema, table, column_name)?;
+    }
+
+    let children = active_partition_children(conn, parent_oid)?;
+    if children.is_empty() {
+        return Err("partitioned table has no active physical partitions".into());
+    }
+
+    for child in &children {
+        for (column_name, _) in columns {
+            let child_attnum =
+                column_attnum(conn, child.child_oid, column_name)?.ok_or_else(|| {
+                    format!(
+                        "partition column does not exist in catalog: {}.{}.{}",
+                        child.schema, child.relname, column_name
+                    )
+                })?;
+            conn.execute(
+                &format!(
+                    "ALTER TABLE {} DROP COLUMN {}",
+                    quote_qualified(&child.schema, &child.relname),
+                    quote_ident(column_name)
+                ),
+                [],
+            )
+            .map_err(|e| {
+                format!(
+                    "execute DuckDB ALTER TABLE DROP COLUMN on partition {}.{} failed: {e}",
+                    child.schema, child.relname
+                )
+            })?;
+            mark_column_dropped(conn, child.child_oid, child_attnum)?;
+        }
+        set_relnatts_to_active_attribute_count(conn, child.child_oid)?;
+    }
+
+    for (_, attnum) in columns {
+        mark_column_dropped(conn, parent_oid, *attnum)?;
+    }
+    set_relnatts_to_active_attribute_count(conn, parent_oid)?;
+    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+}
+
+fn drop_column_targets(
+    conn: &Connection,
+    rel_oid: i64,
+    schema: &str,
+    table: &str,
+    column_names: &[sqlparser::ast::Ident],
+    if_exists: bool,
+) -> Result<Vec<(String, i32)>, String> {
+    let mut columns = Vec::new();
+    for column_name in column_names {
+        let name = column_name.value.clone();
+        match column_attnum(conn, rel_oid, &name)? {
+            Some(attnum) => columns.push((name, attnum)),
+            None if if_exists => {}
+            None => {
+                return Err(format!(
+                    "column does not exist in catalog: {schema}.{table}.{name}"
+                ))
+            }
+        }
+    }
+    Ok(columns)
+}
+
+fn ensure_column_can_drop(
+    conn: &Connection,
+    rel_oid: i64,
+    attnum: i32,
+    schema: &str,
+    table: &str,
+    column_name: &str,
+) -> Result<(), String> {
+    if column_attnum_list_contains(
+        conn,
+        "rsduck_catalog.pg_constraint",
+        "conrelid",
+        "conkey",
+        rel_oid,
+        attnum,
+    )? {
+        return Err(format!(
+            "cannot drop column with constraint dependency: {schema}.{table}.{column_name}"
+        ));
+    }
+    if column_attnum_list_contains(
+        conn,
+        "rsduck_catalog.pg_constraint",
+        "confrelid",
+        "confkey",
+        rel_oid,
+        attnum,
+    )? {
+        return Err(format!(
+            "cannot drop referenced column with foreign key dependency: {schema}.{table}.{column_name}"
+        ));
+    }
+    if column_attnum_list_contains(
+        conn,
+        "rsduck_catalog.pg_index",
+        "indrelid",
+        "indkey",
+        rel_oid,
+        attnum,
+    )? {
+        return Err(format!(
+            "cannot drop column with index dependency: {schema}.{table}.{column_name}"
+        ));
+    }
+    Ok(())
+}
+
+fn column_attnum_list_contains(
+    conn: &Connection,
+    table_name: &str,
+    relid_column: &str,
+    list_column: &str,
+    rel_oid: i64,
+    attnum: i32,
+) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {list_column} FROM {table_name} WHERE {relid_column} = {rel_oid}"
+        ))
+        .map_err(|e| format!("prepare column dependency lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query column dependency lookup failed: {e}"))?;
+    let attnum = attnum.to_string();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read column dependency lookup failed: {e}"))?
+    {
+        let value: String = row
+            .get(0)
+            .map_err(|e| format!("read column dependency list failed: {e}"))?;
+        if value
+            .split(',')
+            .map(str::trim)
+            .any(|part| part == attnum.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn mark_column_dropped(conn: &Connection, rel_oid: i64, attnum: i32) -> Result<(), String> {
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_class SET relnatts = relnatts + 1 WHERE oid = {parent_oid}"
+            "UPDATE rsduck_catalog.pg_attribute \
+             SET attisdropped = TRUE, atthasdef = FALSE \
+             WHERE attrelid = {rel_oid} AND attnum = {attnum}"
         ),
         [],
     )
-    .map_err(|e| format!("update parent relnatts failed: {e}"))?;
-    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+    .map_err(|e| format!("mark column dropped failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.pg_attrdef WHERE adrelid = {rel_oid} AND adnum = {attnum}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete dropped column default failed: {e}"))?;
+    Ok(())
+}
+
+fn next_attribute_num(conn: &Connection, rel_oid: i64) -> Result<i32, String> {
+    let max_attnum: Option<i32> = conn
+        .query_row(
+            &format!(
+                "SELECT MAX(attnum) FROM rsduck_catalog.pg_attribute WHERE attrelid = {rel_oid}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read max attribute number failed: {e}"))?;
+    Ok(max_attnum.unwrap_or(0) + 1)
+}
+
+fn set_relnatts_to_active_attribute_count(conn: &Connection, rel_oid: i64) -> Result<(), String> {
+    let active_count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_attribute \
+                 WHERE attrelid = {rel_oid} AND attisdropped = FALSE"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count active attributes failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.pg_class SET relnatts = {active_count} WHERE oid = {rel_oid}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("update active relnatts failed: {e}"))?;
+    Ok(())
 }
 
 fn drop_objects(
@@ -1992,7 +2497,7 @@ fn drop_objects(
             if meta.relkind == "p" {
                 drop_partitioned_relation(conn, &meta, &schema, &relname)?;
             } else {
-                execute_physical_drop(conn, object_type, &schema, &relname)?;
+                execute_physical_drop(conn, object_type, &schema, &relname, cascade)?;
                 delete_relation_catalog(conn, &meta)?;
             }
             finish_journal(conn, journal_id)?;
@@ -2746,6 +3251,175 @@ fn create_range_partition(
     Ok(child_relname)
 }
 
+#[derive(Debug)]
+struct RetentionPartition {
+    partition_value: String,
+    schema: String,
+    relname: String,
+    meta: RelationMeta,
+}
+
+fn expire_old_partitions(conn: &Connection, relation: &PartitionedRelation) -> Result<(), String> {
+    if relation.retention_count <= 0 {
+        return Ok(());
+    }
+    let partitions = retention_partitions(conn, relation.oid)?;
+    let retention_count = relation.retention_count as usize;
+    if partitions.len() <= retention_count {
+        return Ok(());
+    }
+
+    let expire_count = partitions.len() - retention_count;
+    for partition in partitions.into_iter().take(expire_count) {
+        expire_partition(conn, relation.oid, partition)?;
+    }
+    Ok(())
+}
+
+fn retention_partitions(
+    conn: &Connection,
+    parent_oid: i64,
+) -> Result<Vec<RetentionPartition>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.partition_value, n.nspname, c.relname, c.oid, c.reltype, c.relkind, c.relispartition \
+             FROM rsduck_catalog.rs_partition p \
+             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE p.parent_relid = {parent_oid} \
+               AND p.status = 'active' \
+               AND p.is_null_partition = FALSE \
+             ORDER BY p.partition_value"
+        ))
+        .map_err(|e| format!("prepare retention partition lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query retention partition lookup failed: {e}"))?;
+    let mut partitions = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read retention partition lookup failed: {e}"))?
+    {
+        partitions.push(RetentionPartition {
+            partition_value: row
+                .get(0)
+                .map_err(|e| format!("read retention partition value failed: {e}"))?,
+            schema: row
+                .get(1)
+                .map_err(|e| format!("read retention partition schema failed: {e}"))?,
+            relname: row
+                .get(2)
+                .map_err(|e| format!("read retention partition relation failed: {e}"))?,
+            meta: RelationMeta {
+                oid: row
+                    .get(3)
+                    .map_err(|e| format!("read retention partition oid failed: {e}"))?,
+                reltype: row
+                    .get(4)
+                    .map_err(|e| format!("read retention partition reltype failed: {e}"))?,
+                relkind: row
+                    .get(5)
+                    .map_err(|e| format!("read retention partition relkind failed: {e}"))?,
+                relispartition: row
+                    .get(6)
+                    .map_err(|e| format!("read retention partition relispartition failed: {e}"))?,
+            },
+        });
+    }
+    Ok(partitions)
+}
+
+fn expire_partition(
+    conn: &Connection,
+    parent_oid: i64,
+    partition: RetentionPartition,
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_partition \
+             SET status = 'expiring' \
+             WHERE parent_relid = {parent_oid} AND child_relid = {} \
+               AND is_null_partition = FALSE AND status = 'active'",
+            partition.meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("mark partition expiring failed: {e}"))?;
+
+    conn.execute(
+        &format!(
+            "DROP TABLE {}",
+            quote_qualified(&partition.schema, &partition.relname)
+        ),
+        [],
+    )
+    .map_err(|e| {
+        format!(
+            "execute DuckDB DROP expired partition {}.{} failed: {e}",
+            partition.schema, partition.relname
+        )
+    })?;
+    delete_partition_child_catalog(conn, &partition.meta)?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_partition \
+             SET status = 'dropped', dropped_at = CURRENT_TIMESTAMP, error_message = '' \
+             WHERE parent_relid = {parent_oid} AND child_relid = {} \
+               AND partition_value = '{}'",
+            partition.meta.oid,
+            sql_string(&partition.partition_value)
+        ),
+        [],
+    )
+    .map_err(|e| format!("mark partition dropped failed: {e}"))?;
+    Ok(())
+}
+
+fn delete_partition_child_catalog(conn: &Connection, meta: &RelationMeta) -> Result<(), String> {
+    for sql in [
+        format!(
+            "DELETE FROM rsduck_catalog.pg_depend WHERE objid = {} OR refobjid = {}",
+            meta.oid, meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_description WHERE objoid = {}",
+            meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_attrdef WHERE adrelid = {}",
+            meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_attribute WHERE attrelid = {}",
+            meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_constraint WHERE conrelid = {} OR conindid = {}",
+            meta.oid, meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_index WHERE indexrelid = {} OR indrelid = {}",
+            meta.oid, meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.rs_relation_ext WHERE relid = {}",
+            meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_type WHERE oid = {} OR typrelid = {}",
+            meta.reltype, meta.oid
+        ),
+        format!(
+            "DELETE FROM rsduck_catalog.pg_class WHERE oid = {}",
+            meta.oid
+        ),
+    ] {
+        conn.execute(&sql, [])
+            .map_err(|e| format!("delete partition child catalog rows failed: {e}"))?;
+    }
+    Ok(())
+}
+
 fn partition_bounds(
     partition_value: &str,
     partition_unit: &str,
@@ -2865,26 +3539,55 @@ fn insert_create_table_constraints(
     let namespace_oid = namespace_oid(conn, schema)?;
     for (idx, column) in create_table.columns.iter().enumerate() {
         for option in &column.options {
-            if matches!(option.option, ColumnOption::PrimaryKey(_)) {
-                let con_oid = allocate_oid(conn)?;
-                let conname = option
-                    .name
-                    .as_ref()
-                    .map(|name| name.value.clone())
-                    .unwrap_or_else(|| format!("{table}_pkey"));
-                let attnum = columns.get(idx).map(|c| c.attnum).ok_or_else(|| {
-                    format!("primary key column is not materialized: {}", column.name)
-                })?;
-                insert_constraint(
-                    conn,
-                    con_oid,
-                    &conname,
-                    namespace_oid,
-                    "p",
-                    rel_oid,
-                    &attnum.to_string(),
-                    "",
-                )?;
+            match &option.option {
+                ColumnOption::PrimaryKey(_) => {
+                    let con_oid = allocate_oid(conn)?;
+                    let conname = option
+                        .name
+                        .as_ref()
+                        .map(|name| name.value.clone())
+                        .unwrap_or_else(|| format!("{table}_pkey"));
+                    let attnum = columns.get(idx).map(|c| c.attnum).ok_or_else(|| {
+                        format!("primary key column is not materialized: {}", column.name)
+                    })?;
+                    insert_constraint(
+                        conn,
+                        con_oid,
+                        &conname,
+                        namespace_oid,
+                        "p",
+                        rel_oid,
+                        &attnum.to_string(),
+                        0,
+                        "",
+                        "",
+                    )?;
+                }
+                ColumnOption::ForeignKey(fk) => {
+                    let con_oid = allocate_oid(conn)?;
+                    let conname = option
+                        .name
+                        .as_ref()
+                        .map(|name| name.value.clone())
+                        .unwrap_or_else(|| format!("{}_{}_fkey", table, column.name.value));
+                    let attnum = columns.get(idx).map(|c| c.attnum).ok_or_else(|| {
+                        format!("foreign key column is not materialized: {}", column.name)
+                    })?;
+                    let (foreign_relid, confkey) = foreign_key_reference(conn, schema, table, fk)?;
+                    insert_constraint(
+                        conn,
+                        con_oid,
+                        &conname,
+                        namespace_oid,
+                        "f",
+                        rel_oid,
+                        &attnum.to_string(),
+                        foreign_relid,
+                        &confkey,
+                        &fk.to_string(),
+                    )?;
+                }
+                _ => {}
             }
         }
     }
@@ -2907,6 +3610,8 @@ fn insert_create_table_constraints(
                     "p",
                     rel_oid,
                     &conkey,
+                    0,
+                    "",
                     "",
                 )?;
             }
@@ -2926,6 +3631,8 @@ fn insert_create_table_constraints(
                     "u",
                     rel_oid,
                     &conkey,
+                    0,
+                    "",
                     "",
                 )?;
             }
@@ -2944,7 +3651,31 @@ fn insert_create_table_constraints(
                     "c",
                     rel_oid,
                     "",
+                    0,
+                    "",
                     &check.expr.to_string(),
+                )?;
+            }
+            TableConstraint::ForeignKey(fk) => {
+                let con_oid = allocate_oid(conn)?;
+                let conname = fk
+                    .name
+                    .as_ref()
+                    .map(|name| name.value.clone())
+                    .unwrap_or_else(|| format!("{table}_fkey"));
+                let conkey = ident_columns_to_attnums(&fk.columns, columns)?;
+                let (foreign_relid, confkey) = foreign_key_reference(conn, schema, table, fk)?;
+                insert_constraint(
+                    conn,
+                    con_oid,
+                    &conname,
+                    namespace_oid,
+                    "f",
+                    rel_oid,
+                    &conkey,
+                    foreign_relid,
+                    &confkey,
+                    &fk.to_string(),
                 )?;
             }
             _ => {}
@@ -2962,22 +3693,66 @@ fn insert_constraint(
     contype: &str,
     rel_oid: i64,
     conkey: &str,
+    confrelid: i64,
+    confkey: &str,
     conbin: &str,
 ) -> Result<(), String> {
     conn.execute(
         &format!(
             "INSERT INTO rsduck_catalog.pg_constraint(oid, conname, connamespace, contype, conrelid, \
              conindid, conkey, confrelid, confkey, convalidated, conbin) \
-             VALUES ({oid}, '{}', {namespace_oid}, '{}', {rel_oid}, 0, '{}', 0, '', TRUE, '{}')",
+             VALUES ({oid}, '{}', {namespace_oid}, '{}', {rel_oid}, 0, '{}', {confrelid}, '{}', TRUE, '{}')",
             sql_string(conname),
             sql_string(contype),
             sql_string(conkey),
+            sql_string(confkey),
             sql_string(conbin)
         ),
         [],
     )
     .map_err(|e| format!("write pg_constraint failed: {e}"))?;
+    insert_constraint_dependencies(conn, oid, rel_oid, conkey, confrelid, confkey)?;
     Ok(())
+}
+
+fn foreign_key_reference(
+    conn: &Connection,
+    local_schema: &str,
+    table: &str,
+    fk: &ForeignKeyConstraint,
+) -> Result<(i64, String), String> {
+    if fk.index_name.is_some()
+        || fk.on_delete.is_some()
+        || fk.on_update.is_some()
+        || fk.match_kind.is_some()
+        || fk.characteristics.is_some()
+    {
+        return Err("foreign key options are not supported by rsduck catalog".into());
+    }
+    if fk.referred_columns.is_empty() {
+        return Err("foreign key must specify referenced columns".into());
+    }
+    let (foreign_schema, foreign_table) =
+        relation_name_with_default(&fk.foreign_table, local_schema)?;
+    let foreign_meta =
+        find_relation_meta(conn, &foreign_schema, &foreign_table)?.ok_or_else(|| {
+            format!("foreign key referenced table does not exist: {foreign_schema}.{foreign_table}")
+        })?;
+    if foreign_meta.relkind != "r" {
+        return Err(format!(
+            "foreign key referenced table must be ordinary table: {foreign_schema}.{foreign_table}"
+        ));
+    }
+    let foreign_columns = catalog_columns(conn, foreign_meta.oid)?;
+    let confkey = ident_columns_to_attnums(&fk.referred_columns, &foreign_columns)?;
+    if !fk.columns.is_empty() && fk.columns.len() != fk.referred_columns.len() {
+        return Err(format!(
+            "foreign key column count mismatch on {table}: local={}, referenced={}",
+            fk.columns.len(),
+            fk.referred_columns.len()
+        ));
+    }
+    Ok((foreign_meta.oid, confkey))
 }
 
 fn index_columns_to_attnums(
@@ -2995,6 +3770,124 @@ fn index_columns_to_attnums(
         attnums.push(attnum.to_string());
     }
     Ok(attnums.join(","))
+}
+
+fn ident_columns_to_attnums(
+    idents: &[sqlparser::ast::Ident],
+    columns: &[CatalogColumn],
+) -> Result<String, String> {
+    let mut attnums = Vec::with_capacity(idents.len());
+    for ident in idents {
+        let attnum = columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(&ident.value))
+            .map(|column| column.attnum)
+            .ok_or_else(|| format!("constraint references unknown column: {}", ident.value))?;
+        attnums.push(attnum.to_string());
+    }
+    Ok(attnums.join(","))
+}
+
+fn insert_constraint_dependencies(
+    conn: &Connection,
+    constraint_oid: i64,
+    rel_oid: i64,
+    conkey: &str,
+    confrelid: i64,
+    confkey: &str,
+) -> Result<(), String> {
+    insert_depend_if_missing(
+        conn,
+        PG_CONSTRAINT_CLASSOID,
+        constraint_oid,
+        0,
+        PG_CLASS_CLASSOID,
+        rel_oid,
+        0,
+        "n",
+    )?;
+    for attnum in parse_attnums(conkey) {
+        insert_depend_if_missing(
+            conn,
+            PG_CONSTRAINT_CLASSOID,
+            constraint_oid,
+            0,
+            PG_CLASS_CLASSOID,
+            rel_oid,
+            attnum,
+            "n",
+        )?;
+    }
+    if confrelid > 0 {
+        insert_depend_if_missing(
+            conn,
+            PG_CONSTRAINT_CLASSOID,
+            constraint_oid,
+            0,
+            PG_CLASS_CLASSOID,
+            confrelid,
+            0,
+            "n",
+        )?;
+        for attnum in parse_attnums(confkey) {
+            insert_depend_if_missing(
+                conn,
+                PG_CONSTRAINT_CLASSOID,
+                constraint_oid,
+                0,
+                PG_CLASS_CLASSOID,
+                confrelid,
+                attnum,
+                "n",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_attnums(value: &str) -> Vec<i32> {
+    value
+        .split(',')
+        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_depend_if_missing(
+    conn: &Connection,
+    classid: i64,
+    objid: i64,
+    objsubid: i32,
+    refclassid: i64,
+    refobjid: i64,
+    refobjsubid: i32,
+    deptype: &str,
+) -> Result<(), String> {
+    let count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
+                 WHERE classid = {classid} AND objid = {objid} AND objsubid = {objsubid} \
+                   AND refclassid = {refclassid} AND refobjid = {refobjid} \
+                   AND refobjsubid = {refobjsubid}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check dependency failed: {e}"))?;
+    if count > 0 {
+        return Ok(());
+    }
+    conn.execute(
+        &format!(
+            "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+             VALUES ({classid}, {objid}, {objsubid}, {refclassid}, {refobjid}, {refobjsubid}, '{}')",
+            sql_string(deptype)
+        ),
+        [],
+    )
+    .map_err(|e| format!("write dependency failed: {e}"))?;
+    Ok(())
 }
 
 fn simple_index_column_names(
@@ -4110,6 +5003,58 @@ fn relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, 
     .map_err(|e| format!("relation does not exist in catalog: {schema}.{relation}: {e}"))
 }
 
+fn available_relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, String> {
+    let Some(meta) = find_relation_access_meta(conn, schema, relation)? else {
+        return Err(format!(
+            "relation does not exist in catalog: {schema}.{relation}"
+        ));
+    };
+    if meta.status == "active" {
+        return Ok(meta.oid);
+    }
+    Err(format!(
+        "relation is unavailable: {schema}.{relation}: {}",
+        meta.error_message
+    ))
+}
+
+fn find_relation_access_meta(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+) -> Result<Option<RelationAccessMeta>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT c.oid, c.status, c.error_message \
+             FROM rsduck_catalog.pg_class c \
+             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE lower(n.nspname) = lower('{}') AND lower(c.relname) = lower('{}')",
+            sql_string(schema),
+            sql_string(relation)
+        ))
+        .map_err(|e| format!("prepare relation access lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query relation access lookup failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read relation access lookup failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RelationAccessMeta {
+        oid: row
+            .get(0)
+            .map_err(|e| format!("read relation access oid failed: {e}"))?,
+        status: row
+            .get(1)
+            .map_err(|e| format!("read relation access status failed: {e}"))?,
+        error_message: row
+            .get(2)
+            .map_err(|e| format!("read relation access error failed: {e}"))?,
+    }))
+}
+
 fn column_exists(conn: &Connection, rel_oid: i64, column_name: &str) -> Result<bool, String> {
     Ok(column_attnum(conn, rel_oid, column_name)?.is_some())
 }
@@ -4211,11 +5156,15 @@ fn drop_relation_dependencies(
     meta: &RelationMeta,
     cascade: bool,
 ) -> Result<(), String> {
-    let dependents = dependent_relation_oids(conn, meta.oid)?;
-    if !dependents.is_empty() && !cascade {
+    let dependent_relations = dependent_relation_oids(conn, meta.oid)?;
+    let dependent_constraints = dependent_constraint_oids(conn, meta.oid)?;
+    if (!dependent_relations.is_empty() || !dependent_constraints.is_empty()) && !cascade {
         return Err("cannot drop relation with dependent objects without CASCADE".into());
     }
-    for dependent_oid in dependents {
+    for constraint_oid in dependent_constraints {
+        delete_constraint_catalog(conn, constraint_oid)?;
+    }
+    for dependent_oid in dependent_relations {
         if let Some(dependent) = relation_meta_by_oid(conn, dependent_oid)? {
             delete_relation_catalog(conn, &dependent)?;
         }
@@ -4242,6 +5191,34 @@ fn dependent_relation_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, 
         oids.push(
             row.get(0)
                 .map_err(|e| format!("read dependent oid failed: {e}"))?,
+        );
+    }
+    Ok(oids)
+}
+
+fn dependent_constraint_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT DISTINCT d.objid \
+             FROM rsduck_catalog.pg_depend d \
+             JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
+             WHERE d.refclassid = {PG_CLASS_CLASSOID} \
+               AND d.refobjid = {rel_oid} \
+               AND d.classid = {PG_CONSTRAINT_CLASSOID} \
+               AND con.conrelid <> {rel_oid}"
+        ))
+        .map_err(|e| format!("prepare dependent constraint lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query dependent constraint lookup failed: {e}"))?;
+    let mut oids = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read dependent constraint lookup failed: {e}"))?
+    {
+        oids.push(
+            row.get(0)
+                .map_err(|e| format!("read dependent constraint oid failed: {e}"))?,
         );
     }
     Ok(oids)
@@ -4284,6 +5261,7 @@ fn execute_physical_drop(
     object_type: ObjectType,
     schema: &str,
     relname: &str,
+    cascade: bool,
 ) -> Result<(), String> {
     let keyword = match object_type {
         ObjectType::Table => "TABLE",
@@ -4291,11 +5269,31 @@ fn execute_physical_drop(
         ObjectType::Index => "INDEX",
         _ => return Err(format!("DROP {object_type} is not supported")),
     };
+    let cascade = if cascade { " CASCADE" } else { "" };
     conn.execute(
-        &format!("DROP {keyword} {}", quote_qualified(schema, relname)),
+        &format!(
+            "DROP {keyword} {}{cascade}",
+            quote_qualified(schema, relname)
+        ),
         [],
     )
     .map_err(|e| format!("execute DuckDB DROP {keyword} failed: {e}"))?;
+    Ok(())
+}
+
+fn delete_constraint_catalog(conn: &Connection, constraint_oid: i64) -> Result<(), String> {
+    for sql in [
+        format!(
+            "DELETE FROM rsduck_catalog.pg_depend \
+             WHERE (classid = {PG_CONSTRAINT_CLASSOID} AND objid = {constraint_oid}) \
+                OR (refclassid = {PG_CONSTRAINT_CLASSOID} AND refobjid = {constraint_oid})"
+        ),
+        format!("DELETE FROM rsduck_catalog.pg_description WHERE objoid = {constraint_oid}"),
+        format!("DELETE FROM rsduck_catalog.pg_constraint WHERE oid = {constraint_oid}"),
+    ] {
+        conn.execute(&sql, [])
+            .map_err(|e| format!("delete constraint catalog rows failed: {e}"))?;
+    }
     Ok(())
 }
 
@@ -4562,6 +5560,18 @@ fn schema_privilege_action(privilege: &str) -> &str {
     }
 }
 
+fn database_privilege_action(privilege: &str) -> &str {
+    if privilege.contains("create") {
+        "manage_catalog"
+    } else if privilege.contains("temporary") || privilege.contains("temp") {
+        "manage_catalog"
+    } else if privilege.contains("connect") {
+        "manage_snapshot"
+    } else {
+        "manage_catalog"
+    }
+}
+
 fn normalize_for_guard(sql: &str) -> String {
     sql.trim()
         .trim_end_matches(';')
@@ -4693,6 +5703,47 @@ mod tests {
     }
 
     #[test]
+    fn database_privilege_function_uses_system_privileges() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        insert_test_user(&conn, 106, "plain_db").unwrap();
+        insert_test_user(&conn, 107, "catalog_db").unwrap();
+
+        let (_, plain_create) = evaluate_privilege_function(
+            &conn,
+            "plain_db",
+            "SELECT has_database_privilege('postgres', 'CREATE')",
+        )
+        .unwrap();
+        assert!(!plain_create);
+
+        let (_, connect) = evaluate_privilege_function(
+            &conn,
+            "plain_db",
+            "SELECT has_database_privilege('postgres', 'CONNECT')",
+        )
+        .unwrap();
+        assert!(connect);
+
+        insert_test_privilege(&conn, 107, "system", 0, "manage_catalog").unwrap();
+        let (_, catalog_create) = evaluate_privilege_function(
+            &conn,
+            "catalog_db",
+            "SELECT has_database_privilege('catalog_db', 'postgres', 'CREATE')",
+        )
+        .unwrap();
+        assert!(catalog_create);
+
+        let (_, unknown_db) = evaluate_privilege_function(
+            &conn,
+            "catalog_db",
+            "SELECT has_database_privilege('other_db', 'CREATE')",
+        )
+        .unwrap();
+        assert!(!unknown_db);
+    }
+
+    #[test]
     fn ddl_permission_sets_created_relation_owner() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -4738,6 +5789,70 @@ mod tests {
     }
 
     #[test]
+    fn user_management_mutations_update_authentication_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        execute_catalog_aware_write(&conn, "CREATE USER alice PASSWORD='pw'").unwrap();
+        assert!(super::authenticate_user(&conn, "alice", "pw").is_ok());
+
+        let role_name: String = conn
+            .query_row(
+                "SELECT r.role_name \
+                 FROM rsduck_catalog.rs_user u \
+                 JOIN rsduck_catalog.rs_user_role ur ON ur.user_id = u.user_id \
+                 JOIN rsduck_catalog.rs_role r ON r.role_id = ur.role_id \
+                 WHERE u.username = 'alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role_name, "reader");
+
+        let denied = authorize_sql(&conn, "alice", "CREATE USER bob PASSWORD='pw'").unwrap_err();
+        assert!(denied.contains("manage_user"));
+
+        execute_catalog_aware_write(&conn, "ALTER USER alice PASSWORD 'newpw'").unwrap();
+        assert!(super::authenticate_user(&conn, "alice", "pw").is_err());
+        assert!(super::authenticate_user(&conn, "alice", "newpw").is_ok());
+
+        execute_catalog_aware_write(&conn, "DROP USER alice").unwrap();
+        assert!(super::authenticate_user(&conn, "alice", "newpw").is_err());
+    }
+
+    #[test]
+    fn grant_and_revoke_relation_and_schema_privileges() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+        execute_catalog_aware_write(&conn, "CREATE USER reader_user PASSWORD='pw'").unwrap();
+        execute_catalog_aware_write(&conn, "CREATE USER ddl_user PASSWORD='pw'").unwrap();
+
+        let denied = authorize_sql(&conn, "reader_user", "SELECT * FROM quotes").unwrap_err();
+        assert!(denied.contains("permission denied"));
+
+        execute_catalog_aware_write(&conn, "GRANT SELECT ON TABLE quotes TO reader_user").unwrap();
+        authorize_sql(&conn, "reader_user", "SELECT * FROM quotes").unwrap();
+
+        execute_catalog_aware_write(&conn, "GRANT INSERT ON TABLE quotes TO reader_user").unwrap();
+        authorize_sql(&conn, "reader_user", "INSERT INTO quotes VALUES ('A', 1.0)").unwrap();
+
+        execute_catalog_aware_write(&conn, "REVOKE SELECT ON TABLE quotes FROM reader_user")
+            .unwrap();
+        let denied = authorize_sql(&conn, "reader_user", "SELECT * FROM quotes").unwrap_err();
+        assert!(denied.contains("permission denied"));
+
+        execute_catalog_aware_write(&conn, "GRANT CREATE ON SCHEMA main TO ddl_user").unwrap();
+        authorize_sql(
+            &conn,
+            "ddl_user",
+            "CREATE TABLE created_by_grant(id INTEGER)",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn create_table_writes_pg_class_and_attributes() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -4777,6 +5892,57 @@ mod tests {
     }
 
     #[test]
+    fn create_table_foreign_key_writes_constraint_and_dependencies() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE instruments(code VARCHAR PRIMARY KEY)")
+            .unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE quotes(
+                code VARCHAR,
+                close DOUBLE,
+                CONSTRAINT fk_quotes_instruments FOREIGN KEY(code) REFERENCES instruments(code)
+            )",
+        )
+        .unwrap();
+
+        let (contype, conkey, confrelid, confkey): (String, String, i64, String) = conn
+            .query_row(
+                "SELECT contype, conkey, confrelid, confkey \
+                 FROM rsduck_catalog.pg_constraint \
+                 WHERE conname = 'fk_quotes_instruments'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(contype, "f");
+        assert_eq!(conkey, "1");
+        assert_eq!(confkey, "1");
+        assert!(confrelid > 0);
+
+        let referenced_column_dependency_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_depend d \
+                 JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = d.refobjid \
+                 WHERE con.conname = 'fk_quotes_instruments' \
+                   AND c.relname = 'instruments' \
+                   AND d.refobjsubid = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(referenced_column_dependency_count, 1);
+
+        let drop_err = execute_catalog_aware_write(&conn, "DROP TABLE instruments").unwrap_err();
+        assert!(drop_err.contains("dependent objects"));
+
+        validate_after_start(&conn).unwrap();
+    }
+
+    #[test]
     fn create_view_and_index_write_catalog_metadata() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -4797,6 +5963,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(view_count, 1);
+
+        let view_dependency_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_depend d \
+                 JOIN rsduck_catalog.pg_class view_rel ON view_rel.oid = d.objid \
+                 JOIN rsduck_catalog.pg_class table_rel ON table_rel.oid = d.refobjid \
+                 WHERE view_rel.relname = 'quote_view' \
+                   AND table_rel.relname = 'quotes' \
+                   AND d.classid = 1259 \
+                   AND d.refclassid = 1259",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_dependency_count, 1);
+
+        let drop_err = execute_catalog_aware_write(&conn, "DROP TABLE quotes").unwrap_err();
+        assert!(drop_err.contains("dependent objects"));
 
         let index_count: i64 = conn
             .query_row(
@@ -4842,6 +6027,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(volume, 0);
+    }
+
+    #[test]
+    fn alter_table_drop_column_marks_catalog_column_dropped() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE quotes(code VARCHAR, close DOUBLE, source TEXT DEFAULT 'web')",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(&conn, "ALTER TABLE quotes DROP COLUMN close").unwrap();
+
+        assert!(conn.prepare("SELECT close FROM quotes").is_err());
+        let dropped: bool = conn
+            .query_row(
+                "SELECT a.attisdropped \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname = 'quotes' AND a.attname = 'close'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(dropped);
+        let active_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname = 'quotes' AND a.attisdropped = FALSE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_count, 2);
+
+        execute_catalog_aware_write(&conn, "ALTER TABLE quotes ADD COLUMN venue TEXT").unwrap();
+        let (close_attnum, venue_attnum): (i32, i32) = conn
+            .query_row(
+                "SELECT \
+                   MAX(CASE WHEN a.attname = 'close' THEN a.attnum ELSE NULL END), \
+                   MAX(CASE WHEN a.attname = 'venue' THEN a.attnum ELSE NULL END) \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname = 'quotes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(venue_attnum > close_attnum);
     }
 
     #[test]
@@ -5117,6 +6354,95 @@ mod tests {
     }
 
     #[test]
+    fn partition_retention_expires_old_ordinary_partitions_but_keeps_null_partition() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '2')",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'old'),
+             (2, TIMESTAMP '2026-07-02 10:00:00', 'keep-1'),
+             (3, TIMESTAMP '2026-07-03 10:00:00', 'keep-2'),
+             (4, NULL, 'dirty')",
+        )
+        .unwrap();
+
+        let active_ordinary_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
+                 WHERE status = 'active' AND is_null_partition = FALSE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_ordinary_count, 2);
+
+        let dropped_old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
+                 WHERE partition_value = '20260701' AND status = 'dropped' AND dropped_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped_old_count, 1);
+
+        let null_active_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
+                 WHERE partition_value = '_null' AND status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_active_count, 1);
+
+        let old_physical_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() \
+                 WHERE schema_name = 'rsduck_internal' AND table_name = 'ods_access_log_20260701'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_physical_count, 0);
+
+        let visible_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(visible_rows, 3);
+        let dirty_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ods_access_log WHERE access_time IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dirty_rows, 1);
+
+        let pg_class_old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log_20260701'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pg_class_old_count, 0);
+    }
+
+    #[test]
     fn alter_partitioned_table_add_column_updates_parent_and_partitions() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -5193,6 +6519,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inserted_source, "api");
+    }
+
+    #[test]
+    fn alter_partitioned_table_drop_column_updates_parent_partitions_and_entrypoint() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log (
+                id BIGINT,
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content) VALUES
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'),
+             (2, NULL, 'dirty')",
+        )
+        .unwrap();
+
+        execute_catalog_aware_write(&conn, "ALTER TABLE ods_access_log DROP COLUMN content")
+            .unwrap();
+
+        let visible_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(visible_rows, 2);
+        assert!(conn.prepare("SELECT content FROM ods_access_log").is_err());
+        let dropped_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_attribute a \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+                 WHERE c.relname IN ('ods_access_log', 'ods_access_log_20260701', 'ods_access_log_null') \
+                   AND a.attname = 'content' \
+                   AND a.attisdropped = TRUE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped_count, 3);
+
+        let err = execute_catalog_aware_write(
+            &conn,
+            "ALTER TABLE ods_access_log DROP COLUMN access_time",
+        )
+        .unwrap_err();
+        assert!(err.contains("partition key"));
     }
 
     #[test]
@@ -5364,6 +6743,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "unavailable");
+
+        let err = authorize_sql(&conn, "admin", "SELECT * FROM quotes").unwrap_err();
+        assert!(err.contains("relation is unavailable"));
+        assert!(err.contains("missing DuckDB physical table"));
+    }
+
+    #[test]
+    fn startup_validation_rejects_unfinished_catalog_journal() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO rsduck_catalog.rs_catalog_journal(
+                journal_id, catalog_epoch, mutation_type, target_oid, request_json,
+                status, error_message, created_at, applied_at
+             )
+             VALUES (999, 0, 'create_table', 123, '{}', 'pending', '', CURRENT_TIMESTAMP, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let err = validate_after_start(&conn).unwrap_err();
+        assert!(err.contains("unfinished mutations"));
+        assert!(err.contains("create_table"));
+    }
+
+    #[test]
+    fn startup_validation_rejects_broken_catalog_references() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+        conn.execute(
+            "UPDATE rsduck_catalog.pg_attribute \
+             SET atttypid = 999999 \
+             WHERE attname = 'code'",
+            [],
+        )
+        .unwrap();
+
+        let err = validate_after_start(&conn).unwrap_err();
+        assert!(err.contains("pg_attribute.atttypid"));
     }
 
     #[test]
