@@ -1,15 +1,14 @@
 use axum::{
     extract::{Json, State},
-    http::{header, HeaderMap, Request, StatusCode},
-    middleware::{self, Next},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
 };
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Deserialize)]
@@ -27,14 +26,38 @@ pub struct SqlResp {
     pub msg: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LoginReq {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LoginResp {
+    pub success: bool,
+    pub msg: String,
+    pub username: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionResp {
+    pub authenticated: bool,
+    pub username: String,
+}
+
 #[derive(Clone)]
 pub struct WebState {
     pub snapshot_dir: Arc<String>,
     pub snapshot_prefix: Arc<String>,
+    pub sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
-async fn sql_handler(headers: HeaderMap, Json(req): Json<SqlReq>) -> Json<SqlResp> {
-    let Some((username, _)) = parse_basic_auth(&headers) else {
+async fn sql_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<SqlReq>,
+) -> Json<SqlResp> {
+    let Some(username) = session_username(&state, &headers) else {
         return Json(SqlResp {
             columns: vec![],
             rows: vec![],
@@ -95,6 +118,80 @@ async fn index_page() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn login_handler(State(state): State<WebState>, Json(req): Json<LoginReq>) -> Response {
+    let username = req.username.trim().to_string();
+    if username.is_empty() {
+        return Json(LoginResp {
+            success: false,
+            msg: "username is required".into(),
+            username: String::new(),
+        })
+        .into_response();
+    }
+
+    match crate::db::authenticate_user(username.clone(), req.password).await {
+        Ok(()) => {
+            let token = new_session_token();
+            if let Ok(mut sessions) = state.sessions.lock() {
+                sessions.insert(token.clone(), username.clone());
+            }
+            (
+                StatusCode::OK,
+                [(
+                    header::SET_COOKIE,
+                    format!("rsduck_session={token}; Path=/; HttpOnly; SameSite=Lax"),
+                )],
+                Json(LoginResp {
+                    success: true,
+                    msg: "ok".into(),
+                    username,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => Json(LoginResp {
+            success: false,
+            msg: e,
+            username: String::new(),
+        })
+        .into_response(),
+    }
+}
+
+async fn logout_handler(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Some(token) = parse_session_token(&headers) {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.remove(&token);
+        }
+    }
+    (
+        StatusCode::OK,
+        [(
+            header::SET_COOKIE,
+            "rsduck_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string(),
+        )],
+        Json(LoginResp {
+            success: true,
+            msg: "ok".into(),
+            username: String::new(),
+        }),
+    )
+        .into_response()
+}
+
+async fn session_handler(State(state): State<WebState>, headers: HeaderMap) -> Json<SessionResp> {
+    if let Some(username) = session_username(&state, &headers) {
+        return Json(SessionResp {
+            authenticated: true,
+            username,
+        });
+    }
+    Json(SessionResp {
+        authenticated: false,
+        username: String::new(),
+    })
+}
+
 async fn codemirror_js() -> impl IntoResponse {
     (
         [(
@@ -106,7 +203,7 @@ async fn codemirror_js() -> impl IntoResponse {
 }
 
 async fn snapshot_handler(State(state): State<WebState>, headers: HeaderMap) -> Json<SqlResp> {
-    let Some((username, _)) = parse_basic_auth(&headers) else {
+    let Some(username) = session_username(&state, &headers) else {
         return Json(SqlResp {
             columns: vec![],
             rows: vec![],
@@ -142,42 +239,40 @@ pub fn web_router(snapshot_dir: String, snapshot_prefix: String) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/assets/codemirror.bundle.js", get(codemirror_js))
+        .route("/login", post(login_handler))
+        .route("/logout", post(logout_handler))
+        .route("/session", get(session_handler))
         .route("/sql", post(sql_handler))
         .route("/snapshot", post(snapshot_handler))
-        .layer(middleware::from_fn(web_auth_middleware))
         .with_state(WebState {
             snapshot_dir: Arc::new(snapshot_dir),
             snapshot_prefix: Arc::new(snapshot_prefix),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         })
 }
 
-async fn web_auth_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
-    let Some((username, password)) = parse_basic_auth(req.headers()) else {
-        return web_unauthorized();
-    };
+fn session_username(state: &WebState, headers: &HeaderMap) -> Option<String> {
+    let token = parse_session_token(headers)?;
+    state.sessions.lock().ok()?.get(&token).cloned()
+}
 
-    match crate::db::authenticate_user(username, password).await {
-        Ok(()) => next.run(req).await,
-        Err(_) => web_unauthorized(),
+fn parse_session_token(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("rsduck_session=").map(str::to_string))
+        .filter(|token| !token.is_empty())
+}
+
+fn new_session_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        token.push_str(&format!("{byte:02x}"));
     }
-}
-
-fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let encoded = value.strip_prefix("Basic ")?;
-    let decoded = BASE64_STANDARD.decode(encoded).ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    let (username, password) = decoded.split_once(':')?;
-    Some((username.to_string(), password.to_string()))
-}
-
-fn web_unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"rsduck\"")],
-        "authentication required",
-    )
-        .into_response()
+    token
 }
 
 const CODEMIRROR_JS: &str = include_str!("../web/dist/codemirror.bundle.js");
@@ -192,7 +287,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 html, body { height: 100%; margin: 0; }
 body { font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; background: #fff; overflow: hidden; }
 button, input, textarea { font: inherit; }
+.auth-screen { position: fixed; inset: 0; display: grid; place-items: center; background: #eef2f7; z-index: 20; }
+.auth-screen[hidden] { display: none; }
+.login-card { width: min(360px, calc(100vw - 32px)); padding: 26px; border: 1px solid #d4dbe6; border-radius: 8px; background: #fff; box-shadow: 0 16px 42px rgba(15, 23, 42, .14); }
+.login-title { font-size: 20px; font-weight: 700; margin-bottom: 18px; }
+.login-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; color: #334155; font-size: 13px; }
+.login-field input { height: 34px; padding: 5px 9px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; }
+.login-field input:focus { outline: 2px solid #8fc2ff; border-color: #1a73e8; }
+.login-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 18px; }
+.login-error { min-height: 18px; color: #b42318; font-size: 13px; }
 .app { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100vh; }
+.app[hidden] { display: none; }
 .sidebar { min-width: 0; border-right: 1px solid #d8dde6; background: #f7f9fc; display: flex; flex-direction: column; }
 .brand { height: 44px; display: flex; align-items: center; padding: 0 14px; font-weight: 700; border-bottom: 1px solid #d8dde6; background: #fff; }
 .db-node { padding: 10px 12px 8px; border-bottom: 1px solid #e3e7ee; }
@@ -217,6 +322,7 @@ button, input, textarea { font: inherit; }
 .title { font-weight: 700; }
 .top-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .summary { color: #66758a; font-size: 12px; white-space: nowrap; }
+.user-pill { color: #334155; font-size: 12px; white-space: nowrap; }
 .editor { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid #d8dde6; }
 .editor-surface { flex: 1; min-height: 130px; background: #fff; overflow: hidden; }
 .editor-surface .cm-editor { height: 100%; }
@@ -258,7 +364,24 @@ tbody tr:nth-child(even) { background: #fafbfc; }
 </style>
 </head>
 <body>
-<div class="app">
+<div id="authScreen" class="auth-screen">
+  <form class="login-card" onsubmit="login(event)">
+    <div class="login-title">rsduck</div>
+    <label class="login-field">
+      <span>Username</span>
+      <input id="loginUsername" autocomplete="username" autofocus>
+    </label>
+    <label class="login-field">
+      <span>Password</span>
+      <input id="loginPassword" type="password" autocomplete="current-password">
+    </label>
+    <div id="loginMsg" class="login-error"></div>
+    <div class="login-actions">
+      <button class="primary-button" type="submit">Sign in</button>
+    </div>
+  </form>
+</div>
+<div id="app" class="app" hidden>
   <aside class="sidebar">
     <div class="brand">rsduck</div>
     <div class="db-node">
@@ -275,7 +398,9 @@ tbody tr:nth-child(even) { background: #fafbfc; }
       <div class="title">SQL Console</div>
       <div class="top-actions">
         <div id="schemaSummary" class="summary">0 tables</div>
+        <span id="currentUser" class="user-pill"></span>
         <button class="secondary-button" onclick="saveSnapshot()">Save Snapshot</button>
+        <button class="secondary-button" onclick="logout()">Logout</button>
       </div>
     </div>
     <section class="editor">
@@ -309,6 +434,8 @@ let tables = [];
 let activeTable = '';
 let contextSql = '';
 let sqlEditor = null;
+let currentUser = '';
+let uiReady = false;
 const editorHeightKey = 'rsduck.editorHeight';
 
 function escapeHtml(value) {
@@ -319,6 +446,71 @@ function escapeHtml(value) {
     '"': '&quot;',
     "'": '&#39;'
   }[ch]));
+}
+
+function ensureUiReady() {
+  if (uiReady) return;
+  setupSqlEditor();
+  setupEditorSplitter();
+  uiReady = true;
+}
+
+function showLogin(message = '') {
+  document.getElementById('authScreen').hidden = false;
+  document.getElementById('app').hidden = true;
+  document.getElementById('loginMsg').innerText = message;
+  setTimeout(() => document.getElementById('loginUsername').focus(), 0);
+}
+
+function showApp(username) {
+  currentUser = username;
+  document.getElementById('currentUser').innerText = username;
+  document.getElementById('authScreen').hidden = true;
+  document.getElementById('app').hidden = false;
+  ensureUiReady();
+}
+
+async function login(event) {
+  event.preventDefault();
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const msg = document.getElementById('loginMsg');
+  msg.innerText = '';
+  const resp = await fetch('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  const data = await resp.json();
+  if (!data.success) {
+    msg.innerText = data.msg || 'login failed';
+    return;
+  }
+  document.getElementById('loginPassword').value = '';
+  showApp(data.username);
+  await loadTables();
+  await run();
+}
+
+async function logout() {
+  await fetch('/logout', { method: 'POST' });
+  tables = [];
+  activeTable = '';
+  document.getElementById('tbl').innerHTML = '';
+  document.getElementById('msg').innerText = '';
+  showLogin();
+}
+
+async function initSession() {
+  const resp = await fetch('/session');
+  const data = await resp.json();
+  if (!data.authenticated) {
+    showLogin();
+    return;
+  }
+  showApp(data.username);
+  await loadTables();
+  await run();
 }
 
 function setSqlValue(value) {
@@ -590,9 +782,7 @@ function setupEditorSplitter() {
   });
 }
 
-setupSqlEditor();
-setupEditorSplitter();
-loadTables().then(() => run());
+initSession();
 </script>
 </body>
 </html>
@@ -600,20 +790,17 @@ loadTables().then(() => run());
 
 #[cfg(test)]
 mod tests {
-    use super::parse_basic_auth;
+    use super::parse_session_token;
     use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
-    fn parses_basic_auth_header() {
+    fn parses_session_cookie() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Basic YWRtaW46YWRtaW4="),
+            header::COOKIE,
+            HeaderValue::from_static("theme=light; rsduck_session=abc123; other=1"),
         );
 
-        assert_eq!(
-            parse_basic_auth(&headers),
-            Some(("admin".to_string(), "admin".to_string()))
-        );
+        assert_eq!(parse_session_token(&headers), Some("abc123".to_string()));
     }
 }
