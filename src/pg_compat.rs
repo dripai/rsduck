@@ -1,5 +1,7 @@
 use crate::db::SqlResult;
 
+const PG_NAMESPACE_CLASSOID: i64 = 2615;
+
 pub fn compat_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     let normalized = normalize_sql(sql);
     pg_set_result(&normalized)
@@ -19,68 +21,199 @@ pub fn rewrite_sql(sql: &str) -> Option<String> {
         return Some(sql);
     }
 
-    if contains_from_table(&normalized, "pg_attribute")
-        || contains_relation(&normalized, "information_schema.columns")
-    {
-        return Some(pg_attribute_sql());
-    }
-    if contains_from_table(&normalized, "pg_index") {
-        return Some(pg_index_sql());
-    }
-    if contains_from_table(&normalized, "pg_constraint")
-        || contains_relation(&normalized, "information_schema.table_constraints")
-    {
-        return Some(pg_constraint_sql());
-    }
-    if contains_relation(&normalized, "information_schema.key_column_usage") {
-        return Some(information_schema_key_column_usage_sql());
-    }
-    if contains_relation(&normalized, "information_schema.constraint_column_usage") {
-        return Some(information_schema_constraint_column_usage_sql());
-    }
-    if contains_from_table(&normalized, "pg_attrdef") {
-        return Some(pg_attrdef_sql());
-    }
-    if contains_from_table(&normalized, "pg_depend") {
-        return Some(pg_depend_sql());
-    }
-    if contains_from_table(&normalized, "pg_description") {
-        return Some(pg_description_sql());
-    }
-    if contains_from_table(&normalized, "pg_views")
-        || contains_relation(&normalized, "information_schema.views")
-    {
-        return Some(pg_views_sql());
-    }
-    if contains_from_table(&normalized, "pg_indexes") {
-        return Some(pg_indexes_sql());
-    }
-    if contains_from_table(&normalized, "pg_class")
-        || contains_from_table(&normalized, "pg_tables")
-        || contains_relation(&normalized, "information_schema.tables")
-    {
-        return Some(pg_class_sql());
-    }
-    if contains_from_table(&normalized, "pg_namespace")
-        || contains_relation(&normalized, "information_schema.schemata")
-    {
-        return Some(pg_namespace_sql());
-    }
-    if contains_from_table(&normalized, "pg_type") {
-        return Some(pg_type_sql());
-    }
-    if contains_from_table(&normalized, "pg_user") {
-        return Some(pg_user_sql());
-    }
-    if contains_from_table(&normalized, "pg_roles") || contains_from_table(&normalized, "pg_authid")
-    {
-        return Some(pg_roles_sql());
-    }
-    if let Some(sql) = empty_pg_catalog_sql(&normalized) {
-        return Some(sql);
+    rewrite_catalog_relation_references(sql)
+}
+
+fn rewrite_catalog_relation_references(sql: &str) -> Option<String> {
+    let bytes = sql.as_bytes();
+    let mut output = String::with_capacity(sql.len());
+    let mut idx = 0;
+    let mut last = 0;
+    let mut replaced = false;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            b'"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        let keyword_len = if keyword_at(sql, idx, "from") {
+            Some(4)
+        } else if keyword_at(sql, idx, "join") {
+            Some(4)
+        } else {
+            None
+        };
+        let Some(keyword_len) = keyword_len else {
+            idx += 1;
+            continue;
+        };
+
+        let relation_start = skip_ascii_ws(sql, idx + keyword_len);
+        let Some((relation_key, relation_end)) = parse_relation_reference(sql, relation_start)
+        else {
+            idx += keyword_len;
+            continue;
+        };
+        let Some(projection_sql) = catalog_projection_sql(&relation_key) else {
+            idx += keyword_len;
+            continue;
+        };
+
+        output.push_str(&sql[last..relation_start]);
+        output.push('(');
+        output.push_str(&projection_sql);
+        output.push(')');
+        last = relation_end;
+        idx = relation_end;
+        replaced = true;
     }
 
-    None
+    if replaced {
+        output.push_str(&sql[last..]);
+        Some(output)
+    } else {
+        None
+    }
+}
+
+fn catalog_projection_sql(relation_key: &str) -> Option<String> {
+    match relation_key {
+        "pg_catalog.pg_attribute" | "information_schema.columns" => Some(pg_attribute_sql()),
+        "pg_catalog.pg_index" => Some(pg_index_sql()),
+        "pg_catalog.pg_constraint" | "information_schema.table_constraints" => {
+            Some(pg_constraint_sql())
+        }
+        "information_schema.key_column_usage" => Some(information_schema_key_column_usage_sql()),
+        "information_schema.constraint_column_usage" => {
+            Some(information_schema_constraint_column_usage_sql())
+        }
+        "pg_catalog.pg_attrdef" => Some(pg_attrdef_sql()),
+        "pg_catalog.pg_depend" => Some(pg_depend_sql()),
+        "pg_catalog.pg_description" => Some(pg_description_sql()),
+        "pg_catalog.pg_views" | "information_schema.views" => Some(pg_views_sql()),
+        "pg_catalog.pg_indexes" => Some(pg_indexes_sql()),
+        "pg_catalog.pg_class" | "pg_catalog.pg_tables" | "information_schema.tables" => {
+            Some(pg_class_sql())
+        }
+        "pg_catalog.pg_namespace" | "information_schema.schemata" => Some(pg_namespace_sql()),
+        "pg_catalog.pg_type" => Some(pg_type_sql()),
+        "pg_catalog.pg_user" => Some(pg_user_sql()),
+        "pg_catalog.pg_roles" | "pg_catalog.pg_authid" => Some(pg_roles_sql()),
+        "pg_catalog.pg_trigger" => empty_pg_catalog_sql(" from pg_trigger"),
+        "pg_catalog.pg_proc" => empty_pg_catalog_sql(" from pg_proc"),
+        "pg_catalog.pg_extension" => empty_pg_catalog_sql(" from pg_extension"),
+        "pg_catalog.pg_policy" => empty_pg_catalog_sql(" from pg_policy"),
+        "pg_catalog.pg_matviews" => empty_pg_catalog_sql(" from pg_matviews"),
+        "pg_catalog.pg_sequences" => empty_pg_catalog_sql(" from pg_sequences"),
+        _ => None,
+    }
+}
+
+fn parse_relation_reference(sql: &str, start: usize) -> Option<(String, usize)> {
+    let mut idx = start;
+    let mut parts = Vec::new();
+    loop {
+        let (part, next_idx) = parse_identifier_part(sql, idx)?;
+        parts.push(part.to_ascii_lowercase());
+        idx = skip_ascii_ws(sql, next_idx);
+        if sql.as_bytes().get(idx) != Some(&b'.') {
+            break;
+        }
+        idx = skip_ascii_ws(sql, idx + 1);
+    }
+    let key = match parts.as_slice() {
+        [relation] if relation.starts_with("pg_") => format!("pg_catalog.{relation}"),
+        [schema, relation] => format!("{schema}.{relation}"),
+        _ => return None,
+    };
+    Some((key, idx))
+}
+
+fn parse_identifier_part(sql: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = sql.as_bytes();
+    if bytes.get(start) == Some(&b'"') {
+        let mut idx = start + 1;
+        let mut value = String::new();
+        while idx < bytes.len() {
+            if bytes[idx] == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    value.push('"');
+                    idx += 2;
+                    continue;
+                }
+                return Some((value, idx + 1));
+            }
+            value.push(bytes[idx] as char);
+            idx += 1;
+        }
+        return None;
+    }
+
+    let mut idx = start;
+    while idx < bytes.len() && is_ident_byte(bytes[idx]) {
+        idx += 1;
+    }
+    if idx == start {
+        None
+    } else {
+        Some((sql[start..idx].to_string(), idx))
+    }
+}
+
+fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let end = idx + keyword.len();
+    end <= bytes.len()
+        && sql[idx..end].eq_ignore_ascii_case(keyword)
+        && (idx == 0 || !is_ident_byte(bytes[idx - 1]))
+        && (end == bytes.len() || !is_ident_byte(bytes[end]))
+}
+
+fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn normalize_sql(sql: &str) -> String {
@@ -392,7 +525,24 @@ fn catalog_scalar_function_sql(raw_sql: &str, normalized_sql: &str) -> Option<St
                           AND COALESCE(list_position(string_split(con.conkey, ','), CAST(a.attnum AS VARCHAR)), 0) > 0
                     ), '') || ')'
                     WHEN 'c' THEN 'CHECK (' || con.conbin || ')'
-                    WHEN 'f' THEN 'FOREIGN KEY'
+                    WHEN 'f' THEN 'FOREIGN KEY (' || COALESCE((
+                        SELECT string_agg(a.attname, ', ' ORDER BY list_position(string_split(con.conkey, ','), CAST(a.attnum AS VARCHAR)))
+                        FROM rsduck_catalog.pg_attribute a
+                        WHERE a.attrelid = con.conrelid
+                          AND a.attisdropped = FALSE
+                          AND COALESCE(list_position(string_split(con.conkey, ','), CAST(a.attnum AS VARCHAR)), 0) > 0
+                    ), '') || ') REFERENCES ' || COALESCE((
+                        SELECT rn.nspname || '.' || rc.relname
+                        FROM rsduck_catalog.pg_class rc
+                        JOIN rsduck_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+                        WHERE rc.oid = con.confrelid
+                    ), 'unknown') || ' (' || COALESCE((
+                        SELECT string_agg(a.attname, ', ' ORDER BY list_position(string_split(con.confkey, ','), CAST(a.attnum AS VARCHAR)))
+                        FROM rsduck_catalog.pg_attribute a
+                        WHERE a.attrelid = con.confrelid
+                          AND a.attisdropped = FALSE
+                          AND COALESCE(list_position(string_split(con.confkey, ','), CAST(a.attnum AS VARCHAR)), 0) > 0
+                    ), '') || ')'
                     ELSE con.contype
                 END
                 FROM rsduck_catalog.pg_constraint con
@@ -414,6 +564,24 @@ fn catalog_scalar_function_sql(raw_sql: &str, normalized_sql: &str) -> Option<St
         let attnum = parse_i64_arg(args.get(1)?)?;
         return Some(format!(
             "SELECT COALESCE((SELECT description FROM rsduck_catalog.pg_description WHERE objoid = {oid} AND objsubid = {attnum} LIMIT 1), '') AS col_description"
+        ));
+    }
+
+    if let Some(args) = scalar_function_args(raw_body, normalized_body, "pg_table_is_visible") {
+        let oid = parse_i64_arg(args.first()?)?;
+        return Some(format!(
+            "
+            SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM rsduck_catalog.pg_class c
+                JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
+                JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+                WHERE c.oid = {oid}
+                  AND c.status = 'active'
+                  AND ext.visibility = 'user'
+                  AND n.nspname = 'main'
+            ) THEN 't' ELSE 'f' END AS pg_table_is_visible
+            "
         ));
     }
 
@@ -545,25 +713,29 @@ fn sql_string_literal(value: &str) -> String {
 }
 
 fn pg_namespace_sql() -> String {
-    "
+    format!(
+        "
     SELECT
-        CAST(oid AS VARCHAR) AS oid,
-        nspname,
-        CAST(nspowner AS VARCHAR) AS nspowner,
+        CAST(n.oid AS VARCHAR) AS oid,
+        n.nspname,
+        CAST(n.nspowner AS VARCHAR) AS nspowner,
         '' AS nspacl,
-        '' AS description,
-        nspname AS schema_name,
-        'admin' AS schema_owner
-    FROM rsduck_catalog.pg_namespace
-    WHERE nspname NOT IN ('rsduck_catalog', 'rsduck_internal')
+        COALESCE(d.description, '') AS description,
+        n.nspname AS schema_name,
+        COALESCE(u.username, 'unknown') AS schema_owner
+    FROM rsduck_catalog.pg_namespace n
+    LEFT JOIN rsduck_catalog.rs_user u ON u.user_id = n.nspowner
+    LEFT JOIN rsduck_catalog.pg_description d
+      ON d.objoid = n.oid AND d.classoid = {PG_NAMESPACE_CLASSOID} AND d.objsubid = 0
+    WHERE n.nspname NOT IN ('rsduck_catalog', 'rsduck_internal')
     ORDER BY
-        CASE WHEN nspname = 'main' THEN 0
-             WHEN nspname IN ('pg_catalog', 'information_schema') THEN 2
+        CASE WHEN n.nspname = 'main' THEN 0
+             WHEN n.nspname IN ('pg_catalog', 'information_schema') THEN 2
              ELSE 1
         END,
-        nspname
+        n.nspname
     "
-    .to_string()
+    )
 }
 
 fn pg_class_sql() -> String {
@@ -606,19 +778,22 @@ fn pg_class_sql() -> String {
         n.nspname AS schemaname,
         c.relname AS tablename,
         c.relname AS table_name,
-        'admin' AS tableowner,
+        COALESCE(u.username, 'unknown') AS tableowner,
         '' AS tablespace,
         CASE WHEN c.relhasindex THEN 't' ELSE 'f' END AS hasindexes,
         'f' AS hasrules,
         'f' AS hastriggers,
         'f' AS rowsecurity,
-        COALESCE(d.description, '') AS description
+        COALESCE(d.description, '') AS description,
+        c.status AS rsduck_status,
+        c.error_message AS rsduck_error_message
     FROM rsduck_catalog.pg_class c
     JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
     JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    LEFT JOIN rsduck_catalog.rs_user u ON u.user_id = c.relowner
     LEFT JOIN rsduck_catalog.pg_description d
       ON d.objoid = c.oid AND d.objsubid = 0
-    WHERE c.status = 'active'
+    WHERE c.status IN ('active', 'unavailable')
       AND ext.visibility = 'user'
     ORDER BY n.nspname, c.relname
     "
@@ -671,7 +846,7 @@ fn pg_attribute_sql() -> String {
       ON def.adrelid = a.attrelid AND def.adnum = a.attnum
     LEFT JOIN rsduck_catalog.pg_description d
       ON d.objoid = a.attrelid AND d.objsubid = a.attnum
-    WHERE c.status = 'active'
+    WHERE c.status IN ('active', 'unavailable')
       AND ext.visibility = 'user'
       AND a.attisdropped = FALSE
     ORDER BY n.nspname, c.relname, a.attnum
@@ -902,11 +1077,12 @@ fn pg_views_sql() -> String {
     SELECT
         n.nspname AS schemaname,
         c.relname AS viewname,
-        'admin' AS viewowner,
+        COALESCE(u.username, 'unknown') AS viewowner,
         ext.generated_sql AS definition
     FROM rsduck_catalog.pg_class c
     JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
     JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    LEFT JOIN rsduck_catalog.rs_user u ON u.user_id = c.relowner
     WHERE c.status = 'active'
       AND c.relkind = 'v'
       AND ext.visibility = 'user'
@@ -1081,18 +1257,6 @@ fn contains_from_table(sql: &str, table: &str) -> bool {
         || sql.contains(&format!(" join {table}"))
         || sql.contains(&format!(" join {pg_catalog_table}"))
         || sql.contains(&format!(" join {quoted_pg_catalog_table}"))
-}
-
-fn contains_relation(sql: &str, relation: &str) -> bool {
-    let quoted_relation = relation
-        .split('.')
-        .map(|part| format!("\"{part}\""))
-        .collect::<Vec<_>>()
-        .join(".");
-    sql.contains(&format!(" from {relation}"))
-        || sql.contains(&format!(" join {relation}"))
-        || sql.contains(&format!(" from {quoted_relation}"))
-        || sql.contains(&format!(" join {quoted_relation}"))
 }
 
 fn pg_setting(name: &str) -> Option<(&'static str, &'static str)> {
@@ -1308,6 +1472,66 @@ mod tests {
     }
 
     #[test]
+    fn owner_projection_uses_catalog_user_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER owner_user PASSWORD='pw'")
+            .unwrap();
+        crate::catalog::execute_catalog_aware_write_as(
+            &conn,
+            "owner_user",
+            "CREATE SCHEMA owned_schema",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "COMMENT ON SCHEMA owned_schema IS 'owned schema comment'",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write_as(
+            &conn,
+            "owner_user",
+            "CREATE TABLE owned_schema.owned_table(id INTEGER)",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write_as(
+            &conn,
+            "owner_user",
+            "CREATE VIEW owned_schema.owned_view AS SELECT * FROM owned_schema.owned_table",
+        )
+        .unwrap();
+
+        let schema_sql = rewrite_sql(
+            "SELECT schema_owner, description FROM information_schema.schemata WHERE schema_name = 'owned_schema'",
+        )
+        .expect("rewrite schema owner");
+        let (schema_owner, schema_description): (String, String) = conn
+            .query_row(&schema_sql, [], |row| {
+                Ok((row.get("schema_owner")?, row.get("description")?))
+            })
+            .unwrap();
+        assert_eq!(schema_owner, "owner_user");
+        assert_eq!(schema_description, "owned schema comment");
+
+        let table_sql = rewrite_sql(
+            "SELECT tableowner FROM pg_catalog.pg_tables WHERE tablename = 'owned_table'",
+        )
+        .expect("rewrite table owner");
+        let table_owner: String = conn
+            .query_row(&table_sql, [], |row| row.get("tableowner"))
+            .unwrap();
+        assert_eq!(table_owner, "owner_user");
+
+        let view_sql =
+            rewrite_sql("SELECT viewowner FROM pg_catalog.pg_views WHERE viewname = 'owned_view'")
+                .expect("rewrite view owner");
+        let view_owner: String = conn
+            .query_row(&view_sql, [], |row| row.get("viewowner"))
+            .unwrap();
+        assert_eq!(view_owner, "owner_user");
+    }
+
+    #[test]
     fn pg_class_rewrite_returns_duckdb_tables() {
         let conn = Connection::open_in_memory().unwrap();
         crate::catalog::bootstrap_fresh(&conn).unwrap();
@@ -1328,9 +1552,7 @@ mod tests {
         .expect("rewrite sql");
         assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
 
-        let table_name: String = conn
-            .query_row(&sql, [], |row| row.get("table_name"))
-            .unwrap();
+        let table_name: String = conn.query_row(&sql, [], |row| row.get("relname")).unwrap();
         assert_eq!(table_name, "kline_day");
     }
 
@@ -1375,14 +1597,14 @@ mod tests {
             SELECT a.attname
             FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            WHERE c.relname = 'kline_day'
+            ORDER BY CAST(a.attnum AS INTEGER)
             ",
         )
         .expect("rewrite sql");
         assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
 
-        let column_name: String = conn
-            .query_row(&sql, [], |row| row.get("column_name"))
-            .unwrap();
+        let column_name: String = conn.query_row(&sql, [], |row| row.get("attname")).unwrap();
         assert_eq!(column_name, "code");
     }
 
@@ -1428,7 +1650,7 @@ mod tests {
         .unwrap();
 
         let key_sql = rewrite_sql(
-            "SELECT column_name, ordinal_position
+            "SELECT constraint_name, column_name, ordinal_position
              FROM information_schema.key_column_usage",
         )
         .expect("rewrite key column usage");
@@ -1488,6 +1710,14 @@ mod tests {
             "COMMENT ON COLUMN quotes.close IS 'close price'",
         )
         .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE quote_ticks(
+                code VARCHAR,
+                CONSTRAINT quote_ticks_code_fkey FOREIGN KEY(code) REFERENCES quotes(code)
+            )",
+        )
+        .unwrap();
         crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER alice PASSWORD='pw'")
             .unwrap();
 
@@ -1517,6 +1747,25 @@ mod tests {
             .query_row(&constraint_sql, [], |row| row.get("pg_get_constraintdef"))
             .unwrap();
         assert_eq!(constraint_def, "PRIMARY KEY (code)");
+        let fk_constraint_oid: i64 = conn
+            .query_row(
+                "SELECT oid FROM rsduck_catalog.pg_constraint WHERE conname = 'quote_ticks_code_fkey'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fk_constraint_sql =
+            rewrite_sql(&format!("SELECT pg_get_constraintdef({fk_constraint_oid})"))
+                .expect("foreign key constraintdef rewrite");
+        let fk_constraint_def: String = conn
+            .query_row(&fk_constraint_sql, [], |row| {
+                row.get("pg_get_constraintdef")
+            })
+            .unwrap();
+        assert_eq!(
+            fk_constraint_def,
+            "FOREIGN KEY (code) REFERENCES main.quotes (code)"
+        );
 
         let table_oid: i64 = conn
             .query_row(
@@ -1525,6 +1774,35 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE SCHEMA archive").unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE archive.hidden_quotes(code VARCHAR)",
+        )
+        .unwrap();
+        let hidden_table_oid: i64 = conn
+            .query_row(
+                "SELECT oid FROM rsduck_catalog.pg_class WHERE relname = 'hidden_quotes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let visible_sql = rewrite_sql(&format!("SELECT pg_table_is_visible({table_oid})"))
+            .expect("pg_table_is_visible main relation");
+        let visible: String = conn
+            .query_row(&visible_sql, [], |row| row.get("pg_table_is_visible"))
+            .unwrap();
+        assert_eq!(visible, "t");
+        let hidden_visible_sql =
+            rewrite_sql(&format!("SELECT pg_table_is_visible({hidden_table_oid})"))
+                .expect("pg_table_is_visible non-main relation");
+        let hidden_visible: String = conn
+            .query_row(&hidden_visible_sql, [], |row| {
+                row.get("pg_table_is_visible")
+            })
+            .unwrap();
+        assert_eq!(hidden_visible, "f");
+
         let table_desc_sql =
             rewrite_sql(&format!("SELECT obj_description({table_oid})")).expect("description");
         let table_desc: String = conn

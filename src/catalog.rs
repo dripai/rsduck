@@ -1,13 +1,13 @@
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
-use duckdb::Connection;
+use duckdb::{types::ValueRef, Connection};
 use rand_core::OsRng;
 use sqlparser::ast::{
     Action, AlterTable, AlterTableOperation, AlterUser, ColumnOption, CommentObject, CreateIndex,
-    CreateTable, CreateUser, CreateView, Expr, ForeignKeyConstraint, Grant, GrantObjects,
-    GranteeName, GranteesType, Insert, ObjectName, ObjectNamePart, ObjectType, Privileges, Revoke,
-    SchemaName, SetExpr, Statement, TableConstraint, TableObject, Value,
+    CreateRole, CreateTable, CreateUser, CreateView, Expr, ForeignKeyConstraint, Grant,
+    GrantObjects, GranteeName, GranteesType, Insert, ObjectName, ObjectNamePart, ObjectType,
+    Privileges, Revoke, SchemaName, SetExpr, Statement, TableConstraint, TableObject, Value,
 };
 use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -32,6 +32,8 @@ const FIRST_USER_OID: i64 = 10_000;
 const PG_CLASS_CLASSOID: i64 = 1259;
 const PG_CONSTRAINT_CLASSOID: i64 = 2606;
 const PG_NAMESPACE_CLASSOID: i64 = 2615;
+const FNV64_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV64_PRIME: u64 = 0x00000100000001b3;
 
 #[derive(Debug, Clone)]
 struct CatalogColumn {
@@ -141,8 +143,10 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
 
     validate_catalog_journal_state(conn)?;
     validate_catalog_integrity(conn)?;
+    validate_catalog_checksum(conn)?;
     validate_physical_relations(conn)?;
     validate_partitioned_relations(conn)?;
+    refresh_catalog_checksum(conn)?;
     Ok(())
 }
 
@@ -317,6 +321,212 @@ fn ensure_catalog_count_zero(conn: &Connection, sql: &str, violation: &str) -> R
         Err(format!(
             "catalog integrity violation: {violation}; invalid rows={count}"
         ))
+    }
+}
+
+fn validate_catalog_checksum(conn: &Connection) -> Result<(), String> {
+    let expected: String = conn
+        .query_row(
+            "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read catalog checksum failed: {e}"))?;
+    let actual = calculate_catalog_checksum(conn)?;
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(format!(
+            "catalog checksum mismatch: expected={expected}, actual={actual}"
+        ))
+    }
+}
+
+fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
+    let checksum = calculate_catalog_checksum(conn)?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_catalog_version \
+             SET catalog_checksum = '{}', updated_at = CURRENT_TIMESTAMP \
+             WHERE id = 1",
+            sql_string(&checksum)
+        ),
+        [],
+    )
+    .map_err(|e| format!("update catalog checksum failed: {e}"))?;
+    Ok(())
+}
+
+fn calculate_catalog_checksum(conn: &Connection) -> Result<String, String> {
+    let mut state = FNV64_OFFSET;
+    for (label, sql) in catalog_checksum_queries() {
+        hash_checksum_part(&mut state, label);
+        hash_query_rows(conn, &mut state, sql)?;
+    }
+    Ok(format!("fnv1a64:{state:016x}"))
+}
+
+fn catalog_checksum_queries() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "rs_catalog_version",
+            "SELECT id, schema_version, catalog_epoch, status \
+             FROM rsduck_catalog.rs_catalog_version ORDER BY id",
+        ),
+        (
+            "rs_oid_alloc",
+            "SELECT id, next_oid FROM rsduck_catalog.rs_oid_alloc ORDER BY id",
+        ),
+        (
+            "rs_catalog_journal",
+            "SELECT journal_id, catalog_epoch, mutation_type, target_oid, request_json, status, error_message \
+             FROM rsduck_catalog.rs_catalog_journal ORDER BY journal_id",
+        ),
+        (
+            "pg_namespace",
+            "SELECT oid, nspname, nspowner, nspacl \
+             FROM rsduck_catalog.pg_namespace ORDER BY oid",
+        ),
+        (
+            "pg_type",
+            "SELECT oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typisdefined, typrelid, typelem, typarray, rsduck_physical_type \
+             FROM rsduck_catalog.pg_type ORDER BY oid",
+        ),
+        (
+            "pg_class",
+            "SELECT oid, relname, relnamespace, reltype, relowner, relkind, relpersistence, relnatts, reltuples, relhasindex, relispartition, relpartbound, reloptions, status, error_message \
+             FROM rsduck_catalog.pg_class ORDER BY oid",
+        ),
+        (
+            "pg_attribute",
+            "SELECT attrelid, attname, atttypid, attnum, atttypmod, attnotnull, atthasdef, attisdropped, attidentity, attgenerated, attoptions \
+             FROM rsduck_catalog.pg_attribute ORDER BY attrelid, attnum",
+        ),
+        (
+            "pg_attrdef",
+            "SELECT oid, adrelid, adnum, adbin \
+             FROM rsduck_catalog.pg_attrdef ORDER BY oid",
+        ),
+        (
+            "pg_constraint",
+            "SELECT oid, conname, connamespace, contype, conrelid, conindid, conkey, confrelid, confkey, convalidated, conbin \
+             FROM rsduck_catalog.pg_constraint ORDER BY oid",
+        ),
+        (
+            "pg_index",
+            "SELECT indexrelid, indrelid, indnatts, indnkeyatts, indisunique, indisprimary, indisvalid, indkey, indexprs, indpred \
+             FROM rsduck_catalog.pg_index ORDER BY indexrelid",
+        ),
+        (
+            "pg_depend",
+            "SELECT classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype \
+             FROM rsduck_catalog.pg_depend ORDER BY classid, objid, objsubid, refclassid, refobjid, refobjsubid",
+        ),
+        (
+            "pg_description",
+            "SELECT objoid, classoid, objsubid, description \
+             FROM rsduck_catalog.pg_description ORDER BY objoid, classoid, objsubid",
+        ),
+        (
+            "rs_relation_ext",
+            "SELECT relid, managed_kind, storage_mode, visibility, partition_key, partition_key_type, partition_unit, retention_count, generated_sql, properties_json \
+             FROM rsduck_catalog.rs_relation_ext ORDER BY relid",
+        ),
+        (
+            "rs_partition",
+            "SELECT parent_relid, child_relid, partition_value, partition_unit, lower_bound, upper_bound, is_null_partition, status, row_count, min_ts, max_ts, checksum, error_message \
+             FROM rsduck_catalog.rs_partition ORDER BY parent_relid, child_relid",
+        ),
+        (
+            "rs_user",
+            "SELECT user_id, username, password_hash, password_algo, status, is_builtin \
+             FROM rsduck_catalog.rs_user ORDER BY user_id",
+        ),
+        (
+            "rs_role",
+            "SELECT role_id, role_name, description, is_builtin \
+             FROM rsduck_catalog.rs_role ORDER BY role_id",
+        ),
+        (
+            "rs_user_role",
+            "SELECT user_id, role_id, granted_by \
+             FROM rsduck_catalog.rs_user_role ORDER BY user_id, role_id",
+        ),
+        (
+            "rs_privilege",
+            "SELECT privilege_id, principal_type, principal_id, object_type, object_id, action, granted_by \
+             FROM rsduck_catalog.rs_privilege ORDER BY privilege_id",
+        ),
+    ]
+}
+
+fn hash_query_rows(conn: &Connection, state: &mut u64, sql: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("prepare catalog checksum query failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query catalog checksum rows failed: {e}"))?;
+    let stmt_ref = rows
+        .as_ref()
+        .ok_or_else(|| "catalog checksum query did not expose statement metadata".to_string())?;
+    let column_count = stmt_ref.column_count();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read catalog checksum row failed: {e}"))?
+    {
+        hash_checksum_part(state, "row");
+        for idx in 0..column_count {
+            let value = row
+                .get_ref(idx)
+                .map_err(|e| format!("read catalog checksum cell failed: {e}"))?;
+            hash_checksum_part(state, &checksum_value_to_string(value));
+        }
+    }
+    Ok(())
+}
+
+fn checksum_value_to_string(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => "<null>".to_string(),
+        ValueRef::Boolean(v) => v.to_string(),
+        ValueRef::TinyInt(v) => v.to_string(),
+        ValueRef::SmallInt(v) => v.to_string(),
+        ValueRef::Int(v) => v.to_string(),
+        ValueRef::BigInt(v) => v.to_string(),
+        ValueRef::HugeInt(v) => v.to_string(),
+        ValueRef::UTinyInt(v) => v.to_string(),
+        ValueRef::USmallInt(v) => v.to_string(),
+        ValueRef::UInt(v) => v.to_string(),
+        ValueRef::UBigInt(v) => v.to_string(),
+        ValueRef::Float(v) => v.to_string(),
+        ValueRef::Double(v) => v.to_string(),
+        ValueRef::Decimal(v) => v.to_string(),
+        ValueRef::Timestamp(unit, value) => format!("{value} {unit:?}"),
+        ValueRef::Text(v) => String::from_utf8_lossy(v).into_owned(),
+        ValueRef::Blob(v) => format!("<{} bytes>", v.len()),
+        ValueRef::Date32(v) => v.to_string(),
+        ValueRef::Time64(unit, value) => format!("{value} {unit:?}"),
+        ValueRef::Interval {
+            months,
+            days,
+            nanos,
+        } => format!("{months} months {days} days {nanos} ns"),
+        other => format!("{other:?}"),
+    }
+}
+
+fn hash_checksum_part(state: &mut u64, value: &str) {
+    hash_checksum_bytes(state, value.len().to_string().as_bytes());
+    hash_checksum_bytes(state, b":");
+    hash_checksum_bytes(state, value.as_bytes());
+    hash_checksum_bytes(state, b";");
+}
+
+fn hash_checksum_bytes(state: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *state ^= u64::from(*byte);
+        *state = state.wrapping_mul(FNV64_PRIME);
     }
 }
 
@@ -764,6 +974,7 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
         }
         Statement::CreateSchema { .. } => require_system_action(conn, &principal, "manage_catalog"),
         Statement::CreateUser(_)
+        | Statement::CreateRole(_)
         | Statement::AlterUser(_)
         | Statement::Grant(_)
         | Statement::Revoke(_) => require_system_action(conn, &principal, "manage_user"),
@@ -797,8 +1008,16 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
             }
             _ => Err(format!("COMMENT ON {object_type} is not supported")),
         },
-        Statement::Drop { .. }
-        | Statement::AlterTable(_)
+        Statement::Drop { object_type, .. } => {
+            if matches!(object_type, ObjectType::User | ObjectType::Role) {
+                require_system_action(conn, &principal, "manage_user")
+            } else if let Some(relation) = extract_first_relation_for_ddl(&normalized_sql) {
+                require_relation_action(conn, &principal, &relation, "ddl")
+            } else {
+                require_system_action(conn, &principal, "manage_catalog")
+            }
+        }
+        Statement::AlterTable(_)
         | Statement::AlterSchema(_)
         | Statement::AlterIndex { .. }
         | Statement::AlterView { .. } => {
@@ -820,6 +1039,10 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
 pub fn authorize_snapshot(conn: &Connection, username: &str) -> Result<(), String> {
     let principal = principal_for_username(conn, username)?;
     require_system_action(conn, &principal, "manage_snapshot")
+}
+
+pub fn authorize_catalog_projection(conn: &Connection, username: &str) -> Result<(), String> {
+    principal_for_username(conn, username).map(|_| ())
 }
 
 pub fn looks_like_privilege_function(sql: &str) -> bool {
@@ -876,8 +1099,17 @@ pub fn evaluate_privilege_function(
 
 pub fn reject_unhandled_catalog_projection(sql: &str) -> Result<(), String> {
     let normalized = normalize_for_guard(sql);
-    if normalized.contains("pg_catalog.") || normalized.contains("information_schema.") {
-        return Err("unsupported catalog projection query".into());
+    if let Some(name) = unsupported_catalog_relation(&normalized, "pg_catalog") {
+        return Err(format!("unsupported pg_catalog relation: {name}"));
+    }
+    if let Some(name) = unsupported_catalog_relation(&normalized, "information_schema") {
+        return Err(format!("unsupported information_schema relation: {name}"));
+    }
+    if normalized.contains("pg_catalog.") {
+        return Err("unsupported pg_catalog query".into());
+    }
+    if normalized.contains("information_schema.") {
+        return Err("unsupported information_schema query".into());
     }
     Ok(())
 }
@@ -1155,6 +1387,9 @@ fn execute_catalog_statement(
         Statement::CreateUser(create_user) => {
             create_user_account(conn, create_user, sql, owner_user_id).map(Some)
         }
+        Statement::CreateRole(create_role) => {
+            create_role_account(conn, create_role, sql, owner_user_id).map(Some)
+        }
         Statement::AlterUser(alter_user) => {
             alter_user_account(conn, alter_user, sql, owner_user_id).map(Some)
         }
@@ -1307,6 +1542,66 @@ fn create_user_account(
         .map_err(|e| format!("write default user role failed: {e}"))?;
         finish_journal(conn, journal_id)?;
         Ok(1)
+    })
+}
+
+fn create_role_account(
+    conn: &Connection,
+    create_role: &CreateRole,
+    sql: &str,
+    _owner_user_id: i64,
+) -> Result<usize, String> {
+    if create_role.names.is_empty() {
+        return Err("CREATE ROLE requires at least one role name".into());
+    }
+    if create_role.login.is_some()
+        || create_role.inherit.is_some()
+        || create_role.bypassrls.is_some()
+        || create_role.password.is_some()
+        || create_role.superuser.is_some()
+        || create_role.create_db.is_some()
+        || create_role.create_role.is_some()
+        || create_role.replication.is_some()
+        || create_role.connection_limit.is_some()
+        || create_role.valid_until.is_some()
+        || !create_role.in_role.is_empty()
+        || !create_role.in_group.is_empty()
+        || !create_role.role.is_empty()
+        || !create_role.user.is_empty()
+        || !create_role.admin.is_empty()
+        || create_role.authorization_owner.is_some()
+    {
+        return Err(
+            "CREATE ROLE only supports plain rsduck roles without PostgreSQL role options".into(),
+        );
+    }
+
+    run_catalog_tx(conn, || {
+        let mut affected = 0;
+        for name in &create_role.names {
+            let role_name = single_name_part(name)?;
+            validate_role_name(&role_name)?;
+            if role_id_by_name_opt(conn, &role_name)?.is_some() {
+                if create_role.if_not_exists {
+                    continue;
+                }
+                return Err(format!("role already exists: {role_name}"));
+            }
+            let role_id = allocate_oid(conn)?;
+            let journal_id = insert_journal(conn, "create_role", role_id, sql)?;
+            conn.execute(
+                &format!(
+                    "INSERT INTO rsduck_catalog.rs_role(role_id, role_name, description, is_builtin, created_at, updated_at) \
+                     VALUES ({role_id}, '{}', '', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    sql_string(&role_name)
+                ),
+                [],
+            )
+            .map_err(|e| format!("write rs_role failed: {e}"))?;
+            finish_journal(conn, journal_id)?;
+            affected += 1;
+        }
+        Ok(affected)
     })
 }
 
@@ -2469,6 +2764,9 @@ fn drop_objects(
     if object_type == ObjectType::User {
         return drop_user_accounts(conn, if_exists, names, sql);
     }
+    if object_type == ObjectType::Role {
+        return drop_role_accounts(conn, if_exists, names, cascade, sql);
+    }
 
     run_catalog_tx(conn, || {
         let mut affected = 0;
@@ -2499,6 +2797,50 @@ fn drop_objects(
             } else {
                 execute_physical_drop(conn, object_type, &schema, &relname, cascade)?;
                 delete_relation_catalog(conn, &meta)?;
+            }
+            finish_journal(conn, journal_id)?;
+            affected += 1;
+        }
+        Ok(affected)
+    })
+}
+
+fn drop_role_accounts(
+    conn: &Connection,
+    if_exists: bool,
+    names: &[ObjectName],
+    cascade: bool,
+    sql: &str,
+) -> Result<usize, String> {
+    run_catalog_tx(conn, || {
+        let mut affected = 0;
+        for name in names {
+            let role_name = single_name_part(name)?;
+            let Some(role_id) = role_id_by_name_opt(conn, &role_name)? else {
+                if if_exists {
+                    continue;
+                }
+                return Err(format!("role does not exist: {role_name}"));
+            };
+            if builtin_role(conn, role_id)? {
+                return Err(format!("builtin role cannot be dropped: {role_name}"));
+            }
+            if !cascade && role_has_dependents(conn, role_id)? {
+                return Err(format!(
+                    "cannot drop role with granted users or privileges; revoke grants first: {role_name}"
+                ));
+            }
+            let journal_id = insert_journal(conn, "drop_role", role_id, sql)?;
+            for statement in [
+                format!("DELETE FROM rsduck_catalog.rs_user_role WHERE role_id = {role_id}"),
+                format!(
+                    "DELETE FROM rsduck_catalog.rs_privilege \
+                     WHERE principal_type = 'role' AND principal_id = {role_id}"
+                ),
+                format!("DELETE FROM rsduck_catalog.rs_role WHERE role_id = {role_id}"),
+            ] {
+                conn.execute(&statement, [])
+                    .map_err(|e| format!("drop role catalog rows failed: {e}"))?;
             }
             finish_journal(conn, journal_id)?;
             affected += 1;
@@ -2637,6 +2979,9 @@ fn grant_privileges(
     sql: &str,
     grantor_id: i64,
 ) -> Result<usize, String> {
+    if grant.objects.is_none() && grant_contains_role_actions(&grant.privileges) {
+        return grant_roles(conn, &grant.privileges, &grant.grantees, sql, grantor_id);
+    }
     let targets = grant_targets(conn, grant.objects.as_ref())?;
     let actions = privilege_actions(&grant.privileges, &targets)?;
     let principals = grant_principals(conn, &grant.grantees)?;
@@ -2665,6 +3010,9 @@ fn grant_privileges(
 }
 
 fn revoke_privileges(conn: &Connection, revoke: &Revoke, sql: &str) -> Result<usize, String> {
+    if revoke.objects.is_none() && grant_contains_role_actions(&revoke.privileges) {
+        return revoke_roles(conn, &revoke.privileges, &revoke.grantees, sql);
+    }
     let targets = grant_targets(conn, revoke.objects.as_ref())?;
     let actions = privilege_actions(&revoke.privileges, &targets)?;
     let principals = grant_principals(conn, &revoke.grantees)?;
@@ -2696,6 +3044,141 @@ fn revoke_privileges(conn: &Connection, revoke: &Revoke, sql: &str) -> Result<us
         finish_journal(conn, journal_id)?;
         Ok(affected)
     })
+}
+
+fn grant_roles(
+    conn: &Connection,
+    privileges: &Privileges,
+    grantees: &[sqlparser::ast::Grantee],
+    sql: &str,
+    grantor_id: i64,
+) -> Result<usize, String> {
+    let role_ids = granted_role_ids(conn, privileges)?;
+    let user_ids = role_grantee_user_ids(conn, grantees)?;
+    run_catalog_tx(conn, || {
+        let journal_id = insert_journal(conn, "grant_role", 0, sql)?;
+        let mut affected = 0;
+        for user_id in &user_ids {
+            for role_id in &role_ids {
+                affected += upsert_user_role(conn, *user_id, *role_id, grantor_id)?;
+            }
+        }
+        finish_journal(conn, journal_id)?;
+        Ok(affected)
+    })
+}
+
+fn revoke_roles(
+    conn: &Connection,
+    privileges: &Privileges,
+    grantees: &[sqlparser::ast::Grantee],
+    sql: &str,
+) -> Result<usize, String> {
+    let role_ids = granted_role_ids(conn, privileges)?;
+    let user_ids = role_grantee_user_ids(conn, grantees)?;
+    run_catalog_tx(conn, || {
+        let journal_id = insert_journal(conn, "revoke_role", 0, sql)?;
+        let mut affected = 0;
+        for user_id in &user_ids {
+            for role_id in &role_ids {
+                affected += conn
+                    .execute(
+                        &format!(
+                            "DELETE FROM rsduck_catalog.rs_user_role \
+                             WHERE user_id = {user_id} AND role_id = {role_id}"
+                        ),
+                        [],
+                    )
+                    .map_err(|e| format!("revoke role failed: {e}"))?;
+            }
+        }
+        finish_journal(conn, journal_id)?;
+        Ok(affected)
+    })
+}
+
+fn grant_contains_role_actions(privileges: &Privileges) -> bool {
+    matches!(
+        privileges,
+        Privileges::Actions(actions)
+            if actions.iter().any(|action| matches!(action, Action::Role { .. }))
+    )
+}
+
+fn granted_role_ids(conn: &Connection, privileges: &Privileges) -> Result<Vec<i64>, String> {
+    let Privileges::Actions(actions) = privileges else {
+        return Err("role grant requires explicit ROLE action".into());
+    };
+    let mut role_ids = Vec::new();
+    for action in actions {
+        let Action::Role { role } = action else {
+            return Err("GRANT/REVOKE ROLE cannot be mixed with object privileges".into());
+        };
+        let role_name = single_name_part(role)?;
+        let role_id = role_id_by_name(conn, &role_name)?;
+        if !role_ids.contains(&role_id) {
+            role_ids.push(role_id);
+        }
+    }
+    if role_ids.is_empty() {
+        return Err("GRANT/REVOKE ROLE requires at least one role".into());
+    }
+    Ok(role_ids)
+}
+
+fn role_grantee_user_ids(
+    conn: &Connection,
+    grantees: &[sqlparser::ast::Grantee],
+) -> Result<Vec<i64>, String> {
+    if grantees.is_empty() {
+        return Err("GRANT/REVOKE ROLE requires at least one user".into());
+    }
+    let mut user_ids = Vec::new();
+    for grantee in grantees {
+        if grantee.grantee_type == GranteesType::Role {
+            return Err("role inheritance is not supported by rsduck catalog".into());
+        }
+        let username = match &grantee.name {
+            Some(GranteeName::ObjectName(name)) => single_name_part(name)?,
+            Some(GranteeName::UserHost { user, .. }) => user.value.clone(),
+            None => return Err("grantee name is required".into()),
+        };
+        let user_id = user_id_by_name(conn, &username)?;
+        if !user_ids.contains(&user_id) {
+            user_ids.push(user_id);
+        }
+    }
+    Ok(user_ids)
+}
+
+fn upsert_user_role(
+    conn: &Connection,
+    user_id: i64,
+    role_id: i64,
+    grantor_id: i64,
+) -> Result<usize, String> {
+    let count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_user_role \
+                 WHERE user_id = {user_id} AND role_id = {role_id}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check existing role grant failed: {e}"))?;
+    if count > 0 {
+        return Ok(0);
+    }
+    conn.execute(
+        &format!(
+            "INSERT INTO rsduck_catalog.rs_user_role(user_id, role_id, granted_by, created_at) \
+             VALUES ({user_id}, {role_id}, {grantor_id}, CURRENT_TIMESTAMP)"
+        ),
+        [],
+    )
+    .map_err(|e| format!("grant role failed: {e}"))?;
+    Ok(1)
 }
 
 fn grant_targets(
@@ -4296,6 +4779,7 @@ fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("write admin privilege failed: {e}"))?;
         }
 
+        refresh_catalog_checksum(conn)?;
         Ok(0)
     })?;
     Ok(())
@@ -4356,6 +4840,7 @@ fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("increment catalog epoch failed: {e}"))?;
+    refresh_catalog_checksum(conn)?;
     Ok(())
 }
 
@@ -4874,6 +5359,21 @@ fn validate_username(username: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_role_name(role_name: &str) -> Result<(), String> {
+    if role_name.is_empty() {
+        return Err("role name cannot be empty".into());
+    }
+    if !role_name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(format!(
+            "role name contains unsupported characters: {role_name}"
+        ));
+    }
+    Ok(())
+}
+
 fn user_exists(conn: &Connection, username: &str) -> Result<bool, String> {
     Ok(user_id_by_name_opt(conn, username)?.is_some())
 }
@@ -4904,15 +5404,52 @@ fn user_id_by_name_opt(conn: &Connection, username: &str) -> Result<Option<i64>,
 }
 
 fn role_id_by_name(conn: &Connection, role_name: &str) -> Result<i64, String> {
-    conn.query_row(
-        &format!(
+    role_id_by_name_opt(conn, role_name)?.ok_or_else(|| format!("role does not exist: {role_name}"))
+}
+
+fn role_id_by_name_opt(conn: &Connection, role_name: &str) -> Result<Option<i64>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
             "SELECT role_id FROM rsduck_catalog.rs_role WHERE lower(role_name) = lower('{}')",
             sql_string(role_name)
-        ),
+        ))
+        .map_err(|e| format!("prepare role lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query role lookup failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read role lookup failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    row.get(0)
+        .map(Some)
+        .map_err(|e| format!("read role id failed: {e}"))
+}
+
+fn builtin_role(conn: &Connection, role_id: i64) -> Result<bool, String> {
+    conn.query_row(
+        &format!("SELECT is_builtin FROM rsduck_catalog.rs_role WHERE role_id = {role_id}"),
         [],
         |row| row.get(0),
     )
-    .map_err(|e| format!("role does not exist: {role_name}: {e}"))
+    .map_err(|e| format!("read role builtin flag failed: {e}"))
+}
+
+fn role_has_dependents(conn: &Connection, role_id: i64) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT \
+                    (SELECT COUNT(*) FROM rsduck_catalog.rs_user_role WHERE role_id = {role_id}) + \
+                    (SELECT COUNT(*) FROM rsduck_catalog.rs_privilege WHERE principal_type = 'role' AND principal_id = {role_id})"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check role dependents failed: {e}"))?;
+    Ok(count > 0)
 }
 
 fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
@@ -5431,6 +5968,15 @@ fn extract_read_relations(sql: &str) -> Vec<(String, String)> {
     relations
 }
 
+fn unsupported_catalog_relation(sql: &str, catalog_schema: &str) -> Option<String> {
+    for (schema, relation) in extract_read_relations(sql) {
+        if schema.eq_ignore_ascii_case(catalog_schema) {
+            return Some(relation);
+        }
+    }
+    None
+}
+
 fn extract_relation_after(sql: &str, keyword: &str) -> Option<(String, String)> {
     let tokens = sql_tokens(sql);
     let keyword = keyword.to_ascii_lowercase();
@@ -5655,6 +6201,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(role_count, 5);
+
+        let checksum: String = conn
+            .query_row(
+                "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(checksum.starts_with("fnv1a64:"));
     }
 
     #[test]
@@ -5821,6 +6376,48 @@ mod tests {
     }
 
     #[test]
+    fn role_management_mutations_update_user_role_catalog() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)").unwrap();
+        execute_catalog_aware_write(&conn, "CREATE USER bob PASSWORD='pw'").unwrap();
+        execute_catalog_aware_write(&conn, "CREATE ROLE analyst").unwrap();
+
+        let role_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_role WHERE role_name = 'analyst'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role_count, 1);
+
+        execute_catalog_aware_write(&conn, "GRANT SELECT ON TABLE quotes TO ROLE analyst").unwrap();
+        execute_catalog_aware_write(&conn, "GRANT ROLE analyst TO bob").unwrap();
+        authorize_sql(&conn, "bob", "SELECT * FROM quotes").unwrap();
+
+        execute_catalog_aware_write(&conn, "REVOKE ROLE analyst FROM bob").unwrap();
+        let denied = authorize_sql(&conn, "bob", "SELECT * FROM quotes").unwrap_err();
+        assert!(denied.contains("permission denied"));
+
+        let drop_err = execute_catalog_aware_write(&conn, "DROP ROLE analyst").unwrap_err();
+        assert!(drop_err.contains("revoke grants first"));
+        execute_catalog_aware_write(&conn, "REVOKE SELECT ON TABLE quotes FROM ROLE analyst")
+            .unwrap();
+        execute_catalog_aware_write(&conn, "DROP ROLE analyst").unwrap();
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_role WHERE role_name = 'analyst'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        validate_after_start(&conn).unwrap();
+    }
+
+    #[test]
     fn grant_and_revoke_relation_and_schema_privileges() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
@@ -5856,12 +6453,27 @@ mod tests {
     fn create_table_writes_pg_class_and_attributes() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
+        let before_checksum: String = conn
+            .query_row(
+                "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         execute_catalog_aware_write(
             &conn,
             "CREATE TABLE kline_day(code VARCHAR NOT NULL, bar_time TIMESTAMP NOT NULL, close DOUBLE, PRIMARY KEY(code, bar_time))",
         )
         .unwrap();
+        let after_checksum: String = conn
+            .query_row(
+                "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(before_checksum, after_checksum);
 
         let relkind: String = conn
             .query_row(
@@ -6747,6 +7359,22 @@ mod tests {
         let err = authorize_sql(&conn, "admin", "SELECT * FROM quotes").unwrap_err();
         assert!(err.contains("relation is unavailable"));
         assert!(err.contains("missing DuckDB physical table"));
+
+        let projection_sql =
+            crate::pg_compat::rewrite_sql("SELECT relname, rsduck_status, rsduck_error_message FROM pg_catalog.pg_class WHERE relname = 'quotes'")
+                .expect("rewrite pg_class projection");
+        let (relname, projected_status, projected_error): (String, String, String) = conn
+            .query_row(&projection_sql, [], |row| {
+                Ok((
+                    row.get("relname")?,
+                    row.get("rsduck_status")?,
+                    row.get("rsduck_error_message")?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(relname, "quotes");
+        assert_eq!(projected_status, "unavailable");
+        assert!(projected_error.contains("missing DuckDB physical table"));
     }
 
     #[test]
@@ -6784,6 +7412,22 @@ mod tests {
 
         let err = validate_after_start(&conn).unwrap_err();
         assert!(err.contains("pg_attribute.atttypid"));
+    }
+
+    #[test]
+    fn startup_validation_rejects_catalog_checksum_mismatch() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        conn.execute(
+            "UPDATE rsduck_catalog.pg_namespace \
+             SET nspacl = 'tampered' \
+             WHERE nspname = 'main'",
+            [],
+        )
+        .unwrap();
+
+        let err = validate_after_start(&conn).unwrap_err();
+        assert!(err.contains("catalog checksum mismatch"));
     }
 
     #[test]

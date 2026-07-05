@@ -89,15 +89,6 @@ fn exec_to_response<'a>(command: &str, affected_rows: usize) -> Response<'a> {
 }
 
 async fn execute_pg_sql(sql: String, current_user: &str) -> Result<SqlResult, String> {
-    if let Some(result) = crate::pg_compat::compat_result(&sql, current_user) {
-        return Ok(result);
-    }
-    if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(&sql) {
-        return crate::db::execute_sql(rewritten_sql).await;
-    }
-
-    crate::catalog::guard_external_sql(&sql)?;
-    crate::catalog::reject_unhandled_catalog_projection(&sql)?;
     crate::db::execute_sql_as(current_user.to_string(), sql).await
 }
 

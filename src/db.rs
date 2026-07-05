@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 
 static DB_ENGINE: OnceLock<DbEngine> = OnceLock::new();
+const SNAPSHOT_MANIFEST_FILE: &str = "rsduck_snapshot_manifest.json";
 
 #[derive(Debug, Clone)]
 pub enum SqlResult {
@@ -123,10 +124,6 @@ pub fn init_db(snapshot_dir: Option<&str>, cfg: &DbConfig) {
     DB_ENGINE
         .set(engine)
         .unwrap_or_else(|_| panic!("db initialized twice"));
-}
-
-pub async fn execute_sql(sql: String) -> Result<SqlResult, String> {
-    execute_sql_as("admin".to_string(), sql).await
 }
 
 pub async fn execute_sql_as(username: String, sql: String) -> Result<SqlResult, String> {
@@ -434,6 +431,7 @@ fn restore_or_initialize(
         conn.execute_batch(&import_database_sql(path))
             .map_err(|e| format!("import snapshot failed: {e}"))?;
         info!("Snapshot restored in {:.2?}", t0.elapsed());
+        validate_snapshot_manifest(conn, Path::new(path))?;
         crate::catalog::validate_after_start(conn)?;
         return Ok(());
     }
@@ -474,6 +472,15 @@ fn execute_sql_blocking(
         return Err("empty sql".into());
     }
 
+    if let Some(result) = crate::pg_compat::compat_result(sql_trimmed, username) {
+        return Ok(result);
+    }
+    if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(sql_trimmed) {
+        crate::catalog::authorize_catalog_projection(conn, username)?;
+        return query_sql_blocking(conn, &rewritten_sql, max_result_rows);
+    }
+    crate::catalog::guard_external_sql(sql_trimmed)?;
+    crate::catalog::reject_unhandled_catalog_projection(sql_trimmed)?;
     crate::catalog::authorize_sql(conn, username, sql_trimmed)?;
 
     match route {
@@ -565,11 +572,119 @@ fn save_snapshot_blocking(
             let _ = std::fs::remove_dir_all(&tmp_path);
             format!("export snapshot failed: {e}")
         })?;
+    write_snapshot_manifest(conn, &tmp_path, &final_path).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp_path);
+        e
+    })?;
     std::fs::rename(&tmp_path, &final_path).map_err(|e| {
         let _ = std::fs::remove_dir_all(&tmp_path);
         format!("rename snapshot dir failed: {e}")
     })?;
     Ok(final_path.display().to_string())
+}
+
+fn write_snapshot_manifest(
+    conn: &Connection,
+    tmp_path: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    let (catalog_epoch, catalog_checksum): (i64, String) = conn
+        .query_row(
+            "SELECT catalog_epoch, catalog_checksum \
+             FROM rsduck_catalog.rs_catalog_version \
+             WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("read snapshot catalog metadata failed: {e}"))?;
+    let snapshot_name = final_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| {
+            format!(
+                "snapshot final path has no file name: {}",
+                final_path.display()
+            )
+        })?;
+    let manifest = serde_json::json!({
+        "manifest_version": 1,
+        "snapshot_name": snapshot_name,
+        "catalog_epoch": catalog_epoch,
+        "catalog_checksum": catalog_checksum,
+    });
+    let payload = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| format!("serialize snapshot manifest failed: {e}"))?;
+    fs::write(tmp_path.join(SNAPSHOT_MANIFEST_FILE), payload)
+        .map_err(|e| format!("write snapshot manifest failed: {e}"))?;
+    Ok(())
+}
+
+fn validate_snapshot_manifest(conn: &Connection, snapshot_path: &Path) -> Result<(), String> {
+    let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST_FILE);
+    let payload = fs::read(&manifest_path).map_err(|e| {
+        format!(
+            "read snapshot manifest failed: {}: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|e| format!("parse snapshot manifest failed: {e}"))?;
+    let version = manifest
+        .get("manifest_version")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| "snapshot manifest missing manifest_version".to_string())?;
+    if version != 1 {
+        return Err(format!("unsupported snapshot manifest version: {version}"));
+    }
+
+    let expected_name = snapshot_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| {
+            format!(
+                "snapshot path has no file name: {}",
+                snapshot_path.display()
+            )
+        })?;
+    let manifest_name = manifest
+        .get("snapshot_name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "snapshot manifest missing snapshot_name".to_string())?;
+    if manifest_name != expected_name {
+        return Err(format!(
+            "snapshot manifest name mismatch: expected={expected_name}, actual={manifest_name}"
+        ));
+    }
+
+    let manifest_epoch = manifest
+        .get("catalog_epoch")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| "snapshot manifest missing catalog_epoch".to_string())?;
+    let manifest_checksum = manifest
+        .get("catalog_checksum")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "snapshot manifest missing catalog_checksum".to_string())?;
+    let (catalog_epoch, catalog_checksum): (i64, String) = conn
+        .query_row(
+            "SELECT catalog_epoch, catalog_checksum \
+             FROM rsduck_catalog.rs_catalog_version \
+             WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("read restored catalog metadata failed: {e}"))?;
+
+    if manifest_epoch != catalog_epoch {
+        return Err(format!(
+            "snapshot manifest catalog_epoch mismatch: expected={manifest_epoch}, actual={catalog_epoch}"
+        ));
+    }
+    if manifest_checksum != catalog_checksum {
+        return Err(format!(
+            "snapshot manifest catalog_checksum mismatch: expected={manifest_checksum}, actual={catalog_checksum}"
+        ));
+    }
+    Ok(())
 }
 
 fn cell_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
@@ -678,9 +793,11 @@ fn escape_sql_string(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_database_sql, find_latest_snapshot_dir, import_database_sql,
-        parse_snapshot_dir_timestamp, restore_or_initialize, save_snapshot_blocking,
+        execute_sql_blocking, export_database_sql, find_latest_snapshot_dir, import_database_sql,
+        parse_snapshot_dir_timestamp, restore_or_initialize, save_snapshot_blocking, SqlResult,
+        SNAPSHOT_MANIFEST_FILE,
     };
+    use crate::sql_route::route_sql;
     use duckdb::Connection;
     use std::path::PathBuf;
 
@@ -725,6 +842,55 @@ mod tests {
     }
 
     #[test]
+    fn catalog_projection_rewrite_executes_through_db_auth_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
+            .unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER alice PASSWORD='pw'")
+            .unwrap();
+
+        let sql = "SELECT relname FROM pg_catalog.pg_class WHERE relname = 'quotes'";
+        let decision = route_sql(sql).unwrap();
+        let result =
+            execute_sql_blocking(&conn, "alice", sql, decision.route, &decision.command, 100)
+                .unwrap();
+
+        let SqlResult::Query { columns, rows } = result else {
+            panic!("expected catalog projection query result");
+        };
+        let relname_idx = columns
+            .iter()
+            .position(|column| column == "relname")
+            .expect("relname column");
+        assert!(rows.iter().any(|row| row[relname_idx] == "quotes"));
+    }
+
+    #[test]
+    fn internal_catalog_query_is_rejected_through_db_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+        let sql = "SELECT * FROM rsduck_catalog.pg_class";
+        let decision = route_sql(sql).unwrap();
+        let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap_err();
+        assert!(err.contains("reserved schema"));
+    }
+
+    #[test]
+    fn unsupported_catalog_relation_reports_relation_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+        let sql = "SELECT * FROM pg_catalog.pg_am";
+        let decision = route_sql(sql).unwrap();
+        let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap_err();
+        assert_eq!(err, "unsupported pg_catalog relation: pg_am");
+    }
+
+    #[test]
     fn snapshot_directory_round_trip_restores_multiple_tables() {
         let dir = std::env::temp_dir().join(format!(
             "rsduck_snapshot_round_trip_{}_{}",
@@ -752,6 +918,30 @@ mod tests {
             .unwrap();
 
         let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+        let (catalog_epoch, catalog_checksum): (i64, String) = conn
+            .query_row(
+                "SELECT catalog_epoch, catalog_checksum \
+                 FROM rsduck_catalog.rs_catalog_version \
+                 WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let manifest_path = PathBuf::from(&snapshot).join("rsduck_snapshot_manifest.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["manifest_version"], 1);
+        assert_eq!(manifest["catalog_epoch"], catalog_epoch);
+        assert_eq!(manifest["catalog_checksum"], catalog_checksum);
+        assert_eq!(
+            manifest["snapshot_name"],
+            PathBuf::from(&snapshot)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+
         let restored = Connection::open_in_memory().unwrap();
         restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
 
@@ -763,6 +953,39 @@ mod tests {
             .unwrap();
         assert_eq!(table_a_count, 2);
         assert_eq!(table_b_count, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_manifest_checksum_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "rsduck_snapshot_manifest_mismatch_{}_{}",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE table_a(id INTEGER)")
+            .unwrap();
+
+        let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+        let manifest_path = PathBuf::from(&snapshot).join(SNAPSHOT_MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["catalog_checksum"] = serde_json::Value::String("tampered".to_string());
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let restored = Connection::open_in_memory().unwrap();
+        let err = restore_or_initialize(&restored, Some(&snapshot), "").unwrap_err();
+        assert!(err.contains("snapshot manifest catalog_checksum mismatch"));
 
         let _ = std::fs::remove_dir_all(dir);
     }
