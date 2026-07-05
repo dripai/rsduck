@@ -177,6 +177,17 @@ pub async fn authenticate_user(username: String, password: String) -> Result<(),
     engine().authenticate(username, password).await
 }
 
+pub async fn run_partition_maintenance() -> Result<SqlResult, String> {
+    engine()
+        .execute(
+            "admin".to_string(),
+            "CALL rsduck_run_partition_maintenance()".to_string(),
+            SqlRoute::Write,
+            "CALL".to_string(),
+        )
+        .await
+}
+
 pub fn shutdown_workers() {
     if let Some(engine) = DB_ENGINE.get() {
         engine.shutdown();
@@ -496,6 +507,10 @@ fn execute_sql_blocking(
     if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(sql_trimmed) {
         crate::catalog::authorize_catalog_projection(conn, username)?;
         return query_sql_blocking(conn, &rewritten_sql, max_result_rows);
+    }
+    if crate::catalog::is_reserved_diagnostic_read(sql_trimmed) {
+        crate::catalog::authorize_reserved_diagnostic(conn, username, sql_trimmed)?;
+        return query_sql_blocking(conn, sql_trimmed, max_result_rows);
     }
     crate::catalog::guard_external_sql_as(username, sql_trimmed)?;
     crate::catalog::reject_unhandled_catalog_projection(sql_trimmed)?;
@@ -885,15 +900,41 @@ mod tests {
     }
 
     #[test]
-    fn internal_catalog_query_is_rejected_through_db_path() {
+    fn internal_catalog_query_requires_catalog_diagnostic_privilege() {
         let conn = Connection::open_in_memory().unwrap();
         crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE USER operator_user PASSWORD='pw'",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER plain_user PASSWORD='pw'")
+            .unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "GRANT ROLE operator TO operator_user")
+            .unwrap();
 
         let sql = "SELECT * FROM rsduck_catalog.pg_class";
         let decision = route_sql(sql).unwrap();
-        let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
-            .unwrap_err();
-        assert!(err.contains("reserved schema"));
+        execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100).unwrap();
+        execute_sql_blocking(
+            &conn,
+            "operator_user",
+            sql,
+            decision.route,
+            &decision.command,
+            100,
+        )
+        .unwrap();
+        let err = execute_sql_blocking(
+            &conn,
+            "plain_user",
+            sql,
+            decision.route,
+            &decision.command,
+            100,
+        )
+        .unwrap_err();
+        assert!(err.contains("manage_catalog"));
     }
 
     #[test]

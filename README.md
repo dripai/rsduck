@@ -235,6 +235,12 @@ prefix = "rsduck"
 interval_secs = 900
 retain_hours = 2
 
+[partition]
+maintenance_enabled = true
+maintenance_interval_secs = 60
+verify_interval_secs = 300
+max_jobs_per_tick = 100
+
 [pg]
 bind = "127.0.0.1:15432"
 
@@ -263,6 +269,10 @@ Parameter reference, in `rsduck.toml` order:
 - 【snapshot.prefix】Snapshot directory prefix. Final snapshot names use `prefix_yyyyMMdd_HHmmss`, for example `rsduck_20260703_120000`.
 - 【snapshot.interval_secs】Automatic snapshot interval in seconds. The scheduler saves one snapshot at this cadence while the service is running.
 - 【snapshot.retain_hours】Retention window for old finalized snapshots. Expired snapshot directories are removed after scheduled snapshot cleanup.
+- 【partition.maintenance_enabled】Whether the partition scheduler periodically submits maintenance work to the write queue. Writes still create required partitions synchronously.
+- 【partition.maintenance_interval_secs】Interval for retention cleanup and partition entrypoint refresh.
+- 【partition.verify_interval_secs】Reserved interval for partition verification scans.
+- 【partition.max_jobs_per_tick】Reserved limit for maintenance jobs submitted by one scheduler tick.
 - 【pg.bind】Listen address for the PostgreSQL wire endpoint. Keep `127.0.0.1` for local-only access; use an explicit LAN address only when external clients should connect.
 - 【web.enabled】Whether to start the Web SQL console.
 - 【web.bind】Listen address for the Web console and HTTP SQL API.

@@ -62,6 +62,26 @@ async fn main() {
     db::init_db(snapshot_dir.as_deref(), &cfg.db);
     info!("In-memory DuckDB initialized");
 
+    let partition_task = if cfg.partition.maintenance_enabled {
+        let interval = cfg.partition.maintenance_interval_secs.max(1);
+        let _verify_interval = cfg.partition.verify_interval_secs.max(1);
+        let _max_jobs_per_tick = cfg.partition.max_jobs_per_tick.max(1);
+        Some(tokio::spawn(async move {
+            let mut ticker = time::interval(Duration::from_secs(interval));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let t0 = Instant::now();
+                match db::run_partition_maintenance().await {
+                    Ok(_) => info!("Partition maintenance completed ({:.2?})", t0.elapsed()),
+                    Err(e) => error!("Partition maintenance failed ({:.2?}): {}", t0.elapsed(), e),
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let pg_bind = cfg.pg.bind.clone();
     let pg_task = tokio::spawn(async move {
         pg_server::start_pg_server(&pg_bind).await;
@@ -106,6 +126,9 @@ async fn main() {
     }
 
     snapshot_task.abort();
+    if let Some(task) = partition_task {
+        task.abort();
+    }
     pg_task.abort();
     db::shutdown_workers();
 }

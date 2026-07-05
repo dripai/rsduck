@@ -9,6 +9,8 @@ pub struct RsduckConfig {
     #[serde(default)]
     pub snapshot: SnapshotConfig,
     #[serde(default)]
+    pub partition: PartitionConfig,
+    #[serde(default)]
     pub pg: PgConfig,
     #[serde(default)]
     pub web: WebConfig,
@@ -42,6 +44,18 @@ pub struct SnapshotConfig {
     pub interval_secs: u64,
     #[serde(default = "default_retain_hours")]
     pub retain_hours: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PartitionConfig {
+    #[serde(default = "default_true")]
+    pub maintenance_enabled: bool,
+    #[serde(default = "default_partition_maintenance_interval_secs")]
+    pub maintenance_interval_secs: u64,
+    #[serde(default = "default_partition_verify_interval_secs")]
+    pub verify_interval_secs: u64,
+    #[serde(default = "default_partition_max_jobs_per_tick")]
+    pub max_jobs_per_tick: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +116,18 @@ fn default_retain_hours() -> u64 {
     2
 }
 
+fn default_partition_maintenance_interval_secs() -> u64 {
+    60
+}
+
+fn default_partition_verify_interval_secs() -> u64 {
+    300
+}
+
+fn default_partition_max_jobs_per_tick() -> usize {
+    100
+}
+
 fn default_pg_bind() -> String {
     "127.0.0.1:15432".into()
 }
@@ -135,6 +161,17 @@ impl Default for DbConfig {
     }
 }
 
+impl Default for PartitionConfig {
+    fn default() -> Self {
+        Self {
+            maintenance_enabled: default_true(),
+            maintenance_interval_secs: default_partition_maintenance_interval_secs(),
+            verify_interval_secs: default_partition_verify_interval_secs(),
+            max_jobs_per_tick: default_partition_max_jobs_per_tick(),
+        }
+    }
+}
+
 impl Default for PgConfig {
     fn default() -> Self {
         Self {
@@ -157,6 +194,7 @@ impl Default for RsduckConfig {
         Self {
             db: DbConfig::default(),
             snapshot: SnapshotConfig::default(),
+            partition: PartitionConfig::default(),
             pg: PgConfig::default(),
             web: WebConfig::default(),
         }
