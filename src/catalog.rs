@@ -11,7 +11,7 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
-use tracing::warn;
+use tracing::{info, warn};
 
 const CATALOG_VERSION: i64 = 1;
 
@@ -34,6 +34,7 @@ const PG_CONSTRAINT_CLASSOID: i64 = 2606;
 const PG_NAMESPACE_CLASSOID: i64 = 2615;
 const FNV64_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV64_PRIME: u64 = 0x00000100000001b3;
+const AUTH_FAILED: &str = "invalid username or password";
 
 #[derive(Debug, Clone)]
 struct CatalogColumn {
@@ -859,17 +860,26 @@ fn count_duckdb_relation(
 }
 
 fn mark_relation_unavailable(conn: &Connection, rel_oid: i64, reason: &str) -> Result<(), String> {
+    let error_message = relation_unavailable_message(rel_oid, reason);
     conn.execute(
         &format!(
             "UPDATE rsduck_catalog.pg_class \
              SET status = 'unavailable', error_message = '{}' \
              WHERE oid = {rel_oid}",
-            sql_string(reason)
+            sql_string(&error_message)
         ),
         [],
     )
     .map_err(|e| format!("mark relation unavailable failed: {e}"))?;
     Ok(())
+}
+
+fn relation_unavailable_message(rel_oid: i64, reason: &str) -> String {
+    if reason.contains("RS-CATALOG-") {
+        reason.to_string()
+    } else {
+        format!("RS-CATALOG-{rel_oid}: {reason}")
+    }
 }
 
 pub fn execute_init_sql(conn: &Connection, sql: &str) -> Result<(), String> {
@@ -918,6 +928,21 @@ pub fn guard_external_sql(sql: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn guard_external_sql_as(username: &str, sql: &str) -> Result<(), String> {
+    match guard_external_sql(sql) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            warn!(
+                target: "rsduck_audit",
+                event = "reserved_schema_rejected",
+                username = username,
+                error = err.as_str()
+            );
+            Err(err)
+        }
+    }
 }
 
 fn is_catalog_projection_read(normalized_sql: &str) -> bool {
@@ -1045,10 +1070,11 @@ pub fn authorize_sql(conn: &Connection, username: &str, sql: &str) -> Result<(),
         }
         Statement::Set(_) | Statement::Use(_) | Statement::Pragma { .. } => Ok(()),
         _ if principal.is_admin() => Ok(()),
-        _ => Err(format!(
-            "permission denied for statement type: {}",
-            statement_command(&statement)
-        )),
+        _ => {
+            let command = statement_command(&statement);
+            audit_permission_denied(&principal.username, "statement", &command, "execute");
+            Err(format!("permission denied for statement type: {command}"))
+        }
     }
 }
 
@@ -1162,7 +1188,13 @@ pub fn authenticate_user(conn: &Connection, username: &str, password: &str) -> R
         .next()
         .map_err(|e| format!("read user authentication failed: {e}"))?
     else {
-        return Err("invalid username or password".into());
+        warn!(
+            target: "rsduck_audit",
+            event = "login_failure",
+            username = username,
+            reason = "unknown_user"
+        );
+        return Err(AUTH_FAILED.into());
     };
 
     let user_id: i64 = row
@@ -1179,17 +1211,49 @@ pub fn authenticate_user(conn: &Connection, username: &str, password: &str) -> R
         .map_err(|e| format!("read user status failed: {e}"))?;
 
     if status != "active" {
-        return Err(format!("user is not active: {username}"));
+        warn!(
+            target: "rsduck_audit",
+            event = "login_failure",
+            username = username,
+            reason = status.as_str()
+        );
+        return Err(AUTH_FAILED.into());
     }
     if password_algo != "argon2id" {
-        return Err(format!(
-            "unsupported password algorithm for user {username}: {password_algo}"
-        ));
+        warn!(
+            target: "rsduck_audit",
+            event = "login_failure",
+            username = username,
+            reason = "unsupported_password_algorithm",
+            password_algo = password_algo.as_str()
+        );
+        return Err(AUTH_FAILED.into());
     }
     if !verify_password(password, &password_hash) {
-        return Err("invalid username or password".into());
+        warn!(
+            target: "rsduck_audit",
+            event = "login_failure",
+            username = username,
+            reason = "password_mismatch"
+        );
+        return Err(AUTH_FAILED.into());
     }
 
+    info!(
+        target: "rsduck_audit",
+        event = "login_success",
+        username = username,
+        user_id = user_id
+    );
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_user \
+             SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP \
+             WHERE user_id = {user_id}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("update last login timestamp failed: {e}"))?;
     Ok(user_id)
 }
 
@@ -1242,10 +1306,6 @@ impl SessionPrincipal {
     fn is_admin(&self) -> bool {
         self.roles.iter().any(|role| role == "admin")
     }
-
-    fn is_operator(&self) -> bool {
-        self.roles.iter().any(|role| role == "operator")
-    }
 }
 
 fn require_system_action(
@@ -1253,12 +1313,10 @@ fn require_system_action(
     principal: &SessionPrincipal,
     action: &str,
 ) -> Result<(), String> {
-    if principal.is_admin()
-        || (principal.is_operator() && matches!(action, "manage_snapshot" | "manage_catalog"))
-        || has_explicit_privilege(conn, principal, "system", 0, action)?
-    {
+    if principal.is_admin() || has_explicit_privilege(conn, principal, "system", 0, action)? {
         return Ok(());
     }
+    audit_permission_denied(&principal.username, "system", "0", action);
     Err(format!(
         "permission denied for user {}: system {action}",
         principal.username
@@ -1277,6 +1335,7 @@ fn require_schema_action(
     {
         return Ok(());
     }
+    audit_permission_denied(&principal.username, "schema", schema, action);
     Err(format!(
         "permission denied for user {}: schema {schema} {action}",
         principal.username
@@ -1299,10 +1358,27 @@ fn require_relation_action(
     {
         return Ok(());
     }
+    audit_permission_denied(
+        &principal.username,
+        "relation",
+        &format!("{schema}.{relname}"),
+        action,
+    );
     Err(format!(
         "permission denied for user {}: relation {}.{} {action}",
         principal.username, schema, relname
     ))
+}
+
+fn audit_permission_denied(username: &str, scope: &str, object: &str, action: &str) {
+    warn!(
+        target: "rsduck_audit",
+        event = "permission_denied",
+        username = username,
+        scope = scope,
+        object = object,
+        action = action
+    );
 }
 
 fn has_relation_action(
@@ -3622,6 +3698,12 @@ fn ensure_active_partition(
     if partition_value == "_null" {
         return Err("managed partitioned table is missing active null partition".into());
     }
+    if let Some(status) = partition_status_by_value(conn, relation.oid, partition_value)? {
+        return Err(format!(
+            "managed partition already exists with non-active status: {} partition_value={} status={}; explicit repair or retry is required",
+            relation.name, partition_value, status
+        ));
+    }
     create_range_partition(conn, relation, partition_value)
 }
 
@@ -3665,6 +3747,36 @@ fn active_partition_by_value(
             .get(3)
             .map_err(|e| format!("read partition child status failed: {e}"))?,
     }))
+}
+
+fn partition_status_by_value(
+    conn: &Connection,
+    parent_oid: i64,
+    partition_value: &str,
+) -> Result<Option<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT status \
+             FROM rsduck_catalog.rs_partition \
+             WHERE parent_relid = {parent_oid} \
+               AND partition_value = '{}' \
+             ORDER BY child_relid DESC \
+             LIMIT 1",
+            sql_string(partition_value)
+        ))
+        .map_err(|e| format!("prepare partition status lookup failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("query partition status lookup failed: {e}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read partition status lookup failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    row.get(0)
+        .map(Some)
+        .map_err(|e| format!("read partition status failed: {e}"))
 }
 
 fn create_range_partition(
@@ -4467,7 +4579,7 @@ fn pg_type_oid_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> {
     let lower = duckdb_type.to_ascii_lowercase();
     if lower == "boolean" || lower == "bool" {
         Ok(16)
-    } else if lower == "smallint" || lower == "int2" || lower == "utinyint" || lower == "tinyint" {
+    } else if lower == "smallint" || lower == "int2" {
         Ok(21)
     } else if lower == "integer" || lower == "int" || lower == "int4" {
         Ok(23)
@@ -4674,7 +4786,8 @@ fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             activated_at TIMESTAMP,
             dropped_at TIMESTAMP,
             error_message VARCHAR NOT NULL,
-            PRIMARY KEY(parent_relid, child_relid)
+            PRIMARY KEY(parent_relid, child_relid),
+            UNIQUE(parent_relid, partition_value)
         );
 
         CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_user (
@@ -4782,17 +4895,23 @@ fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
         ))
         .map_err(|e| format!("write bootstrap catalog rows failed: {e}"))?;
 
-        for action in ["manage_snapshot", "manage_catalog", "manage_user"] {
+        for (role_id, action) in [
+            (ROLE_ADMIN_ID, "manage_snapshot"),
+            (ROLE_ADMIN_ID, "manage_catalog"),
+            (ROLE_ADMIN_ID, "manage_user"),
+            (ROLE_OPERATOR_ID, "manage_snapshot"),
+            (ROLE_OPERATOR_ID, "manage_catalog"),
+        ] {
             let privilege_id = allocate_oid(conn)?;
             conn.execute(
                 &format!(
                     "INSERT INTO rsduck_catalog.rs_privilege(privilege_id, principal_type, principal_id, object_type, object_id, action, granted_by, created_at) \
-                     VALUES ({privilege_id}, 'role', {ROLE_ADMIN_ID}, 'system', 0, '{}', {ADMIN_USER_ID}, CURRENT_TIMESTAMP)",
+                     VALUES ({privilege_id}, 'role', {role_id}, 'system', 0, '{}', {ADMIN_USER_ID}, CURRENT_TIMESTAMP)",
                     sql_string(action)
                 ),
                 [],
             )
-            .map_err(|e| format!("write admin privilege failed: {e}"))?;
+            .map_err(|e| format!("write builtin system privilege failed: {e}"))?;
         }
 
         refresh_catalog_checksum(conn)?;
@@ -4842,6 +4961,17 @@ fn insert_journal(
 }
 
 fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
+    let (mutation_type, target_oid): (String, i64) = conn
+        .query_row(
+            &format!(
+                "SELECT mutation_type, target_oid \
+                 FROM rsduck_catalog.rs_catalog_journal \
+                 WHERE journal_id = {journal_id}"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("read catalog journal audit fields failed: {e}"))?;
     conn.execute(
         &format!(
             "UPDATE rsduck_catalog.rs_catalog_journal SET status = 'applied', applied_at = CURRENT_TIMESTAMP WHERE journal_id = {journal_id}"
@@ -4857,6 +4987,13 @@ fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
     )
     .map_err(|e| format!("increment catalog epoch failed: {e}"))?;
     refresh_catalog_checksum(conn)?;
+    info!(
+        target: "rsduck_audit",
+        event = "catalog_mutation_applied",
+        journal_id = journal_id,
+        mutation_type = mutation_type.as_str(),
+        target_oid = target_oid
+    );
     Ok(())
 }
 
@@ -6218,6 +6355,22 @@ mod tests {
             .unwrap();
         assert_eq!(role_count, 5);
 
+        let operator_system_privilege_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.rs_privilege p \
+                 JOIN rsduck_catalog.rs_role r ON r.role_id = p.principal_id \
+                 WHERE p.principal_type = 'role' \
+                   AND p.object_type = 'system' \
+                   AND p.object_id = 0 \
+                   AND r.role_name = 'operator' \
+                   AND p.action IN ('manage_snapshot', 'manage_catalog')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(operator_system_privilege_count, 2);
+
         let checksum: String = conn
             .query_row(
                 "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
@@ -6236,8 +6389,53 @@ mod tests {
         let user_id = super::authenticate_user(&conn, "admin", "admin").unwrap();
         assert_eq!(user_id, 10);
 
+        let login_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_user WHERE username = 'admin' AND last_login_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(login_count, 1);
+
         let err = super::authenticate_user(&conn, "admin", "wrong").unwrap_err();
         assert!(err.contains("invalid username or password"));
+    }
+
+    #[test]
+    fn authentication_failures_use_uniform_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        let missing = super::authenticate_user(&conn, "missing_user", "pw").unwrap_err();
+        assert_eq!(missing, "invalid username or password");
+
+        execute_catalog_aware_write(&conn, "CREATE USER disabled_user PASSWORD='pw'").unwrap();
+        conn.execute(
+            "UPDATE rsduck_catalog.rs_user SET status = 'disabled' WHERE username = 'disabled_user'",
+            [],
+        )
+        .unwrap();
+        let disabled = super::authenticate_user(&conn, "disabled_user", "pw").unwrap_err();
+        assert_eq!(disabled, "invalid username or password");
+
+        execute_catalog_aware_write(&conn, "CREATE USER locked_user PASSWORD='pw'").unwrap();
+        conn.execute(
+            "UPDATE rsduck_catalog.rs_user SET status = 'locked' WHERE username = 'locked_user'",
+            [],
+        )
+        .unwrap();
+        let locked = super::authenticate_user(&conn, "locked_user", "pw").unwrap_err();
+        assert_eq!(locked, "invalid username or password");
+
+        execute_catalog_aware_write(&conn, "CREATE USER legacy_user PASSWORD='pw'").unwrap();
+        conn.execute(
+            "UPDATE rsduck_catalog.rs_user SET password_algo = 'legacy' WHERE username = 'legacy_user'",
+            [],
+        )
+        .unwrap();
+        let legacy = super::authenticate_user(&conn, "legacy_user", "pw").unwrap_err();
+        assert_eq!(legacy, "invalid username or password");
     }
 
     #[test]
@@ -6279,6 +6477,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         insert_test_user(&conn, 106, "plain_db").unwrap();
         insert_test_user(&conn, 107, "catalog_db").unwrap();
+        insert_test_user(&conn, 108, "operator_db").unwrap();
 
         let (_, plain_create) = evaluate_privilege_function(
             &conn,
@@ -6304,6 +6503,20 @@ mod tests {
         )
         .unwrap();
         assert!(catalog_create);
+
+        conn.execute(
+            "INSERT INTO rsduck_catalog.rs_user_role(user_id, role_id, granted_by, created_at) \
+             VALUES (108, 21, 10, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        let (_, operator_create) = evaluate_privilege_function(
+            &conn,
+            "operator_db",
+            "SELECT has_database_privilege('operator_db', 'postgres', 'CREATE')",
+        )
+        .unwrap();
+        assert!(operator_create);
 
         let (_, unknown_db) = evaluate_privilege_function(
             &conn,
@@ -6517,6 +6730,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pkey_count, 1);
+    }
+
+    #[test]
+    fn create_table_rejects_unsupported_duckdb_type_without_leftovers() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+
+        let err = execute_catalog_aware_write(&conn, "CREATE TABLE bad_metric(flag TINYINT)")
+            .unwrap_err();
+        assert!(err.contains("unsupported DuckDB type"));
+        assert!(err.contains("TINYINT"));
+
+        let catalog_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'bad_metric'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(catalog_count, 0);
+
+        let physical_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'bad_metric'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(physical_count, 0);
     }
 
     #[test]
@@ -7068,6 +7310,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pg_class_old_count, 0);
+
+        let recreate_err = execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content) VALUES
+             (5, TIMESTAMP '2026-07-01 11:00:00', 'old-again')",
+        )
+        .unwrap_err();
+        assert!(recreate_err.contains("non-active status"));
+        assert!(recreate_err.contains("explicit repair or retry"));
     }
 
     #[test]
@@ -7374,6 +7625,7 @@ mod tests {
 
         let err = authorize_sql(&conn, "admin", "SELECT * FROM quotes").unwrap_err();
         assert!(err.contains("relation is unavailable"));
+        assert!(err.contains("RS-CATALOG-"));
         assert!(err.contains("missing DuckDB physical table"));
 
         let projection_sql =
@@ -7390,7 +7642,37 @@ mod tests {
             .unwrap();
         assert_eq!(relname, "quotes");
         assert_eq!(projected_status, "unavailable");
+        assert!(projected_error.contains("RS-CATALOG-"));
         assert!(projected_error.contains("missing DuckDB physical table"));
+    }
+
+    #[test]
+    fn startup_validation_marks_column_order_mismatch_unavailable() {
+        let conn = Connection::open_in_memory().unwrap();
+        bootstrap_fresh(&conn).unwrap();
+        execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)")
+            .unwrap();
+        conn.execute("DROP TABLE quotes", []).unwrap();
+        conn.execute("CREATE TABLE quotes(close DOUBLE, code VARCHAR)", [])
+            .unwrap();
+
+        validate_after_start(&conn).unwrap();
+
+        let (status, error_message): (String, String) = conn
+            .query_row(
+                "SELECT status, error_message FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "unavailable");
+        assert!(error_message.contains("RS-CATALOG-"));
+        assert!(error_message.contains("column mismatch"));
+
+        let err = authorize_sql(&conn, "admin", "SELECT * FROM quotes").unwrap_err();
+        assert!(err.contains("main.quotes"));
+        assert!(err.contains("RS-CATALOG-"));
+        assert!(err.contains("column mismatch"));
     }
 
     #[test]
@@ -7455,6 +7737,13 @@ mod tests {
             execute_catalog_aware_write(&conn, "CREATE TABLE rsduck_catalog.bad_table(id INTEGER)")
                 .unwrap_err();
         assert!(err.contains("reserved schema"));
+
+        let err = super::guard_external_sql_as("admin", "SELECT * FROM rsduck_internal.bad_table")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "reserved schema is managed by rsduck catalog: rsduck_internal"
+        );
     }
 
     fn insert_test_user(conn: &Connection, user_id: i64, username: &str) -> Result<(), String> {

@@ -231,18 +231,17 @@ impl DbEngine {
     }
 
     async fn authenticate(&self, username: String, password: String) -> Result<(), String> {
-        let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
         let (resp_tx, resp_rx) = oneshot::channel();
-        match self.read_txs[idx].try_send(SqlCommand::Authenticate {
+        match self.write_tx.try_send(SqlCommand::Authenticate {
             username,
             password,
             resp: resp_tx,
         }) {
             Ok(()) => resp_rx
                 .await
-                .unwrap_or_else(|_| Err("read worker stopped".into())),
-            Err(TrySendError::Full(_)) => Err("read queue is full".into()),
-            Err(TrySendError::Disconnected(_)) => Err("read worker stopped".into()),
+                .unwrap_or_else(|_| Err("write worker stopped".into())),
+            Err(TrySendError::Full(_)) => Err("write queue is full".into()),
+            Err(TrySendError::Disconnected(_)) => Err("write worker stopped".into()),
         }
     }
 
@@ -410,6 +409,20 @@ where
                             save_snapshot_blocking(&conn, &dir, &prefix)
                         }))
                         .unwrap_or_else(|e| Err(format!("snapshot worker panicked: {e:?}")));
+                        match &result {
+                            Ok(path) => info!(
+                                target: "rsduck_audit",
+                                event = "snapshot_save",
+                                username = username.as_deref().unwrap_or("system"),
+                                path = path.as_str()
+                            ),
+                            Err(error) => error!(
+                                target: "rsduck_audit",
+                                event = "snapshot_save_failed",
+                                username = username.as_deref().unwrap_or("system"),
+                                error = error.as_str()
+                            ),
+                        }
                         let _ = resp.send(result);
                     }
                     SnapshotCommand::Shutdown => break,
@@ -433,6 +446,11 @@ fn restore_or_initialize(
         info!("Snapshot restored in {:.2?}", t0.elapsed());
         validate_snapshot_manifest(conn, Path::new(path))?;
         crate::catalog::validate_after_start(conn)?;
+        info!(
+            target: "rsduck_audit",
+            event = "snapshot_restore",
+            path = path
+        );
         return Ok(());
     }
 
@@ -479,7 +497,7 @@ fn execute_sql_blocking(
         crate::catalog::authorize_catalog_projection(conn, username)?;
         return query_sql_blocking(conn, &rewritten_sql, max_result_rows);
     }
-    crate::catalog::guard_external_sql(sql_trimmed)?;
+    crate::catalog::guard_external_sql_as(username, sql_trimmed)?;
     crate::catalog::reject_unhandled_catalog_projection(sql_trimmed)?;
     crate::catalog::authorize_sql(conn, username, sql_trimmed)?;
 
