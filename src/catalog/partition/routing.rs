@@ -15,28 +15,22 @@ fn partition_insert_groups(
                     row.content.len()
                 ));
             }
-            let route = if let Some(idx) = partition_key_idx {
-                partition_route_for_expr(
-                    &row.content[idx],
-                    &relation.partition_key_type,
-                    &relation.partition_unit,
+            let idx = partition_key_idx.ok_or_else(|| {
+                format!(
+                    "INSERT into managed partitioned table requires partition key column: {}",
+                    relation.partition_key
                 )
-            } else {
-                PartitionRoute {
-                    partition_value: "_null".to_string(),
-                    route_ts: None,
-                }
-            };
-            let mut exprs = row
+            })?;
+            let route = partition_route_for_expr(
+                &row.content[idx],
+                &relation.partition_key_type,
+                &relation.partition_unit,
+            )?;
+            let exprs = row
                 .content
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            if route.partition_value == "_null" {
-                if let Some(idx) = partition_key_idx {
-                    exprs[idx] = "NULL".to_string();
-                }
-            }
             push_partition_insert_group(&mut groups, route, exprs);
         }
         return Ok(groups);
@@ -81,32 +75,26 @@ fn materialize_query_partition_insert_groups(
         .next()
         .map_err(|e| format!("read partition INSERT source failed: {e}"))?
     {
-        let route = if let Some(idx) = partition_key_idx {
-            let value = row
-                .get_ref(idx)
-                .map_err(|e| format!("read partition key source value failed: {e}"))?;
-            partition_route_for_value_ref(
-                value,
-                &relation.partition_key_type,
-                &relation.partition_unit,
+        let idx = partition_key_idx.ok_or_else(|| {
+            format!(
+                "INSERT into managed partitioned table requires partition key column: {}",
+                relation.partition_key
             )
-        } else {
-            PartitionRoute {
-                partition_value: "_null".to_string(),
-                route_ts: None,
-            }
-        };
+        })?;
+        let value = row
+            .get_ref(idx)
+            .map_err(|e| format!("read partition key source value failed: {e}"))?;
+        let route = partition_route_for_value_ref(
+            value,
+            &relation.partition_key_type,
+            &relation.partition_unit,
+        )?;
         let mut exprs = Vec::with_capacity(col_count);
         for idx in 0..col_count {
             let value = row
                 .get_ref(idx)
                 .map_err(|e| format!("read partition INSERT source value failed: {e}"))?;
             exprs.push(value_ref_to_sql_literal(value)?);
-        }
-        if route.partition_value == "_null" {
-            if let Some(idx) = partition_key_idx {
-                exprs[idx] = "NULL".to_string();
-            }
         }
         push_partition_insert_group(&mut groups, route, exprs);
     }
@@ -135,17 +123,14 @@ fn partition_route_for_value_ref(
     value: ValueRef<'_>,
     partition_key_type: &str,
     partition_unit: &str,
-) -> PartitionRoute {
+) -> Result<PartitionRoute, String> {
     let route_ts = partition_datetime_from_value_ref(value, partition_key_type);
     match route_ts {
-        Some(dt) => PartitionRoute {
+        Some(dt) => Ok(PartitionRoute {
             partition_value: partition_value_for_datetime(dt, partition_unit),
             route_ts: Some(dt),
-        },
-        None => PartitionRoute {
-            partition_value: "_null".to_string(),
-            route_ts: None,
-        },
+        }),
+        None => Err("partition key value is NULL or cannot be routed".into()),
     }
 }
 
@@ -327,17 +312,14 @@ fn partition_route_for_expr(
     expr: &Expr,
     partition_key_type: &str,
     partition_unit: &str,
-) -> PartitionRoute {
+) -> Result<PartitionRoute, String> {
     let Some(dt) = partition_datetime_from_expr(expr, partition_key_type) else {
-        return PartitionRoute {
-            partition_value: "_null".to_string(),
-            route_ts: None,
-        };
+        return Err("partition key value is NULL or cannot be routed".into());
     };
-    PartitionRoute {
+    Ok(PartitionRoute {
         partition_value: partition_value_for_datetime(dt, partition_unit),
         route_ts: Some(dt),
-    }
+    })
 }
 
 fn partition_datetime_from_expr(expr: &Expr, partition_key_type: &str) -> Option<NaiveDateTime> {
@@ -403,7 +385,7 @@ fn partition_value_for_datetime(dt: NaiveDateTime, partition_unit: &str) -> Stri
         "day" => format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
         "month" => format!("{:04}{:02}", dt.year(), dt.month()),
         "year" => format!("{:04}", dt.year()),
-        _ => "_null".to_string(),
+        _ => unreachable!("partition_unit is validated before routing"),
     }
 }
 
@@ -415,9 +397,6 @@ fn ensure_active_partition(
 ) -> Result<String, String> {
     if let Some(child) = active_partition_by_value(conn, relation.oid, partition_value)? {
         return Ok(child.relname);
-    }
-    if partition_value == "_null" {
-        return Err("managed partitioned table is missing active null partition".into());
     }
     if let Some(status) = partition_status_by_value(conn, relation.oid, partition_value)? {
         return Err(format!(
@@ -435,7 +414,7 @@ fn active_partition_by_value(
 ) -> Result<Option<ActivePartitionChild>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT p.child_relid, n.nspname, c.relname, p.is_null_partition, c.status \
+            "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
              JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
              JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -464,11 +443,8 @@ fn active_partition_by_value(
         relname: row
             .get(2)
             .map_err(|e| format!("read partition relation failed: {e}"))?,
-        is_null_partition: row
-            .get(3)
-            .map_err(|e| format!("read partition null flag failed: {e}"))?,
         child_status: row
-            .get(4)
+            .get(3)
             .map_err(|e| format!("read partition child status failed: {e}"))?,
     }))
 }
@@ -480,7 +456,7 @@ fn partition_child_by_value(
 ) -> Result<Option<ActivePartitionChild>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT p.child_relid, n.nspname, c.relname, p.is_null_partition, c.status \
+            "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
              JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
              JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -508,11 +484,8 @@ fn partition_child_by_value(
         relname: row
             .get(2)
             .map_err(|e| format!("read partition child relation failed: {e}"))?,
-        is_null_partition: row
-            .get(3)
-            .map_err(|e| format!("read partition child null flag failed: {e}"))?,
         child_status: row
-            .get(4)
+            .get(3)
             .map_err(|e| format!("read partition child status failed: {e}"))?,
     }))
 }
@@ -546,4 +519,3 @@ fn partition_status_by_value(
         .map(Some)
         .map_err(|e| format!("read partition status failed: {e}"))
 }
-

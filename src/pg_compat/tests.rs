@@ -144,11 +144,17 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log (
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content VARCHAR
             )
             PARTITION BY RANGE (access_time)
             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time, content)
+             VALUES (1, TIMESTAMP '2026-07-01 10:00:00', 'ok')",
         )
         .unwrap();
 
@@ -161,7 +167,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(partitions, vec!["_null".to_string()]);
+        assert_eq!(partitions, vec!["20260701".to_string()]);
 
         let schema_sql = rewrite_sql("SHOW PARTITIONS main.ods_access_log")
             .expect("schema qualified show partitions");
@@ -172,7 +178,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(schema_partitions, vec!["_null".to_string()]);
+        assert_eq!(schema_partitions, vec!["20260701".to_string()]);
     }
 
     #[test]
@@ -380,7 +386,7 @@ mod tests {
         crate::catalog::bootstrap_fresh(&conn).unwrap();
         crate::catalog::execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -411,9 +417,15 @@ mod tests {
         .unwrap();
         crate::catalog::execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time)
+             VALUES (1, TIMESTAMP '2026-07-01 10:00:00')",
         )
         .unwrap();
 
@@ -488,7 +500,7 @@ mod tests {
             "CREATE TABLE ods_access_log(
                 id BIGINT,
                 user_id VARCHAR,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -935,7 +947,7 @@ mod tests {
         crate::catalog::bootstrap_fresh(&conn).unwrap();
         crate::catalog::execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -969,7 +981,7 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log(
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 source TEXT DEFAULT 'web'
              )
              PARTITION BY RANGE (access_time)

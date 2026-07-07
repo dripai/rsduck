@@ -83,7 +83,6 @@ fn parse_catalog_management_call(sql: &str) -> Option<CatalogManagementCall> {
         name.as_str(),
         "rsduck_run_partition_maintenance"
             | "rsduck_mark_partition_unavailable"
-            | "rsduck_cleanup_null_partition"
             | "rsduck_repair_partition"
     ) {
         return None;
@@ -118,14 +117,6 @@ fn execute_catalog_management_call(
             let (schema, table) = relation_from_token(&call.args[0])
                 .ok_or_else(|| format!("invalid relation name: {}", call.args[0]))?;
             mark_partition_unavailable(conn, &schema, &table, &call.args[1], &call.args[2], sql)
-        }
-        "rsduck_cleanup_null_partition" => {
-            if call.args.len() != 2 {
-                return Err("rsduck_cleanup_null_partition requires relation and mode".into());
-            }
-            let (schema, table) = relation_from_token(&call.args[0])
-                .ok_or_else(|| format!("invalid relation name: {}", call.args[0]))?;
-            cleanup_null_partition(conn, &schema, &table, &call.args[1], sql)
         }
         "rsduck_repair_partition" => {
             if call.args.len() != 2 {
@@ -413,4 +404,3 @@ fn quoted_literals(sql: &str) -> Vec<String> {
     }
     literals
 }
-

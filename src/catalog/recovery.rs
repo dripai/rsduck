@@ -323,9 +323,6 @@ fn validate_partitioned_relation(
     relname: &str,
 ) -> Result<(), String> {
     let partitions = active_partition_children(conn, parent_oid)?;
-    if partitions.is_empty() {
-        return Err("managed partitioned table has no active partitions".into());
-    }
 
     let mut active_physical = Vec::with_capacity(partitions.len());
     for partition in &partitions {
@@ -353,7 +350,11 @@ fn validate_partitioned_relation(
         active_physical.push((partition.schema.as_str(), partition.relname.as_str()));
     }
 
-    let expected_sql = partition_entrypoint_sql(schema, relname, &active_physical);
+    let expected_sql = if partitions.is_empty() {
+        partition_entrypoint_sql_from_catalog(conn, parent_oid, schema, relname, &partitions)?
+    } else {
+        partition_entrypoint_sql(schema, relname, &active_physical)
+    };
     let generated_sql: String = conn
         .query_row(
             &format!(
@@ -379,7 +380,6 @@ struct ActivePartitionChild {
     child_oid: i64,
     schema: String,
     relname: String,
-    is_null_partition: bool,
     child_status: String,
 }
 
@@ -389,7 +389,7 @@ fn active_partition_children(
 ) -> Result<Vec<ActivePartitionChild>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT p.child_relid, n.nspname, c.relname, p.is_null_partition, c.status \
+            "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
              JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
              JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -415,11 +415,8 @@ fn active_partition_children(
             relname: row
                 .get(2)
                 .map_err(|e| format!("read active partition relation failed: {e}"))?,
-            is_null_partition: row
-                .get(3)
-                .map_err(|e| format!("read active partition null flag failed: {e}"))?,
             child_status: row
-                .get(4)
+                .get(3)
                 .map_err(|e| format!("read active partition child status failed: {e}"))?,
         });
     }
@@ -606,4 +603,3 @@ fn relation_unavailable_message(rel_oid: i64, reason: &str) -> String {
         format!("RS-CATALOG-{rel_oid}: {reason}")
     }
 }
-

@@ -185,7 +185,7 @@ src/
 | `catalog::sql_util` | SQL 字符串转义、标识符引用、简单 SQL token 解析、通用 parser helper。 |
 | `catalog::auth` | 密码 hash、认证、session principal、授权动作、权限函数计算。 |
 | `catalog::mutation` | catalog mutation 统一执行入口，以及 schema/table/view/index/alter/drop/comment/user/role/grant/revoke 等受控变更。 |
-| `catalog::partition` | range partitioned table 创建、写入路由、null partition、entrypoint、retention、repair 和维护任务。 |
+| `catalog::partition` | range partitioned table 创建、写入路由、entrypoint、retention、repair 和维护任务。 |
 | `pg_compat` | `pg_catalog` / `information_schema` projection、兼容函数、`SHOW PARTITIONS`、settings、SQL rewrite。 |
 | `db` | DuckDB in-memory engine、read/write worker、SQL 执行、snapshot、restore。 |
 | `server` | PG wire 和 Web HTTP 入口。 |
@@ -657,11 +657,11 @@ rsduck_internal.ods_access_log_null
 |------|------|------|
 | `parent_relid` | BIGINT | 分区表 relation OID。 |
 | `child_relid` | BIGINT | physical table relation OID。 |
-| `partition_value` | VARCHAR | 分区值。`hour=yyyyMMddHH`，`day=yyyyMMdd`，`month=yyyyMM`，`year=yyyy`，脏数据分区固定为 `_null`。 |
-| `partition_unit` | VARCHAR | `hour` / `day` / `month` / `year` / `null`。 |
-| `lower_bound` | TIMESTAMP | 分区左边界，脏数据分区为空。 |
-| `upper_bound` | TIMESTAMP | 分区右边界，脏数据分区为空。 |
-| `is_null_partition` | BOOLEAN | 是否为脏数据分区。 |
+| `partition_value` | VARCHAR | 分区值。`hour=yyyyMMddHH`，`day=yyyyMMdd`，`month=yyyyMM`，`year=yyyy`。 |
+| `partition_unit` | VARCHAR | `hour` / `day` / `month` / `year`。 |
+| `lower_bound` | TIMESTAMP | 分区左边界。 |
+| `upper_bound` | TIMESTAMP | 分区右边界。 |
+| `is_null_partition` | BOOLEAN | 保留字段，当前版本固定为 `false`，不创建 null partition。 |
 | `status` | VARCHAR | `creating` / `active` / `expiring` / `dropped` / `failed`。 |
 | `row_count` | BIGINT | 记录行数。 |
 | `min_ts` | TIMESTAMP | 最小时间。 |
@@ -677,9 +677,9 @@ rsduck_internal.ods_access_log_null
 - 只有 `status = active` 的 partition 能进入分区表查询入口。
 - `dropped` partition 可以保留历史行，但不得出现在 `pg_class` active relation 投影中。
 - 创建或删除 partition 后必须重建分区表查询入口。
-- 每个 range partitioned relation 必须有一个 active null partition，用于接收分区键为空、无法解析或不可路由的脏数据。
-- null partition 必须能通过分区表查询到。
-- null partition 不参与 retention 自动清理，只能由 `admin` / `operator` 显式清理或重放修复。
+- range partitioned relation 不创建 null partition。
+- 分区键必须声明 `NOT NULL`，分区键为空、无法解析或不可路由时写入失败。
+- retention 只处理普通 active partitions，过期后必须重建分区表查询入口。
 
 ### 5.15 `rsduck_catalog.rs_user`
 
@@ -911,28 +911,20 @@ pg_class:
 rs_relation_ext:
   main.ods_access_log                       managed_kind = 'range_partitioned_table'
   rsduck_internal.ods_access_log_20260701   managed_kind = 'physical_partition'
-  rsduck_internal.ods_access_log_null       managed_kind = 'physical_partition'
 
 rs_partition:
   parent_relid = ods_access_log oid
   child_relid = ods_access_log_20260701 oid
   partition_value = '20260701'
   partition_unit = 'day'
-  status = 'active'
-
-rs_partition:
-  parent_relid = ods_access_log oid
-  child_relid = ods_access_log_null oid
-  partition_value = '_null'
-  partition_unit = 'null'
-  is_null_partition = true
+  is_null_partition = false
   status = 'active'
 
 pg_depend:
-  ods_access_log partitioned table -> active physical partition tables, including null partition
+  ods_access_log partitioned table -> active physical partition tables
 ```
 
-DuckDB 当前没有通用原生分区表。rsduck 对外把该对象定义为分区表；在 DuckDB 执行层使用 generated view 汇总 active physical partitions。普通分区按 `partition_value` 升序生成，null partition 固定排在最后。下面的 SQL 是内部生成结果，不是用户 DDL。
+DuckDB 当前没有通用原生分区表。rsduck 对外把该对象定义为分区表；在 DuckDB 执行层使用 generated view 汇总 active physical partitions。分区按 `partition_value` 升序生成。下面的 SQL 是内部生成结果，不是用户 DDL。
 
 有 active partitions：
 
@@ -940,16 +932,19 @@ DuckDB 当前没有通用原生分区表。rsduck 对外把该对象定义为分
 CREATE OR REPLACE VIEW main.ods_access_log AS
 SELECT * FROM rsduck_internal.ods_access_log_20260701
 UNION ALL
-SELECT * FROM rsduck_internal.ods_access_log_20260702
-UNION ALL
-SELECT * FROM rsduck_internal.ods_access_log_null;
+SELECT * FROM rsduck_internal.ods_access_log_20260702;
 ```
 
-无普通 active partitions 时，分区表查询入口仍必须存在，并查询 null partition：
+无 active partitions 时，分区表查询入口仍必须存在，使用 typed zero-row view 保持 schema 可见：
 
 ```sql
 CREATE OR REPLACE VIEW main.ods_access_log AS
-SELECT * FROM rsduck_internal.ods_access_log_null;
+SELECT
+  CAST(NULL AS BIGINT) AS id,
+  CAST(NULL AS VARCHAR) AS user_id,
+  CAST(NULL AS TIMESTAMP) AS access_time,
+  CAST(NULL AS TEXT) AS content
+WHERE FALSE;
 ```
 
 ### 7.4 Range 分区校验规则
@@ -968,7 +963,7 @@ WITH (
 
 - `PARTITION BY RANGE` 只支持单列，不支持表达式。
 - 分区列只允许 `DATE` 或 `TIMESTAMP`。
-- 分区列不得声明 `NOT NULL`。null partition 是 range 分区表的固定组成部分，允许分区键为空或不可路由的数据被隔离查询。
+- 分区列必须声明 `NOT NULL`，分区键为空、无法解析或不可路由时写入失败。
 - `partition_unit` 必填，只允许 `hour`、`day`、`month`、`year`。
 - `retention` 必填，必须是正整数文本。
 - `retention = N` 表示保留最近 N 个 `partition_unit`。
@@ -989,16 +984,13 @@ WITH (
 | `day` | `yyyyMMdd` | `20260705` |
 | `month` | `yyyyMM` | `202607` |
 | `year` | `yyyy` | `2026` |
-| `null` | `_null` | `null` |
 
-脏数据路由：
+不可路由数据处理：
 
-- 分区键为 `NULL` 的行写入 null partition。
-- 结构化写入 API 中，分区键原始值无法转换成 `DATE` 或 `TIMESTAMP` 时，写入 null partition，分区键列保存为 `NULL`。
-- 分区键无法按 `partition_unit` 计算边界的行写入 null partition。
-- null partition 只处理分区键问题，不吞掉其他 schema 错误；非分区字段违反类型、NOT NULL 或约束时，写入仍然失败。
-- null partition 是 active physical partition，必须出现在分区表查询入口中，因此用户可以从分区表查询到脏数据。
-- null partition 不参与 retention 自动清理，必须通过显式管理操作清理。
+- 分区键为 `NULL` 的行写入失败。
+- 结构化写入 API 中，分区键原始值无法转换成 `DATE` 或 `TIMESTAMP` 时写入失败。
+- 分区键无法按 `partition_unit` 计算边界时写入失败。
+- rsduck 不创建 null partition，不隔离保存脏分区键数据；调用方必须先清洗数据或修正 SQL。
 
 ## 8. 账号与权限模型
 
@@ -1267,7 +1259,6 @@ PG 兼容对象必须反映 rsduck session 用户，但不实现完整 PG ACL：
 | `RefreshPartitionEntrypoint` | `refresh_partition_entrypoint` |
 | `VerifyPartitionManifest` | startup / runtime consistency check |
 | `MarkPartitionUnavailable` | `mark_partition_unavailable` |
-| `CleanupNullPartition` | `cleanup_null_partition` |
 
 ### 9.1 `create_schema`
 
@@ -1338,7 +1329,7 @@ retention
 ```text
 1. 校验 PARTITION BY RANGE 只包含单个 column。
 2. 校验 partition_key 是 columns 中的 DATE 或 TIMESTAMP 字段。
-3. 校验 partition_key 未声明 NOT NULL。
+3. 校验 partition_key 必须声明 NOT NULL。
 4. 校验 partition_unit 和 partition_key 类型兼容。
 5. 校验 retention 是正整数。
 6. 分配 partitioned table relid 和 composite type oid。
@@ -1346,9 +1337,8 @@ retention
 8. 写 pg_class relkind = 'p'。
 9. 写 pg_attribute。
 10. 写 rs_relation_ext managed_kind = 'range_partitioned_table'。
-11. 创建 null partition。
-12. 创建 DuckDB generated view 作为分区表查询入口，包含 null partition。
-13. 写 journal applied。
+11. 创建 DuckDB generated view 作为空查询入口。
+12. 写 journal applied。
 ```
 
 ### 9.4 `create_range_partition`
@@ -1392,7 +1382,7 @@ parent_relid
 
 ```text
 1. 读取 parent columns。
-2. 读取 active 普通 partitions，按 partition_value 升序；null partition 固定排在最后。
+2. 读取 active partitions，按 partition_value 升序；如果没有 active partitions，使用 parent columns 生成 typed zero-row view。
 3. 生成 deterministic entrypoint SQL。
 4. 执行 DuckDB CREATE OR REPLACE VIEW。
 5. 删除 parent 分区表旧 pg_depend。
@@ -1431,7 +1421,7 @@ partition_value
 
 - 过期后，普通 catalog 投影不得再显示 dropped physical relation。
 - `rs_partition` 可以保留 dropped 历史，用于审计和排查。
-- null partition 禁止通过 retention 自动过期，也禁止通过 `expire_partition` 删除。
+- retention 只过期 retention 窗口外的 active partitions。
 
 ### 9.7 `drop_relation`
 
@@ -1557,36 +1547,18 @@ reason
 
 规则：
 
-- null partition 不应被自动标记为 unavailable；如果 null partition 不可用，parent 分区表应整体标记为 unavailable。
 - 该 mutation 只隔离异常对象，不删除 physical table。
 - 修复必须通过显式 repair 或重建 mutation 完成。
 
-### 9.12 `cleanup_null_partition`
+### 9.12 脏分区键处理
 
-输入：
-
-```text
-parent_relid
-mode
-```
-
-步骤：
-
-```text
-1. 校验调用者拥有 system manage_catalog 权限。
-2. 校验 parent relation 是 range_partitioned_table。
-3. 读取 null partition。
-4. 根据 mode 执行清理或重放。
-5. 更新 rs_partition row_count / checksum。
-6. 调用 refresh_partition_entrypoint。
-7. 写 journal applied。
-```
+当前版本不提供 `cleanup_null_partition`，也不创建 null partition。分区表创建时要求分区键 `NOT NULL`，写入时如果分区键为空、无法转换或不可路由，当前写入直接失败。
 
 规则：
 
-- `cleanup_null_partition` 只能由 admin/operator 手工触发。
-- retention 不得调用该 mutation。
-- 清理模式必须明确，不得默认删除脏数据。
+- 分区键问题由调用方在写入前清洗或修正。
+- rsduck 不保留脏分区键数据的内部隔离区。
+- retention 和 repair 只处理真实存在的 physical partitions。
 
 ## 10. 对外兼容查询矩阵
 
@@ -1773,7 +1745,6 @@ partition key：access_time
 partition unit：hour / day / month / year
 retention：最近 N 个 partition_unit
 查询入口：main.ods_access_log
-null partition：rsduck_internal.ods_access_log_null
 ```
 
 写入路径：
@@ -1781,7 +1752,7 @@ null partition：rsduck_internal.ods_access_log_null
 ```text
 append_batch(relation, rows)
   -> validate partition key
-  -> route invalid or null partition key rows to null partition
+  -> reject invalid or null partition key rows
   -> create_range_partition if missing
   -> append rows into physical partition
   -> update rs_partition row_count / min_ts / max_ts / checksum
@@ -1796,13 +1767,7 @@ WHERE access_time >= TIMESTAMP '2026-07-01 00:00:00'
 ORDER BY access_time;
 ```
 
-业务查询不得依赖 physical table 名称。脏数据可通过分区表查询，例如：
-
-```sql
-SELECT *
-FROM main.ods_access_log
-WHERE access_time IS NULL;
-```
+业务查询不得依赖 physical table 名称。分区键为 `NULL` 或无法路由的数据不会进入分区表，写入阶段会返回错误。
 
 ## 15. 验收测试
 
@@ -1821,17 +1786,15 @@ catalog 实现必须通过以下测试：
 
 ### 15.2 Managed range partitioned table
 
-- 创建 `ods_access_log` 后，必须自动创建 null partition。
-- 创建 `ods_access_log` 后，即使没有普通 partition，查询 view 也能返回 null partition 中的脏数据。
-- 创建两个 day partition 后，`rs_partition` 有两个 active 普通分区和一个 active null partition。
-- 创建两个 day partition 后，分区表查询入口 SQL 按 `partition_value` 升序 `UNION ALL`，并包含 null partition。
+- 创建 `ods_access_log` 后，不创建 physical partition；分区表查询入口是 typed zero-row view。
+- 创建两个 day partition 后，`rs_partition` 有两个 active 分区。
+- 创建两个 day partition 后，分区表查询入口 SQL 按 `partition_value` 升序 `UNION ALL`。
 - `DATE` 分区列使用 `partition_unit = 'hour'` 必须失败。
 - `TIMESTAMP` 分区列支持 `hour`、`day`、`month`、`year`。
-- 分区键为 `NULL` 或无法转换的行必须写入 null partition。
+- 分区键为 `NULL` 或无法转换的行必须写入失败。
 - `pg_depend` 记录分区表到 active physical tables 的依赖。
 - 过期一个 partition 后，分区表查询入口移除该 physical table。
 - 过期一个 partition 后，普通 `pg_catalog.pg_class` 不再显示 dropped physical relation。
-- retention 自动清理不得删除 null partition。
 - `rs_partition` 保留 dropped 历史和 `dropped_at`。
 
 ### 15.3 恢复

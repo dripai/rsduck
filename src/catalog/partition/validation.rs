@@ -14,12 +14,12 @@ fn validate_partition_key(
         .iter()
         .find(|column| column.name.value.eq_ignore_ascii_case(partition_key))
         .ok_or_else(|| format!("partition key column does not exist: {partition_key}"))?;
-    if column
+    if !column
         .options
         .iter()
         .any(|option| matches!(option.option, ColumnOption::NotNull))
     {
-        return Err("partition key column must allow NULL for null partition routing".into());
+        return Err("partition key column must be NOT NULL".into());
     }
 
     let type_text = column.data_type.to_string();
@@ -49,4 +49,3 @@ fn validate_create_table_column_types(create_table: &CreateTable) -> Result<(), 
     }
     Ok(())
 }
-

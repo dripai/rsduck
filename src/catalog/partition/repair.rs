@@ -29,52 +29,6 @@ fn mark_partition_unavailable(
         )
         .map_err(|e| format!("mark partition unavailable failed: {e}"))?;
         mark_relation_unavailable(conn, partition.child_oid, reason)?;
-        if partition.is_null_partition {
-            mark_relation_unavailable(conn, relation.oid, "null partition unavailable")?;
-        } else {
-            refresh_partition_entrypoint(conn, relation.oid, schema, table)?;
-        }
-        finish_journal(conn, journal_id)?;
-        Ok(1)
-    })
-}
-
-fn cleanup_null_partition(
-    conn: &Connection,
-    schema: &str,
-    table: &str,
-    mode: &str,
-    sql: &str,
-) -> Result<usize, String> {
-    if !mode.eq_ignore_ascii_case("clear") {
-        return Err(format!(
-            "unsupported null partition cleanup mode: {mode}; supported mode: clear"
-        ));
-    }
-    let relation = partitioned_relation(conn, schema, table)?
-        .ok_or_else(|| format!("partitioned relation does not exist: {schema}.{table}"))?;
-    run_catalog_tx(conn, || {
-        let partition = partition_child_by_value(conn, relation.oid, "_null")?
-            .ok_or_else(|| format!("null partition does not exist: {schema}.{table}"))?;
-        let journal_id = insert_journal(conn, "cleanup_null_partition", partition.child_oid, sql)?;
-        conn.execute(
-            &format!(
-                "DELETE FROM {}",
-                quote_qualified(&partition.schema, &partition.relname)
-            ),
-            [],
-        )
-        .map_err(|e| format!("cleanup null partition rows failed: {e}"))?;
-        conn.execute(
-            &format!(
-                "UPDATE rsduck_catalog.rs_partition \
-                 SET row_count = 0, min_ts = NULL, max_ts = NULL, checksum = '', error_message = '' \
-                 WHERE parent_relid = {} AND child_relid = {}",
-                relation.oid, partition.child_oid
-            ),
-            [],
-        )
-        .map_err(|e| format!("update null partition cleanup metadata failed: {e}"))?;
         refresh_partition_entrypoint(conn, relation.oid, schema, table)?;
         finish_journal(conn, journal_id)?;
         Ok(1)
@@ -92,38 +46,6 @@ fn repair_partition(
         .ok_or_else(|| format!("partitioned relation does not exist: {schema}.{table}"))?;
     run_catalog_tx(conn, || {
         let journal_id = insert_journal(conn, "repair_partition", relation.oid, sql)?;
-        if partition_value == "_null" {
-            let partition = partition_child_by_value(conn, relation.oid, "_null")?
-                .ok_or_else(|| format!("null partition does not exist: {schema}.{table}"))?;
-            validate_table_physical(
-                conn,
-                partition.child_oid,
-                &partition.schema,
-                &partition.relname,
-            )?;
-            conn.execute(
-                &format!(
-                    "UPDATE rsduck_catalog.rs_partition SET status = 'active', error_message = '' \
-                     WHERE parent_relid = {} AND child_relid = {}",
-                    relation.oid, partition.child_oid
-                ),
-                [],
-            )
-            .map_err(|e| format!("repair null partition metadata failed: {e}"))?;
-            conn.execute(
-                &format!(
-                    "UPDATE rsduck_catalog.pg_class SET status = 'active', error_message = '' \
-                     WHERE oid IN ({}, {})",
-                    relation.oid, partition.child_oid
-                ),
-                [],
-            )
-            .map_err(|e| format!("repair null partition relation status failed: {e}"))?;
-            refresh_partition_entrypoint(conn, relation.oid, schema, table)?;
-            finish_journal(conn, journal_id)?;
-            return Ok(1);
-        }
-
         if let Some(partition) = active_partition_by_value(conn, relation.oid, partition_value)? {
             validate_table_physical(
                 conn,
@@ -245,4 +167,3 @@ fn repair_non_active_partition(
     .map_err(|e| format!("repair partition relation status failed: {e}"))?;
     Ok(())
 }
-

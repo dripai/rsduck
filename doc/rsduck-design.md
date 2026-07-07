@@ -154,8 +154,8 @@ WITH (
 - `TIMESTAMP` 字段支持 `hour/day/month/year`。
 - `DATE` 字段不允许 `hour`，只能使用 `day/month/year`。
 - `retention = '30'` 表示保留最近 30 个 `partition_unit` 时间窗口。
-- 空值或无法路由的脏数据进入 null partition，仍可通过分区表查询到。
-- retention 自动清理不会删除 null partition。
+- 分区字段必须声明 `NOT NULL`。
+- 分区字段为空、无法转换或不可路由时写入失败，不创建 null partition。
 
 查询分区：
 
@@ -434,7 +434,7 @@ restore 只读取正式 snapshot 目录，不自动尝试更早 snapshot。
 
 - catalog bootstrap、默认 admin、认证授权。
 - 普通表、视图、索引、约束、comment、drop、alter table。
-- range partitioned table 创建、写入路由、null partition、retention、repair。
+- range partitioned table 创建、写入路由、retention、repair。
 - `pg_catalog` / `information_schema` rewrite。
 - `SHOW PARTITIONS`。
 - reserved schema guard。

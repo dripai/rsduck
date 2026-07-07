@@ -3,20 +3,6 @@ fn physical_partition_name(parent: &str, partition_value: &str) -> String {
     format!("{parent}_{suffix}")
 }
 
-fn physical_partition_create_sql(partition_name: &str, create_table: &CreateTable) -> String {
-    let mut definitions = create_table
-        .columns
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    definitions.extend(create_table.constraints.iter().map(ToString::to_string));
-    format!(
-        "CREATE TABLE {} ({})",
-        quote_qualified("rsduck_internal", partition_name),
-        definitions.join(", ")
-    )
-}
-
 fn physical_partition_create_from_catalog_sql(
     conn: &Connection,
     parent_oid: i64,
@@ -235,4 +221,3 @@ struct RetentionPartition {
     relname: String,
     meta: RelationMeta,
 }
-

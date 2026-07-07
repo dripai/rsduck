@@ -15,6 +15,61 @@ fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str
     )
 }
 
+fn empty_partition_entrypoint_sql_from_create_table(
+    schema: &str,
+    table: &str,
+    create_table: &CreateTable,
+) -> String {
+    let selects = create_table
+        .columns
+        .iter()
+        .map(|column| {
+            format!(
+                "CAST(NULL AS {}) AS {}",
+                column.data_type,
+                quote_ident(&column.name.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE OR REPLACE VIEW {} AS SELECT {selects} WHERE FALSE",
+        quote_qualified(schema, table)
+    )
+}
+
+fn partition_entrypoint_sql_from_catalog(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    table: &str,
+    partitions: &[ActivePartitionChild],
+) -> Result<String, String> {
+    if !partitions.is_empty() {
+        let active_physical = partitions
+            .iter()
+            .map(|partition| (partition.schema.as_str(), partition.relname.as_str()))
+            .collect::<Vec<_>>();
+        return Ok(partition_entrypoint_sql(schema, table, &active_physical));
+    }
+
+    let columns = catalog_columns(conn, parent_oid)?;
+    let selects = columns
+        .iter()
+        .map(|column| {
+            Ok(format!(
+                "CAST(NULL AS {}) AS {}",
+                duckdb_type_for_pg_type_oid(conn, column.pg_type_oid)?,
+                quote_ident(&column.name)
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .join(", ");
+    Ok(format!(
+        "CREATE OR REPLACE VIEW {} AS SELECT {selects} WHERE FALSE",
+        quote_qualified(schema, table)
+    ))
+}
 
 fn refresh_partition_entrypoint(
     conn: &Connection,
@@ -23,11 +78,7 @@ fn refresh_partition_entrypoint(
     relname: &str,
 ) -> Result<(), String> {
     let partitions = active_partition_children(conn, parent_oid)?;
-    let active_physical = partitions
-        .iter()
-        .map(|partition| (partition.schema.as_str(), partition.relname.as_str()))
-        .collect::<Vec<_>>();
-    let sql = partition_entrypoint_sql(schema, relname, &active_physical);
+    let sql = partition_entrypoint_sql_from_catalog(conn, parent_oid, schema, relname, &partitions)?;
     rebuild_partition_entrypoint(conn, parent_oid, &sql)?;
     sync_partition_dependencies(conn, parent_oid, &partitions)?;
     Ok(())
@@ -88,4 +139,3 @@ fn update_partition_stats(
     .map_err(|e| format!("update partition stats failed: {e}"))?;
     Ok(())
 }
-

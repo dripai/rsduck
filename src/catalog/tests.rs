@@ -474,7 +474,7 @@ mod tests {
 
         let err = execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE bad_metric(id BIGINT, access_time TIMESTAMP, flag TINYINT)
+            "CREATE TABLE bad_metric(id BIGINT, access_time TIMESTAMP NOT NULL, flag TINYINT)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -834,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn create_managed_partitioned_table_creates_null_partition_and_entrypoint() {
+    fn create_managed_partitioned_table_creates_empty_entrypoint_without_partitions() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
 
@@ -843,7 +843,7 @@ mod tests {
             "CREATE TABLE ods_access_log (
                 id BIGINT,
                 user_id VARCHAR(64),
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -884,40 +884,27 @@ mod tests {
         assert_eq!(partition_unit, "day");
         assert_eq!(retention, 30);
 
-        let null_partition_count: i64 = conn
+        let partition_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) \
-                 FROM rsduck_catalog.rs_partition p \
-                 JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-                 WHERE c.relname = 'ods_access_log_null' \
-                   AND p.partition_value = '_null' \
-                   AND p.partition_unit = 'null' \
-                   AND p.is_null_partition = TRUE \
-                   AND p.status = 'active'",
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(null_partition_count, 1);
+        assert_eq!(partition_count, 0);
 
-        conn.execute(
-            "INSERT INTO rsduck_internal.ods_access_log_null(id, user_id, access_time, content) \
-             VALUES (1, 'u1', NULL, 'dirty')",
-            [],
-        )
-        .unwrap();
-        let content: String = conn
+        let visible_rows: i64 = conn
             .query_row(
-                "SELECT content FROM ods_access_log WHERE access_time IS NULL",
+                "SELECT COUNT(*) FROM ods_access_log",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(content, "dirty");
+        assert_eq!(visible_rows, 0);
     }
 
     #[test]
-    fn insert_into_partitioned_table_creates_partitions_and_routes_dirty_rows() {
+    fn insert_into_partitioned_table_creates_partitions_and_rejects_dirty_rows() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
@@ -925,7 +912,7 @@ mod tests {
             "CREATE TABLE ods_access_log (
                 id BIGINT,
                 user_id VARCHAR(64),
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -937,12 +924,10 @@ mod tests {
             &conn,
             "INSERT INTO ods_access_log(id, user_id, access_time, content) VALUES
              (1, 'u1', TIMESTAMP '2026-07-01 10:00:00', 'ok-1'),
-             (2, 'u2', '2026-07-02 08:30:00', 'ok-2'),
-             (3, 'u3', NULL, 'null-key'),
-             (4, 'u4', 'bad-time', 'dirty-key')",
+             (2, 'u2', '2026-07-02 08:30:00', 'ok-2')",
         )
         .unwrap();
-        assert_eq!(affected, Some(4));
+        assert_eq!(affected, Some(2));
 
         let partition_count: i64 = conn
             .query_row(
@@ -954,7 +939,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(partition_count, 3);
+        assert_eq!(partition_count, 2);
 
         let ordinary_partition_count: i64 = conn
             .query_row(
@@ -970,16 +955,22 @@ mod tests {
         let visible_rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows, 4);
+        assert_eq!(visible_rows, 2);
 
-        let dirty_rows: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ods_access_log WHERE access_time IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dirty_rows, 2);
+        let null_key_err = execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, user_id, access_time, content) VALUES
+             (3, 'u3', NULL, 'null-key')",
+        )
+        .unwrap_err();
+        assert!(null_key_err.contains("partition key value is NULL or cannot be routed"));
+        let dirty_key_err = execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, user_id, access_time, content) VALUES
+             (4, 'u4', 'bad-time', 'dirty-key')",
+        )
+        .unwrap_err();
+        assert!(dirty_key_err.contains("partition key value is NULL or cannot be routed"));
 
         let july_1_count: i64 = conn
             .query_row(
@@ -990,25 +981,17 @@ mod tests {
             .unwrap();
         assert_eq!(july_1_count, 1);
 
-        let null_count: i64 = conn
-            .query_row(
-                "SELECT row_count FROM rsduck_catalog.rs_partition WHERE partition_value = '_null'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(null_count, 2);
     }
 
     #[test]
-    fn partition_retention_expires_old_ordinary_partitions_but_keeps_null_partition() {
+    fn partition_retention_expires_old_ordinary_partitions() {
         let conn = Connection::open_in_memory().unwrap();
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
             "CREATE TABLE ods_access_log (
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -1021,8 +1004,7 @@ mod tests {
             "INSERT INTO ods_access_log(id, access_time, content) VALUES
              (1, TIMESTAMP '2026-07-01 10:00:00', 'old'),
              (2, TIMESTAMP '2026-07-02 10:00:00', 'keep-1'),
-             (3, TIMESTAMP '2026-07-03 10:00:00', 'keep-2'),
-             (4, NULL, 'dirty')",
+             (3, TIMESTAMP '2026-07-03 10:00:00', 'keep-2')",
         )
         .unwrap();
 
@@ -1046,16 +1028,6 @@ mod tests {
             .unwrap();
         assert_eq!(dropped_old_count, 1);
 
-        let null_active_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
-                 WHERE partition_value = '_null' AND status = 'active'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(null_active_count, 1);
-
         let old_physical_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM duckdb_tables() \
@@ -1069,15 +1041,7 @@ mod tests {
         let visible_rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows, 3);
-        let dirty_rows: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ods_access_log WHERE access_time IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dirty_rows, 1);
+        assert_eq!(visible_rows, 2);
 
         let pg_class_old_count: i64 = conn
             .query_row(
@@ -1104,12 +1068,12 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE src_access_log(id BIGINT, access_time TIMESTAMP, content TEXT)",
+            "CREATE TABLE src_access_log(id BIGINT, access_time TIMESTAMP NOT NULL, content TEXT)",
         )
         .unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP, content TEXT)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL, content TEXT)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1117,8 +1081,7 @@ mod tests {
         conn.execute(
             "INSERT INTO src_access_log VALUES
              (1, TIMESTAMP '2026-07-01 10:00:00', 'ok-1'),
-             (2, TIMESTAMP '2026-07-02 10:00:00', 'ok-2'),
-             (3, NULL, 'dirty')",
+             (2, TIMESTAMP '2026-07-02 10:00:00', 'ok-2')",
             [],
         )
         .unwrap();
@@ -1129,12 +1092,12 @@ mod tests {
              SELECT id, access_time, content FROM src_access_log",
         )
         .unwrap();
-        assert_eq!(affected, Some(3));
+        assert_eq!(affected, Some(2));
 
         let visible_rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows, 3);
+        assert_eq!(visible_rows, 2);
         let ordinary_partitions: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM rsduck_catalog.rs_partition
@@ -1154,7 +1117,7 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log(
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT,
                 CONSTRAINT ods_access_log_id_key UNIQUE(id),
                 CONSTRAINT ods_access_log_id_check CHECK (id > 0)
@@ -1198,7 +1161,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP, content TEXT)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL, content TEXT)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1206,7 +1169,7 @@ mod tests {
         execute_catalog_aware_write(
             &conn,
             "INSERT INTO ods_access_log(id, access_time, content)
-             VALUES (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'), (2, NULL, 'dirty')",
+             VALUES (1, TIMESTAMP '2026-07-01 10:00:00', 'ok')",
         )
         .unwrap();
 
@@ -1231,14 +1194,13 @@ mod tests {
                 "SELECT COUNT(*) FROM duckdb_indexes()
                  WHERE schema_name = 'rsduck_internal'
                    AND index_name IN (
-                    'ods_access_log_20260701__idx_ods_access_log_time',
-                    'ods_access_log_null__idx_ods_access_log_time'
+                    'ods_access_log_20260701__idx_ods_access_log_time'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(initial_physical_index_count, 2);
+        assert_eq!(initial_physical_index_count, 1);
 
         execute_catalog_aware_write(
             &conn,
@@ -1264,7 +1226,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP, content TEXT)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL, content TEXT)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1273,8 +1235,7 @@ mod tests {
             &conn,
             "INSERT INTO ods_access_log(id, access_time, content)
              VALUES
-             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'),
-             (2, NULL, 'dirty')",
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok')",
         )
         .unwrap();
 
@@ -1295,7 +1256,7 @@ mod tests {
         let visible_rows_after_mark: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows_after_mark, 1);
+        assert_eq!(visible_rows_after_mark, 0);
 
         execute_catalog_aware_write(
             &conn,
@@ -1305,21 +1266,7 @@ mod tests {
         let visible_rows_after_repair: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows_after_repair, 2);
-
-        execute_catalog_aware_write(
-            &conn,
-            "CALL rsduck_cleanup_null_partition('ods_access_log', 'clear')",
-        )
-        .unwrap();
-        let null_rows: i64 = conn
-            .query_row(
-                "SELECT row_count FROM rsduck_catalog.rs_partition WHERE partition_value = '_null'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(null_rows, 0);
+        assert_eq!(visible_rows_after_repair, 1);
 
         execute_catalog_aware_write(&conn, "CALL rsduck_run_partition_maintenance()").unwrap();
     }
@@ -1332,7 +1279,7 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log (
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 source TEXT DEFAULT 'web'
              )
              PARTITION BY RANGE (access_time)
@@ -1356,17 +1303,20 @@ mod tests {
             .unwrap();
         assert_eq!(source, "web");
 
-        let physical_default: Option<String> = conn
+        let physical_default_count: i64 = conn
             .query_row(
-                "SELECT column_default FROM duckdb_columns() \
-                 WHERE schema_name = 'rsduck_internal' \
-                   AND table_name = 'ods_access_log_20260701' \
-                   AND column_name = 'source'",
+                "SELECT COUNT(*) \
+                 FROM rsduck_catalog.pg_attrdef d \
+                 JOIN rsduck_catalog.pg_class c ON c.oid = d.adrelid \
+                 JOIN rsduck_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.adnum \
+                 WHERE c.relname = 'ods_access_log_20260701' \
+                   AND a.attname = 'source' \
+                   AND d.adbin = '''web'''",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(physical_default.as_deref(), Some("'web'"));
+        assert_eq!(physical_default_count, 1);
     }
 
     #[test]
@@ -1377,7 +1327,7 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log (
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -1387,8 +1337,7 @@ mod tests {
         execute_catalog_aware_write(
             &conn,
             "INSERT INTO ods_access_log(id, access_time, content) VALUES
-             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'),
-             (2, NULL, 'dirty')",
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok')",
         )
         .unwrap();
 
@@ -1415,13 +1364,13 @@ mod tests {
                 "SELECT COUNT(*) \
                  FROM rsduck_catalog.pg_attribute a \
                  JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
-                 WHERE c.relname IN ('ods_access_log_20260701', 'ods_access_log_null') \
+                 WHERE c.relname = 'ods_access_log_20260701' \
                    AND a.attname = 'source'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(child_attr_count, 2);
+        assert_eq!(child_attr_count, 1);
 
         let source: String = conn
             .query_row(
@@ -1456,7 +1405,7 @@ mod tests {
             &conn,
             "CREATE TABLE ods_access_log (
                 id BIGINT,
-                access_time TIMESTAMP,
+                access_time TIMESTAMP NOT NULL,
                 content TEXT
              )
              PARTITION BY RANGE (access_time)
@@ -1466,8 +1415,7 @@ mod tests {
         execute_catalog_aware_write(
             &conn,
             "INSERT INTO ods_access_log(id, access_time, content) VALUES
-             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok'),
-             (2, NULL, 'dirty')",
+             (1, TIMESTAMP '2026-07-01 10:00:00', 'ok')",
         )
         .unwrap();
 
@@ -1477,21 +1425,21 @@ mod tests {
         let visible_rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM ods_access_log", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(visible_rows, 2);
+        assert_eq!(visible_rows, 1);
         assert!(conn.prepare("SELECT content FROM ods_access_log").is_err());
         let dropped_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) \
                  FROM rsduck_catalog.pg_attribute a \
                  JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
-                 WHERE c.relname IN ('ods_access_log', 'ods_access_log_20260701', 'ods_access_log_null') \
+                 WHERE c.relname IN ('ods_access_log', 'ods_access_log_20260701') \
                    AND a.attname = 'content' \
                    AND a.attisdropped = TRUE",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(dropped_count, 3);
+        assert_eq!(dropped_count, 2);
 
         let err = execute_catalog_aware_write(
             &conn,
@@ -1507,7 +1455,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1515,8 +1463,7 @@ mod tests {
         execute_catalog_aware_write(
             &conn,
             "INSERT INTO ods_access_log(id, access_time) VALUES
-             (1, TIMESTAMP '2026-07-01 10:00:00'),
-             (2, NULL)",
+             (1, TIMESTAMP '2026-07-01 10:00:00')",
         )
         .unwrap();
 
@@ -1525,7 +1472,7 @@ mod tests {
         let class_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM rsduck_catalog.pg_class \
-                 WHERE relname IN ('ods_access_log', 'ods_access_log_20260701', 'ods_access_log_null')",
+                 WHERE relname IN ('ods_access_log', 'ods_access_log_20260701')",
                 [],
                 |row| row.get(0),
             )
@@ -1551,7 +1498,7 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM duckdb_tables() \
                  WHERE schema_name = 'rsduck_internal' \
-                   AND table_name IN ('ods_access_log_20260701', 'ods_access_log_null')",
+                   AND table_name = 'ods_access_log_20260701'",
                 [],
                 |row| row.get(0),
             )
@@ -1566,7 +1513,7 @@ mod tests {
 
         let err = execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE bad_hour(id BIGINT, trade_date DATE)
+            "CREATE TABLE bad_hour(id BIGINT, trade_date DATE NOT NULL)
              PARTITION BY RANGE (trade_date)
              WITH (partition_unit = 'hour', retention = '7')",
         )
@@ -1575,12 +1522,12 @@ mod tests {
 
         let err = execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE bad_not_null(id BIGINT, access_time TIMESTAMP NOT NULL)
+            "CREATE TABLE bad_nullable(id BIGINT, access_time TIMESTAMP)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '7')",
         )
         .unwrap_err();
-        assert!(err.contains("must allow NULL"));
+        assert!(err.contains("must be NOT NULL"));
     }
 
     #[test]
@@ -1589,7 +1536,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1622,7 +1569,7 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
@@ -1677,13 +1624,19 @@ mod tests {
         bootstrap_fresh(&conn).unwrap();
         execute_catalog_aware_write(
             &conn,
-            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP NOT NULL)
              PARTITION BY RANGE (access_time)
              WITH (partition_unit = 'day', retention = '30')",
         )
         .unwrap();
+        execute_catalog_aware_write(
+            &conn,
+            "INSERT INTO ods_access_log(id, access_time)
+             VALUES (1, TIMESTAMP '2026-07-01 10:00:00')",
+        )
+        .unwrap();
         conn.execute("DROP VIEW ods_access_log", []).unwrap();
-        conn.execute("DROP TABLE rsduck_internal.ods_access_log_null", [])
+        conn.execute("DROP TABLE rsduck_internal.ods_access_log_20260701", [])
             .unwrap();
 
         validate_after_start(&conn).unwrap();
@@ -1699,7 +1652,7 @@ mod tests {
 
         let partition_status: String = conn
             .query_row(
-                "SELECT status FROM rsduck_catalog.rs_partition WHERE partition_value = '_null'",
+                "SELECT status FROM rsduck_catalog.rs_partition WHERE partition_value = '20260701'",
                 [],
                 |row| row.get(0),
             )

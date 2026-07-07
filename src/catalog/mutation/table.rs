@@ -34,7 +34,10 @@ fn create_table_relation(
         conn.execute(sql, [])
             .map_err(|e| format!("execute DuckDB CREATE TABLE failed: {e}"))?;
 
-        let columns = load_duckdb_columns(conn, &schema, &table)?;
+        let columns = create_table_columns_with_metadata(
+            load_duckdb_columns(conn, &schema, &table)?,
+            &create_table,
+        );
         insert_relation_rows(
             conn,
             rel_oid,
@@ -71,9 +74,7 @@ fn create_range_partitioned_table(
     }
     let (schema, table) = relation_name(&create_table.name)?;
     reject_reserved_schema(&schema)?;
-    let null_partition = physical_partition_name(&table, "_null");
-    let view_sql =
-        partition_entrypoint_sql(&schema, &table, &[("rsduck_internal", &null_partition)]);
+    let view_sql = empty_partition_entrypoint_sql_from_create_table(&schema, &table, &create_table);
 
     run_catalog_tx(conn, || {
         if relation_exists(conn, &schema, &table)? {
@@ -81,11 +82,6 @@ fn create_range_partitioned_table(
                 return Ok(0);
             }
             return Err(format!("relation already exists: {schema}.{table}"));
-        }
-        if relation_exists(conn, "rsduck_internal", &null_partition)? {
-            return Err(format!(
-                "managed physical partition relation already exists: rsduck_internal.{null_partition}"
-            ));
         }
 
         validate_create_table_column_types(&create_table)?;
@@ -97,8 +93,6 @@ fn create_range_partitioned_table(
         ensure_user_schema_exists(conn, &schema)?;
         let parent_oid = allocate_oid(conn)?;
         let parent_type_oid = allocate_oid(conn)?;
-        let child_oid = allocate_oid(conn)?;
-        let child_type_oid = allocate_oid(conn)?;
         let journal_id = insert_journal(
             conn,
             "create_range_partitioned_table",
@@ -106,13 +100,13 @@ fn create_range_partitioned_table(
             &partitioned.base_sql,
         )?;
 
-        let create_null_sql = physical_partition_create_sql(&null_partition, &create_table);
-        conn.execute(&create_null_sql, [])
-            .map_err(|e| format!("execute DuckDB CREATE null partition failed: {e}"))?;
         conn.execute(&view_sql, [])
             .map_err(|e| format!("execute DuckDB CREATE partition entrypoint failed: {e}"))?;
 
-        let columns = load_duckdb_columns(conn, "rsduck_internal", &null_partition)?;
+        let columns = create_table_columns_with_metadata(
+            load_duckdb_columns(conn, &schema, &table)?,
+            &create_table,
+        );
         insert_relation_rows(
             conn,
             parent_oid,
@@ -143,59 +137,6 @@ fn create_range_partitioned_table(
             partitioned.retention_count,
             &view_sql,
         )?;
-
-        insert_relation_rows(
-            conn,
-            child_oid,
-            child_type_oid,
-            "rsduck_internal",
-            &null_partition,
-            "r",
-            "physical_partition",
-            "internal",
-            "",
-            &columns,
-            owner_user_id,
-        )?;
-        conn.execute(
-            &format!(
-                "UPDATE rsduck_catalog.pg_class \
-                 SET relispartition = TRUE, relpartbound = '_null' \
-                 WHERE oid = {child_oid}"
-            ),
-            [],
-        )
-        .map_err(|e| format!("mark null partition pg_class failed: {e}"))?;
-        update_partition_relation_ext(
-            conn,
-            child_oid,
-            &partitioned.partition_key,
-            &partition_key_type,
-            "null",
-            0,
-            "",
-        )?;
-
-        conn.execute(
-            &format!(
-                "INSERT INTO rsduck_catalog.rs_partition(parent_relid, child_relid, partition_value, \
-                 partition_unit, lower_bound, upper_bound, is_null_partition, status, row_count, min_ts, \
-                 max_ts, checksum, created_at, activated_at, dropped_at, error_message) \
-                 VALUES ({parent_oid}, {child_oid}, '_null', 'null', NULL, NULL, TRUE, 'active', 0, \
-                 NULL, NULL, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, '')"
-            ),
-            [],
-        )
-        .map_err(|e| format!("write null partition metadata failed: {e}"))?;
-
-        conn.execute(
-            &format!(
-                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
-                 VALUES ({PG_CLASS_CLASSOID}, {parent_oid}, 0, {PG_CLASS_CLASSOID}, {child_oid}, 0, 'n')"
-            ),
-            [],
-        )
-        .map_err(|e| format!("write partition dependency failed: {e}"))?;
 
         finish_journal(conn, journal_id)?;
         Ok(0)
@@ -277,3 +218,28 @@ fn insert_partitioned_relation(
 
 type PartitionInsertGroups = Vec<(String, Option<NaiveDateTime>, Vec<Vec<String>>)>;
 
+fn create_table_columns_with_metadata(
+    mut columns: Vec<CatalogColumn>,
+    create_table: &CreateTable,
+) -> Vec<CatalogColumn> {
+    for column in &mut columns {
+        if let Some(definition) = create_table
+            .columns
+            .iter()
+            .find(|definition| definition.name.value.eq_ignore_ascii_case(&column.name))
+        {
+            column.not_null = definition
+                .options
+                .iter()
+                .any(|option| matches!(option.option, ColumnOption::NotNull));
+            column.default_expr = definition.options.iter().find_map(|option| {
+                if let ColumnOption::Default(expr) = &option.option {
+                    Some(expr.to_string())
+                } else {
+                    None
+                }
+            });
+        }
+    }
+    columns
+}
