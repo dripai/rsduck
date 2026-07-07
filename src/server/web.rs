@@ -108,6 +108,9 @@ fn paged_sql(sql: &str, page: usize, page_size: usize) -> String {
     if !crate::sql_route::is_pageable_sql(sql).unwrap_or(false) {
         return sql.to_string();
     }
+    if crate::sql_route::has_top_level_limit_or_offset(sql).unwrap_or(false) {
+        return sql.to_string();
+    }
 
     let page_size = page_size.clamp(1, 100_000);
     let offset = page.saturating_mul(page_size);
@@ -788,7 +791,7 @@ initSession();
 
 #[cfg(test)]
 mod tests {
-    use super::parse_session_token;
+    use super::{paged_sql, parse_session_token};
     use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
@@ -800,5 +803,22 @@ mod tests {
         );
 
         assert_eq!(parse_session_token(&headers), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn paged_sql_wraps_only_queries_without_top_level_paging() {
+        assert_eq!(
+            paged_sql("SELECT * FROM kline_day", 2, 100),
+            "SELECT * FROM (SELECT * FROM kline_day) __rsduck_page LIMIT 100 OFFSET 200"
+        );
+        assert_eq!(
+            paged_sql("SELECT * FROM kline_day LIMIT 100 OFFSET 200", 2, 100),
+            "SELECT * FROM kline_day LIMIT 100 OFFSET 200"
+        );
+        assert_eq!(
+            paged_sql("SELECT * FROM (SELECT * FROM kline_day LIMIT 10) t", 1, 50),
+            "SELECT * FROM (SELECT * FROM (SELECT * FROM kline_day LIMIT 10) t) __rsduck_page LIMIT 50 OFFSET 50"
+        );
+        assert_eq!(paged_sql("SHOW TABLES", 1, 100), "SHOW TABLES");
     }
 }

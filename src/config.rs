@@ -4,6 +4,8 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RsduckConfig {
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     #[serde(default)]
     pub db: DbConfig,
     #[serde(default)]
@@ -136,6 +138,10 @@ fn default_web_bind() -> String {
     "127.0.0.1:8080".into()
 }
 
+fn default_log_level() -> String {
+    "info".into()
+}
+
 impl Default for SnapshotConfig {
     fn default() -> Self {
         Self {
@@ -192,6 +198,7 @@ impl Default for WebConfig {
 impl Default for RsduckConfig {
     fn default() -> Self {
         Self {
+            log_level: default_log_level(),
             db: DbConfig::default(),
             snapshot: SnapshotConfig::default(),
             partition: PartitionConfig::default(),

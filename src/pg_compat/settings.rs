@@ -64,7 +64,7 @@ fn pg_scalar_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     if select_sql.starts_with("current_database()")
         || select_sql.starts_with("pg_catalog.current_database()")
     {
-        return Some(one_row(&["current_database"], &["postgres"]));
+        return Some(one_row(&["current_database"], &["memory"]));
     }
     if select_sql.starts_with("current_schema()")
         || select_sql.starts_with("pg_catalog.current_schema()")
@@ -151,7 +151,7 @@ fn pg_database_legacy_result(sql: &str) -> Option<SqlResult> {
         ],
         &[
             "1",
-            "postgres",
+            "memory",
             "admin",
             "",
             "f",

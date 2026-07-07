@@ -28,10 +28,10 @@ fn information_schema_schemata_sql() -> String {
     format!(
         "
     SELECT
-        'postgres' AS catalog_name,
+        current_database() AS catalog_name,
         n.nspname AS schema_name,
         COALESCE(u.username, 'unknown') AS schema_owner,
-        'postgres' AS default_character_set_catalog,
+        current_database() AS default_character_set_catalog,
         'pg_catalog' AS default_character_set_schema,
         'UTF8' AS default_character_set_name,
         '' AS sql_path,
@@ -142,7 +142,7 @@ fn pg_tables_sql() -> String {
 fn information_schema_tables_sql() -> String {
     "
     SELECT
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         n.nspname AS table_schema,
         c.relname AS table_name,
         CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type,
@@ -230,7 +230,7 @@ fn pg_attribute_sql(include_dropped: bool) -> String {
 fn information_schema_columns_sql() -> String {
     "
     SELECT
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         n.nspname AS table_schema,
         c.relname AS table_name,
         a.attname AS column_name,
@@ -276,7 +276,7 @@ fn information_schema_columns_sql() -> String {
         '' AS domain_catalog,
         '' AS domain_schema,
         '' AS domain_name,
-        'postgres' AS udt_catalog,
+        current_database() AS udt_catalog,
         'pg_catalog' AS udt_schema,
         t.typname AS udt_name,
         '' AS scope_catalog,
@@ -344,7 +344,7 @@ fn pg_database_sql() -> String {
     "
     SELECT
         '1' AS oid,
-        'postgres' AS datname,
+        current_database() AS datname,
         '10' AS datdba,
         '6' AS encoding,
         'C' AS datcollate,
@@ -357,7 +357,7 @@ fn pg_database_sql() -> String {
         '0' AS datminmxid,
         '0' AS dattablespace,
         '' AS datacl,
-        'postgres' AS databasename,
+        current_database() AS databasename,
         'admin' AS databaseowner,
         '' AS description,
         'UTF8' AS encodingname,
@@ -446,12 +446,74 @@ fn pg_index_sql() -> String {
         CAST(indnkeyatts AS VARCHAR) AS indnkeyatts,
         CASE WHEN indisunique THEN 't' ELSE 'f' END AS indisunique,
         CASE WHEN indisprimary THEN 't' ELSE 'f' END AS indisprimary,
+        'f' AS indisclustered,
         CASE WHEN indisvalid THEN 't' ELSE 'f' END AS indisvalid,
         indkey,
         indexprs,
         indpred
     FROM rsduck_catalog.pg_index
     ORDER BY indexrelid
+    "
+    .to_string()
+}
+
+fn pg_inherits_sql() -> String {
+    "
+    SELECT
+        CAST(child_relid AS VARCHAR) AS inhrelid,
+        CAST(parent_relid AS VARCHAR) AS inhparent,
+        '1' AS inhseqno
+    FROM rsduck_catalog.rs_partition
+    WHERE status IN ('active', 'unavailable')
+    ORDER BY parent_relid, child_relid
+    "
+    .to_string()
+}
+
+fn pg_tablespace_sql() -> String {
+    "
+    SELECT
+        '0' AS oid,
+        'pg_default' AS spcname,
+        '10' AS spcowner,
+        '' AS spcacl,
+        '' AS spcoptions
+    "
+    .to_string()
+}
+
+fn pg_collation_sql() -> String {
+    "
+    SELECT
+        '0' AS oid,
+        '' AS collname,
+        '0' AS collnamespace,
+        '10' AS collowner,
+        '' AS collprovider,
+        'f' AS collisdeterministic,
+        '-1' AS collencoding,
+        '' AS collcollate,
+        '' AS collctype,
+        '' AS colliculocale,
+        '' AS collicurules,
+        '' AS collversion
+    WHERE FALSE
+    "
+    .to_string()
+}
+
+fn pg_sequence_sql() -> String {
+    "
+    SELECT
+        '0' AS seqrelid,
+        '20' AS seqtypid,
+        '1' AS seqstart,
+        '1' AS seqincrement,
+        '9223372036854775807' AS seqmax,
+        '1' AS seqmin,
+        '1' AS seqcache,
+        'f' AS seqcycle
+    WHERE FALSE
     "
     .to_string()
 }
@@ -493,10 +555,10 @@ fn pg_constraint_sql() -> String {
 fn information_schema_table_constraints_sql() -> String {
     "
     SELECT
-        'postgres' AS constraint_catalog,
+        current_database() AS constraint_catalog,
         n.nspname AS constraint_schema,
         con.conname AS constraint_name,
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         tn.nspname AS table_schema,
         tc.relname AS table_name,
         CASE con.contype
@@ -522,10 +584,10 @@ fn information_schema_table_constraints_sql() -> String {
 fn information_schema_key_column_usage_sql() -> String {
     "
     SELECT
-        'postgres' AS constraint_catalog,
+        current_database() AS constraint_catalog,
         n.nspname AS constraint_schema,
         con.conname AS constraint_name,
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         tn.nspname AS table_schema,
         tc.relname AS table_name,
         a.attname AS column_name,
@@ -552,11 +614,11 @@ fn information_schema_key_column_usage_sql() -> String {
 fn information_schema_constraint_column_usage_sql() -> String {
     "
     SELECT
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         tn.nspname AS table_schema,
         tc.relname AS table_name,
         a.attname AS column_name,
-        'postgres' AS constraint_catalog,
+        current_database() AS constraint_catalog,
         n.nspname AS constraint_schema,
         con.conname AS constraint_name
     FROM rsduck_catalog.pg_constraint con
@@ -570,11 +632,11 @@ fn information_schema_constraint_column_usage_sql() -> String {
       AND con.conkey <> ''
     UNION ALL
     SELECT
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         tn.nspname AS table_schema,
         tc.relname AS table_name,
         a.attname AS column_name,
-        'postgres' AS constraint_catalog,
+        current_database() AS constraint_catalog,
         n.nspname AS constraint_schema,
         con.conname AS constraint_name
     FROM rsduck_catalog.pg_constraint con
@@ -659,7 +721,7 @@ fn pg_views_sql() -> String {
 fn information_schema_views_sql() -> String {
     "
     SELECT
-        'postgres' AS table_catalog,
+        current_database() AS table_catalog,
         n.nspname AS table_schema,
         c.relname AS table_name,
         ext.generated_sql AS view_definition,
@@ -845,6 +907,35 @@ fn empty_pg_catalog_sql(sql: &str) -> Option<String> {
             .to_string(),
         );
     }
+    if contains_from_table(sql, "pg_foreign_table") {
+        return Some(
+            "
+            SELECT
+                '0' AS ftrelid,
+                '0' AS ftserver,
+                '' AS ftoptions
+            WHERE FALSE
+            "
+            .to_string(),
+        );
+    }
+    if contains_from_table(sql, "pg_foreign_server") {
+        return Some(
+            "
+            SELECT
+                '0' AS oid,
+                '' AS srvname,
+                '0' AS srvowner,
+                '0' AS srvfdw,
+                '' AS srvtype,
+                '' AS srvversion,
+                '' AS srvacl,
+                '' AS srvoptions
+            WHERE FALSE
+            "
+            .to_string(),
+        );
+    }
     None
 }
 
@@ -858,4 +949,3 @@ fn contains_from_table(sql: &str, table: &str) -> bool {
         || sql.contains(&format!(" join {pg_catalog_table}"))
         || sql.contains(&format!(" join {quoted_pg_catalog_table}"))
 }
-

@@ -16,14 +16,16 @@ use pgwire::api::results::{
     QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::NoopQueryParser;
-use pgwire::api::{ClientInfo, PgWireConnectionState, PgWireHandlerFactory, Type, METADATA_USER};
+use pgwire::api::{
+    ClientInfo, PgWireConnectionState, PgWireHandlerFactory, Type, METADATA_DATABASE, METADATA_USER,
+};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::db::SqlResult;
 
@@ -92,6 +94,35 @@ async fn execute_pg_sql(sql: String, current_user: &str) -> Result<SqlResult, St
     crate::db::execute_sql_as(current_user.to_string(), sql).await
 }
 
+fn metadata_value<'a, C>(client: &'a C, key: &str) -> &'a str
+where
+    C: ClientInfo,
+{
+    client
+        .metadata()
+        .get(key)
+        .map(|value| value.as_str())
+        .unwrap_or("")
+}
+
+fn session_user<C>(client: &C) -> &str
+where
+    C: ClientInfo,
+{
+    client
+        .metadata()
+        .get(METADATA_USER)
+        .map(|value| value.as_str())
+        .unwrap_or("admin")
+}
+
+fn session_database<C>(client: &C) -> &str
+where
+    C: ClientInfo,
+{
+    metadata_value(client, METADATA_DATABASE)
+}
+
 #[async_trait]
 impl StartupHandler for DuckdbProcessor {
     async fn on_startup<C>(
@@ -107,6 +138,13 @@ impl StartupHandler for DuckdbProcessor {
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
                 save_startup_parameters_to_metadata(client, startup);
+                debug!(
+                    target: "rsduck::pg",
+                    user = %metadata_value(client, METADATA_USER),
+                    database = %session_database(client),
+                    application_name = %metadata_value(client, "application_name"),
+                    "PG startup packet"
+                );
                 client.set_state(PgWireConnectionState::AuthenticationInProgress);
                 client
                     .send(PgWireBackendMessage::Authentication(
@@ -122,15 +160,35 @@ impl StartupHandler for DuckdbProcessor {
                     .cloned()
                     .unwrap_or_default();
                 if username.is_empty() {
+                    debug!(target: "rsduck::pg", "PG auth rejected: missing user");
                     send_auth_error(client, "Missing user in startup packet").await?;
                     return Ok(());
                 }
 
+                let auth_user = username.clone();
+                debug!(
+                    target: "rsduck::pg",
+                    user = %auth_user,
+                    database = %session_database(client),
+                    "PG auth attempt"
+                );
                 match crate::db::authenticate_user(username, password).await {
                     Ok(()) => {
+                        debug!(
+                            target: "rsduck::pg",
+                            user = %auth_user,
+                            database = %session_database(client),
+                            "PG auth accepted"
+                        );
                         finish_authentication(client, self.parameters.as_ref()).await?;
                     }
                     Err(_) => {
+                        debug!(
+                            target: "rsduck::pg",
+                            user = %auth_user,
+                            database = %session_database(client),
+                            "PG auth rejected"
+                        );
                         send_auth_error(client, "Password authentication failed").await?;
                     }
                 }
@@ -175,22 +233,63 @@ impl SimpleQueryHandler for DuckdbProcessor {
     {
         let sql = query.trim().to_string();
         if sql.is_empty() {
+            debug!(target: "rsduck::pg", protocol = "simple", "PG empty query");
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        let current_user = client
-            .metadata()
-            .get(METADATA_USER)
-            .map(|value| value.as_str())
-            .unwrap_or("admin");
-        match execute_pg_sql(sql, current_user).await.map_err(|e| {
-            PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
-        })? {
-            SqlResult::Query { columns, rows } => Ok(vec![query_to_response(columns, rows)?]),
-            SqlResult::Execute {
+        let current_user = session_user(client);
+        let current_database = session_database(client);
+        debug!(
+            target: "rsduck::pg",
+            protocol = "simple",
+            user = %current_user,
+            database = %current_database,
+            sql = %sql,
+            "PG query"
+        );
+        match execute_pg_sql(sql.clone(), current_user).await {
+            Ok(SqlResult::Query { columns, rows }) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "simple",
+                    user = %current_user,
+                    database = %current_database,
+                    column_count = columns.len(),
+                    row_count = rows.len(),
+                    "PG query result"
+                );
+                Ok(vec![query_to_response(columns, rows)?])
+            }
+            Ok(SqlResult::Execute {
                 command,
                 affected_rows,
-            } => Ok(vec![exec_to_response(&command, affected_rows)]),
+            }) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "simple",
+                    user = %current_user,
+                    database = %current_database,
+                    command = %command,
+                    affected_rows,
+                    "PG execute result"
+                );
+                Ok(vec![exec_to_response(&command, affected_rows)])
+            }
+            Err(e) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "simple",
+                    user = %current_user,
+                    database = %current_database,
+                    sql = %sql,
+                    error = %e,
+                    "PG query failed"
+                );
+                Err(PgWireError::ApiError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e,
+                ))))
+            }
         }
     }
 }
@@ -206,23 +305,39 @@ impl ExtendedQueryHandler for DuckdbProcessor {
 
     async fn do_describe_statement<C>(
         &self,
-        _client: &mut C,
-        _statement: &pgwire::api::stmt::StoredStatement<Self::Statement>,
+        client: &mut C,
+        statement: &pgwire::api::stmt::StoredStatement<Self::Statement>,
     ) -> PgWireResult<DescribeStatementResponse>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        debug!(
+            target: "rsduck::pg",
+            protocol = "extended",
+            user = %session_user(client),
+            database = %session_database(client),
+            sql = %statement.statement,
+            "PG describe statement"
+        );
         Ok(DescribeStatementResponse::new(vec![], vec![]))
     }
 
     async fn do_describe_portal<C>(
         &self,
-        _client: &mut C,
-        _portal: &Portal<Self::Statement>,
+        client: &mut C,
+        portal: &Portal<Self::Statement>,
     ) -> PgWireResult<DescribePortalResponse>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        debug!(
+            target: "rsduck::pg",
+            protocol = "extended",
+            user = %session_user(client),
+            database = %session_database(client),
+            sql = %portal.statement.statement,
+            "PG describe portal"
+        );
         Ok(DescribePortalResponse::new(vec![]))
     }
 
@@ -237,19 +352,59 @@ impl ExtendedQueryHandler for DuckdbProcessor {
     {
         let sql = portal.statement.statement.to_string();
 
-        let current_user = client
-            .metadata()
-            .get(METADATA_USER)
-            .map(|value| value.as_str())
-            .unwrap_or("admin");
-        match execute_pg_sql(sql, current_user).await.map_err(|e| {
-            PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
-        })? {
-            SqlResult::Query { columns, rows } => query_to_response(columns, rows),
-            SqlResult::Execute {
+        let current_user = session_user(client);
+        let current_database = session_database(client);
+        debug!(
+            target: "rsduck::pg",
+            protocol = "extended",
+            user = %current_user,
+            database = %current_database,
+            sql = %sql,
+            "PG query"
+        );
+        match execute_pg_sql(sql.clone(), current_user).await {
+            Ok(SqlResult::Query { columns, rows }) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "extended",
+                    user = %current_user,
+                    database = %current_database,
+                    column_count = columns.len(),
+                    row_count = rows.len(),
+                    "PG query result"
+                );
+                query_to_response(columns, rows)
+            }
+            Ok(SqlResult::Execute {
                 command,
                 affected_rows,
-            } => Ok(exec_to_response(&command, affected_rows)),
+            }) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "extended",
+                    user = %current_user,
+                    database = %current_database,
+                    command = %command,
+                    affected_rows,
+                    "PG execute result"
+                );
+                Ok(exec_to_response(&command, affected_rows))
+            }
+            Err(e) => {
+                debug!(
+                    target: "rsduck::pg",
+                    protocol = "extended",
+                    user = %current_user,
+                    database = %current_database,
+                    sql = %sql,
+                    error = %e,
+                    "PG query failed"
+                );
+                Err(PgWireError::ApiError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e,
+                ))))
+            }
         }
     }
 }
@@ -301,11 +456,13 @@ pub async fn start_pg_server(bind: &str) {
         };
 
         info!("PG client connected: {}", addr);
+        debug!(target: "rsduck::pg", peer = %addr, "PG connection accepted");
         let handler = factory.clone();
         tokio::spawn(async move {
             if let Err(e) = process_socket(socket, None, handler).await {
                 error!("PG session error from {}: {}", addr, e);
             }
+            debug!(target: "rsduck::pg", peer = %addr, "PG connection closed");
             info!("PG client disconnected: {}", addr);
         });
     }

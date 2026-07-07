@@ -101,6 +101,19 @@ mod tests {
     }
 
     #[test]
+    fn current_database_matches_duckdb_memory_catalog() {
+        let result = compat_result("SELECT current_database();", "admin").expect("compat result");
+
+        match result {
+            SqlResult::Query { columns, rows } => {
+                assert_eq!(columns, vec!["current_database"]);
+                assert_eq!(rows, vec![vec!["memory"]]);
+            }
+            SqlResult::Execute { .. } => panic!("expected query result"),
+        }
+    }
+
+    #[test]
     fn navicat_database_list_probe_returns_pg_compat_row() {
         let result = compat_result(
             "
@@ -116,7 +129,7 @@ mod tests {
         match result {
             SqlResult::Query { columns, rows } => {
                 assert_eq!(&columns[0..3], ["oid", "databasename", "databaseowner"]);
-                assert_eq!(rows[0][1], "postgres");
+                assert_eq!(rows[0][1], "memory");
                 assert_eq!(rows[0][2], "admin");
             }
             SqlResult::Execute { .. } => panic!("expected query result"),
@@ -315,7 +328,7 @@ mod tests {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap();
-        assert_eq!(catalog_name, "postgres");
+        assert_eq!(catalog_name, "memory");
         assert_eq!(charset_name, "UTF8");
 
         let table_sql = rewrite_sql(
@@ -385,6 +398,267 @@ mod tests {
             )
             .unwrap();
         assert_eq!(relkind, "p");
+    }
+
+    #[test]
+    fn navicat_table_list_query_rewrites_supported_pg_catalog_relations() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE kline_day(code VARCHAR, close DOUBLE)",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(id BIGINT, access_time TIMESTAMP)
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+
+        let sql = rewrite_sql(
+            r#"
+            SELECT c.oid,
+                   n.nspname AS schemaname,
+                   c.relname AS tablename,
+                   c.relacl,
+                   pg_get_userbyid(c.relowner) AS tableowner,
+                   obj_description(c.oid) AS description,
+                   c.relkind,
+                   ci.relname AS cluster,
+                   c.relhasindex AS hasindexes,
+                   c.relhasrules AS hasrules,
+                   t.spcname AS tablespace,
+                   c.reloptions AS param,
+                   c.relhastriggers AS hastriggers,
+                   c.relpersistence AS unlogged,
+                   ft.ftoptions,
+                   fs.srvname,
+                   c.relispartition,
+                   pg_get_expr(c.relpartbound, c.oid) AS relpartbound,
+                   c.reltuples,
+                   ((SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid) > 0) AS inhtable,
+                   i2.nspname AS inhschemaname,
+                   i2.relname AS inhtablename
+            FROM pg_class c
+            LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
+            LEFT JOIN (
+                pg_inherits i
+                INNER JOIN pg_class c2 ON i.inhparent = c2.oid
+                LEFT JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+            ) i2 ON i2.inhrelid = c.oid
+            LEFT JOIN pg_index ind ON (ind.indrelid = c.oid) AND (ind.indisclustered = 't')
+            LEFT JOIN pg_class ci ON ci.oid = ind.indexrelid
+            LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid
+            LEFT JOIN pg_foreign_server fs ON ft.ftserver = fs.oid
+            WHERE ((c.relkind = 'r'::"char") OR (c.relkind = 'f'::"char") OR (c.relkind = 'p'::"char"))
+              AND n.nspname = 'main'
+            ORDER BY schemaname, tablename
+            "#,
+        )
+        .expect("rewrite navicat table list query");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
+
+        let rows = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("tablename")?,
+                    row.get::<_, String>("relkind")?,
+                    row.get::<_, bool>("inhtable")?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(rows.contains(&("kline_day".to_string(), "r".to_string(), false)));
+        assert!(rows.contains(&("ods_access_log".to_string(), "p".to_string(), true)));
+    }
+
+    #[test]
+    fn navicat_partitioned_table_column_query_rewrites_any_conkey() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE ods_access_log(
+                id BIGINT,
+                user_id VARCHAR,
+                access_time TIMESTAMP,
+                content TEXT
+             )
+             PARTITION BY RANGE (access_time)
+             WITH (partition_unit = 'day', retention = '30')",
+        )
+        .unwrap();
+
+        let sql = rewrite_sql(
+            r#"
+            SELECT attname AS name,
+                   attrelid AS tid,
+                   coalesce((
+                       SELECT attnum = ANY (conkey)
+                       FROM pg_constraint
+                       WHERE contype = 'p' AND conrelid = attrelid
+                   ), false) AS primarykey,
+                   not(attnotnull) AS allownull,
+                   EXISTS(
+                       SELECT seq.oid
+                       FROM pg_class seq
+                       LEFT JOIN pg_depend dep ON seq.oid = dep.objid
+                       WHERE seq.relkind = 'S'::char
+                         AND dep.refobjsubid = attnum
+                         AND dep.refobjid = attrelid
+                   ) AS autoincrement
+            FROM pg_attribute
+            WHERE attisdropped = false
+              AND attrelid = (
+                  SELECT tbl.oid
+                  FROM pg_class tbl
+                  LEFT JOIN pg_namespace sch ON tbl.relnamespace = sch.oid
+                  WHERE tbl.relkind = 'p'::"char"
+                    AND tbl.relname = 'ods_access_log'
+                    AND sch.nspname = 'main'
+              )
+              AND (attname = 'id' OR attname = 'user_id' OR attname = 'access_time' OR attname = 'content')
+            "#,
+        )
+        .expect("rewrite navicat partitioned table column query");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
+
+        let rows = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("name")?,
+                    row.get::<_, bool>("primarykey")?,
+                    row.get::<_, bool>("allownull")?,
+                    row.get::<_, bool>("autoincrement")?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|(_, primarykey, _, autoincrement)| {
+            !primarykey && !autoincrement
+        }));
+    }
+
+    #[test]
+    fn navicat_column_detail_query_rewrites_collation_sequence_and_pg_casts() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE kline_day(
+                code VARCHAR NOT NULL,
+                bar_time TIMESTAMP NOT NULL,
+                close DOUBLE,
+                PRIMARY KEY(code, bar_time)
+             )",
+        )
+        .unwrap();
+
+        let sql = rewrite_sql(
+            r#"
+            SELECT col.table_schema AS schema_name,
+                   col.table_name,
+                   col.column_name,
+                   col.character_maximum_length,
+                   col.is_nullable,
+                   col.numeric_precision,
+                   col.numeric_scale,
+                   col.datetime_precision,
+                   col.ordinal_position,
+                   b.atttypmod,
+                   b.attndims,
+                   col.data_type AS col_type,
+                   et.typelem,
+                   et.typlen,
+                   et.typtype,
+                   nbt.nspname AS elem_schema,
+                   bt.typname AS elem_name,
+                   b.atttypid,
+                   col.udt_schema,
+                   col.udt_name,
+                   col.domain_catalog,
+                   col.domain_schema,
+                   col.domain_name,
+                   col_description(c.oid, col.ordinal_position) AS comment,
+                   col.column_default AS col_default,
+                   col.is_identity,
+                   col.identity_generation,
+                   col.identity_start,
+                   col.identity_increment,
+                   col.identity_maximum,
+                   col.identity_minimum,
+                   seq.seqcache::information_schema.character_data AS identity_cache,
+                   col.identity_cycle,
+                   col.is_generated,
+                   col.generation_expression,
+                   b.attacl,
+                   colnsp.nspname AS collation_schema_name,
+                   coll.collname,
+                   c.relkind,
+                   b.attfdwoptions AS foreign_options
+            FROM information_schema.columns AS col
+            LEFT JOIN pg_namespace ns ON ns.nspname = col.table_schema
+            LEFT JOIN pg_class c ON col.table_name = c.relname AND c.relnamespace = ns.oid
+            LEFT JOIN pg_attrdef a ON c.oid = a.adrelid AND col.ordinal_position = a.adnum
+            LEFT JOIN pg_attribute b ON b.attrelid = c.oid AND b.attname = col.column_name
+            LEFT JOIN pg_type et ON et.oid = b.atttypid
+            LEFT JOIN pg_collation coll ON coll.oid = b.attcollation
+            LEFT JOIN pg_namespace colnsp ON coll.collnamespace = colnsp.oid
+            LEFT JOIN (
+                pg_depend dep
+                JOIN pg_sequence seq
+                  ON dep.classid = 'pg_class'::regclass::oid
+                 AND dep.objid = seq.seqrelid
+                 AND dep.deptype = 'i'::"char"
+            )
+              ON dep.refclassid = 'pg_class'::regclass::oid
+             AND dep.refobjid = c.oid
+             AND dep.refobjsubid = b.attnum
+            LEFT JOIN pg_type bt ON et.typelem = bt.oid
+            LEFT JOIN pg_namespace nbt ON bt.typnamespace = nbt.oid
+            WHERE col.table_schema = 'main'
+              AND col.table_name = 'kline_day'
+            ORDER BY col.table_schema, col.table_name, col.ordinal_position
+            "#,
+        )
+        .expect("rewrite navicat column detail query");
+        assert_eq!(route_sql(&sql).unwrap().route, SqlRoute::Read);
+
+        let rows = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("column_name")?,
+                    row.get::<_, String>("col_type")?,
+                    row.get::<_, String>("relkind")?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0],
+            (
+                "code".to_string(),
+                "character varying".to_string(),
+                "r".to_string()
+            )
+        );
     }
 
     #[test]
@@ -506,7 +780,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows[0].0, "postgres");
+        assert_eq!(rows[0].0, "memory");
         assert_eq!(rows[0].1, "main");
         assert_eq!(rows[0].2, "kline_day");
         assert_eq!(rows[0].3, "code");
@@ -631,6 +905,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(info_index_count, 0);
+        let navicat_style_info_sql = rewrite_sql(
+            "SELECT table_catalog, table_schema, table_name
+             FROM information_schema.tables
+             WHERE table_catalog = current_database() AND table_schema = 'main'",
+        )
+        .expect("rewrite current database information_schema.tables sql");
+        let table_count_for_current_database: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({navicat_style_info_sql})"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count_for_current_database, 2);
         let view_type: String = conn
             .query_row(
                 &format!("SELECT table_type FROM ({info_sql}) WHERE table_name = 'kline_view'"),
@@ -821,7 +1109,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(table_catalog, "postgres");
+        assert_eq!(table_catalog, "memory");
         assert_eq!(constraint_type, "PRIMARY KEY");
         assert_eq!(enforced, "YES");
 

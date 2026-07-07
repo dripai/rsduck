@@ -45,26 +45,27 @@ fn rewrite_catalog_relation_references(sql: &str) -> Option<String> {
             _ => {}
         }
 
-        let keyword_len = if keyword_at(sql, idx, "from") {
+        let relation_start = if let Some(keyword_len) = if keyword_at(sql, idx, "from") {
             Some(4)
         } else if keyword_at(sql, idx, "join") {
             Some(4)
         } else {
             None
-        };
-        let Some(keyword_len) = keyword_len else {
+        } {
+            skip_ascii_ws(sql, idx + keyword_len)
+        } else if byte == b'(' {
+            skip_ascii_ws(sql, idx + 1)
+        } else {
             idx += 1;
             continue;
         };
-
-        let relation_start = skip_ascii_ws(sql, idx + keyword_len);
         let Some((relation_key, relation_end)) = parse_relation_reference(sql, relation_start)
         else {
-            idx += keyword_len;
+            idx += 1;
             continue;
         };
         let Some(projection_sql) = catalog_projection_sql(&relation_key, sql) else {
-            idx += keyword_len;
+            idx += 1;
             continue;
         };
 
@@ -158,6 +159,156 @@ fn rewrite_catalog_function_calls(sql: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn rewrite_pg_any_membership(sql: &str) -> Option<String> {
+    let bytes = sql.as_bytes();
+    let mut output = String::with_capacity(sql.len());
+    let mut idx = 0;
+    let mut last = 0;
+    let mut replaced = false;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_single {
+            if byte == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            b'"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if !keyword_at(sql, idx, "any") {
+            idx += 1;
+            continue;
+        }
+        let open_idx = skip_ascii_ws(sql, idx + 3);
+        if bytes.get(open_idx) != Some(&b'(') {
+            idx += 1;
+            continue;
+        }
+        let Some(close_idx) = find_closing_paren(sql, open_idx) else {
+            idx += 1;
+            continue;
+        };
+        let any_arg = sql[open_idx + 1..close_idx].trim();
+        if !is_constraint_key_expr(any_arg) {
+            idx = close_idx + 1;
+            continue;
+        }
+
+        let Some((lhs_start, lhs_end)) = lhs_for_any_equality(sql, idx) else {
+            idx = close_idx + 1;
+            continue;
+        };
+        let lhs = sql[lhs_start..lhs_end].trim();
+        output.push_str(&sql[last..lhs_start]);
+        output.push_str(&format!(
+            "COALESCE(list_position(string_split(CAST({any_arg} AS VARCHAR), ','), CAST({lhs} AS VARCHAR)), 0) > 0"
+        ));
+        last = close_idx + 1;
+        idx = close_idx + 1;
+        replaced = true;
+    }
+
+    if replaced {
+        output.push_str(&sql[last..]);
+        Some(output)
+    } else {
+        None
+    }
+}
+
+fn rewrite_pg_type_casts(sql: &str) -> Option<String> {
+    let rewritten = replace_ignore_ascii_case(sql, "::information_schema.character_data", "::VARCHAR");
+    let rewritten = replace_ignore_ascii_case(&rewritten, "'pg_class'::regclass::oid", "'1259'");
+    let rewritten = replace_ignore_ascii_case(
+        &rewritten,
+        "'pg_catalog.pg_class'::regclass::oid",
+        "'1259'",
+    );
+    (rewritten != sql).then_some(rewritten)
+}
+
+fn replace_ignore_ascii_case(input: &str, needle: &str, replacement: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let end = idx + needle.len();
+        if end <= input.len() && input[idx..end].eq_ignore_ascii_case(needle) {
+            output.push_str(replacement);
+            idx = end;
+        } else {
+            let ch = input[idx..].chars().next().expect("valid char boundary");
+            output.push(ch);
+            idx += ch.len_utf8();
+        }
+    }
+    output
+}
+
+fn lhs_for_any_equality(sql: &str, any_idx: usize) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut eq_idx = any_idx.checked_sub(1)?;
+    while eq_idx > 0 && bytes[eq_idx].is_ascii_whitespace() {
+        eq_idx -= 1;
+    }
+    if bytes.get(eq_idx) != Some(&b'=') {
+        return None;
+    }
+
+    let mut lhs_end = eq_idx;
+    while lhs_end > 0 && bytes[lhs_end - 1].is_ascii_whitespace() {
+        lhs_end -= 1;
+    }
+    let mut lhs_start = lhs_end;
+    while lhs_start > 0 {
+        let byte = bytes[lhs_start - 1];
+        if is_ident_byte(byte) || byte == b'.' {
+            lhs_start -= 1;
+        } else {
+            break;
+        }
+    }
+    (lhs_start < lhs_end).then_some((lhs_start, lhs_end))
+}
+
+fn is_constraint_key_expr(expr: &str) -> bool {
+    let normalized = expr.trim().trim_matches('"').to_ascii_lowercase();
+    normalized == "conkey"
+        || normalized == "confkey"
+        || normalized.ends_with(".conkey")
+        || normalized.ends_with(".confkey")
 }
 
 fn catalog_function_at<'a>(sql: &'a str, idx: usize) -> Option<(&'a str, usize)> {
@@ -274,6 +425,7 @@ fn catalog_projection_sql(relation_key: &str, source_sql: &str) -> Option<String
         }
         "information_schema.columns" => Some(information_schema_columns_sql()),
         "pg_catalog.pg_index" => Some(pg_index_sql()),
+        "pg_catalog.pg_inherits" => Some(pg_inherits_sql()),
         "pg_catalog.pg_constraint" => Some(pg_constraint_sql()),
         "information_schema.table_constraints" => Some(information_schema_table_constraints_sql()),
         "information_schema.key_column_usage" => Some(information_schema_key_column_usage_sql()),
@@ -297,6 +449,11 @@ fn catalog_projection_sql(relation_key: &str, source_sql: &str) -> Option<String
         "pg_catalog.pg_roles" | "pg_catalog.pg_authid" => Some(pg_roles_sql()),
         "pg_catalog.pg_settings" => Some(pg_settings_sql()),
         "pg_catalog.pg_proc" => Some(pg_proc_sql()),
+        "pg_catalog.pg_tablespace" => Some(pg_tablespace_sql()),
+        "pg_catalog.pg_collation" => Some(pg_collation_sql()),
+        "pg_catalog.pg_sequence" => Some(pg_sequence_sql()),
+        "pg_catalog.pg_foreign_table" => empty_pg_catalog_sql(" from pg_foreign_table"),
+        "pg_catalog.pg_foreign_server" => empty_pg_catalog_sql(" from pg_foreign_server"),
         "pg_catalog.pg_trigger" => empty_pg_catalog_sql(" from pg_trigger"),
         "pg_catalog.pg_extension" => empty_pg_catalog_sql(" from pg_extension"),
         "pg_catalog.pg_policy" => empty_pg_catalog_sql(" from pg_policy"),
@@ -390,4 +547,3 @@ fn normalize_sql(sql: &str) -> String {
         .join(" ")
         .to_ascii_lowercase()
 }
-

@@ -1,5 +1,7 @@
 # rsduck DuckDB 连接池与单写多读架构设计
 
+项目设计总览见 [rsduck-design.md](rsduck-design.md)。本文是执行层深入设计，重点描述 DuckDB 连接、worker、队列、快照和分区调度。
+
 本文描述 rsduck 当前的 DuckDB 内存库架构。rsduck 在进程内运行一个共享的 in-memory DuckDB，并通过 PostgreSQL wire 协议和 Web SQL 控制台对外提供访问能力。
 
 核心设计目标：
@@ -421,6 +423,8 @@ SaveSnapshot
 `init_sql` 是没有快照时的初始化入口。
 
 ```toml
+log_level = "info"
+
 [db]
 init_sql = "init.sql"
 ```

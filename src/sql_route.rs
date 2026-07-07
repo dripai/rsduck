@@ -1,4 +1,4 @@
-use sqlparser::ast::Statement;
+use sqlparser::ast::{LimitClause, Statement};
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 
@@ -50,6 +50,30 @@ pub fn is_pageable_sql(sql: &str) -> Result<bool, String> {
     }
 
     Ok(matches!(statements.first(), Some(Statement::Query(_))))
+}
+
+pub fn has_top_level_limit_or_offset(sql: &str) -> Result<bool, String> {
+    let dialect = DuckDbDialect {};
+    let statements =
+        Parser::parse_sql(&dialect, sql).map_err(|e| format!("sql parse failed: {e}"))?;
+
+    let Some(Statement::Query(query)) = statements.first() else {
+        return Ok(false);
+    };
+    if statements.len() != 1 {
+        return Ok(false);
+    }
+
+    Ok(query.fetch.is_some()
+        || matches!(
+            &query.limit_clause,
+            Some(LimitClause::LimitOffset { limit, offset, .. })
+                if limit.is_some() || offset.is_some()
+        )
+        || matches!(
+            &query.limit_clause,
+            Some(LimitClause::OffsetCommaLimit { .. })
+        ))
 }
 
 fn statement_route(statement: &Statement) -> SqlRoute {
@@ -208,7 +232,7 @@ fn statement_command(statement: &Statement) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{route_sql, SqlRoute};
+    use super::{has_top_level_limit_or_offset, route_sql, SqlRoute};
 
     #[test]
     fn routes_select_and_show_to_read() {
@@ -282,6 +306,24 @@ mod tests {
         assert!(super::is_pageable_sql("WITH x AS (SELECT 1) SELECT * FROM x").unwrap());
         assert!(!super::is_pageable_sql("SHOW TABLES").unwrap());
         assert!(!super::is_pageable_sql("DESCRIBE kline_day").unwrap());
+    }
+
+    #[test]
+    fn detects_only_top_level_limit_or_offset() {
+        assert!(has_top_level_limit_or_offset("SELECT * FROM kline_day LIMIT 10").unwrap());
+        assert!(has_top_level_limit_or_offset("SELECT * FROM kline_day OFFSET 10").unwrap());
+        assert!(
+            has_top_level_limit_or_offset("SELECT * FROM kline_day LIMIT 10 OFFSET 20").unwrap()
+        );
+        assert!(
+            has_top_level_limit_or_offset("SELECT * FROM kline_day FETCH FIRST 10 ROWS ONLY")
+                .unwrap()
+        );
+        assert!(!has_top_level_limit_or_offset(
+            "SELECT * FROM (SELECT * FROM kline_day LIMIT 10) t"
+        )
+        .unwrap());
+        assert!(!has_top_level_limit_or_offset("SHOW TABLES").unwrap());
     }
 
     #[test]

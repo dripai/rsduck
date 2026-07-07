@@ -25,7 +25,12 @@ rsduck is an in-memory database middleware service built on DuckDB. It starts an
 
 ## Architecture
 
-Architecture design reference: [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md).
+Architecture overview: [rsduck project design](doc/rsduck-design.md).
+
+Deep dives:
+
+- [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md)
+- [PG-compatible catalog design](doc/rsduck_pg_catalog_design.md)
 
 ## Quick Start
 
@@ -49,6 +54,8 @@ CREATE TABLE IF NOT EXISTS kline_day (
 The repository sample `rsduck.toml` points `[db].init_sql` to this file:
 
 ```toml
+log_level = "info"
+
 [db]
 init_sql = "init.sql"
 ```
@@ -220,6 +227,8 @@ python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query
 The default configuration file is `rsduck.toml`:
 
 ```toml
+log_level = "info"
+
 [db]
 init_sql = "init.sql"
 read_workers = 4
@@ -258,6 +267,7 @@ Startup restore order:
 
 Parameter reference, in `rsduck.toml` order:
 
+- 【log_level】Global logging level. Valid values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. Use `debug` while diagnosing PostgreSQL client compatibility so PG wire connection and SQL events are printed.
 - 【db.init_sql】Path to the initialization SQL file. It runs only when startup does not restore a snapshot. Use it to create tables, indexes, views, or seed data. Set it to `""` to start empty.
 - 【db.read_workers】Number of dedicated DuckDB read worker threads. Read SQL is distributed across these workers. Increase it for more concurrent reads, while keeping memory and CPU capacity in mind.
 - 【db.write_queue_size】Bounded queue size for write SQL. Writes are serialized through the single write worker; when this queue is full, new write requests fail quickly instead of blocking indefinitely.

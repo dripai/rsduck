@@ -11,6 +11,21 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
+use tracing_subscriber::filter::LevelFilter;
+
+fn parse_log_level(level: &str) -> LevelFilter {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "trace" => LevelFilter::TRACE,
+        "debug" => LevelFilter::DEBUG,
+        "info" => LevelFilter::INFO,
+        "warn" | "warning" => LevelFilter::WARN,
+        "error" => LevelFilter::ERROR,
+        "off" => LevelFilter::OFF,
+        _ => panic!(
+            "invalid log_level in rsduck.toml: {level}; expected trace, debug, info, warn, error, or off"
+        ),
+    }
+}
 
 fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u64) {
     let base = Path::new(base_dir);
@@ -43,12 +58,13 @@ fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u6
 
 #[tokio::main]
 async fn main() {
+    let cfg = config::load_config();
     tracing_subscriber::fmt()
+        .with_max_level(parse_log_level(&cfg.log_level))
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
         .init();
 
-    let cfg = config::load_config();
     info!("Config loaded");
     db::validate_snapshot_prefix(&cfg.snapshot.prefix)
         .unwrap_or_else(|e| panic!("invalid snapshot prefix: {e}"));

@@ -24,7 +24,9 @@ pub fn rewrite_sql(sql: &str) -> Option<String> {
     }
 
     let rewritten = rewrite_catalog_relation_references(sql)?;
-    Some(rewrite_catalog_function_calls(&rewritten).unwrap_or_else(|| rewritten.to_string()))
+    let rewritten = rewrite_catalog_function_calls(&rewritten).unwrap_or(rewritten);
+    let rewritten = rewrite_pg_any_membership(&rewritten).unwrap_or(rewritten);
+    Some(rewrite_pg_type_casts(&rewritten).unwrap_or(rewritten))
 }
 
 include!("show.rs");
