@@ -275,7 +275,7 @@ fn new_session_token() -> String {
     token
 }
 
-const CODEMIRROR_JS: &str = include_str!("../web/dist/codemirror.bundle.js");
+const CODEMIRROR_JS: &str = include_str!("../../web/dist/codemirror.bundle.js");
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html>

@@ -1,0 +1,91 @@
+fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str)]) -> String {
+    let selects = partitions
+        .iter()
+        .map(|(partition_schema, partition_name)| {
+            format!(
+                "SELECT * FROM {}",
+                quote_qualified(partition_schema, partition_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "CREATE OR REPLACE VIEW {} AS {selects}",
+        quote_qualified(schema, table)
+    )
+}
+
+
+fn refresh_partition_entrypoint(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    relname: &str,
+) -> Result<(), String> {
+    let partitions = active_partition_children(conn, parent_oid)?;
+    let active_physical = partitions
+        .iter()
+        .map(|partition| (partition.schema.as_str(), partition.relname.as_str()))
+        .collect::<Vec<_>>();
+    let sql = partition_entrypoint_sql(schema, relname, &active_physical);
+    rebuild_partition_entrypoint(conn, parent_oid, &sql)?;
+    sync_partition_dependencies(conn, parent_oid, &partitions)?;
+    Ok(())
+}
+
+fn sync_partition_dependencies(
+    conn: &Connection,
+    parent_oid: i64,
+    partitions: &[ActivePartitionChild],
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.pg_depend \
+             WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
+               AND refclassid = {PG_CLASS_CLASSOID}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete partition dependencies failed: {e}"))?;
+    for partition in partitions {
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+                 VALUES ({PG_CLASS_CLASSOID}, {parent_oid}, 0, {PG_CLASS_CLASSOID}, {}, 0, 'n')",
+                partition.child_oid
+            ),
+            [],
+        )
+        .map_err(|e| format!("write partition dependency failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn update_partition_stats(
+    conn: &Connection,
+    parent_oid: i64,
+    partition_value: &str,
+    inserted_rows: i64,
+    route_ts: Option<NaiveDateTime>,
+) -> Result<(), String> {
+    let ts_update = route_ts
+        .map(|dt| {
+            format!(
+                ", min_ts = CASE WHEN min_ts IS NULL OR TIMESTAMP '{dt}' < min_ts THEN TIMESTAMP '{dt}' ELSE min_ts END, \
+                 max_ts = CASE WHEN max_ts IS NULL OR TIMESTAMP '{dt}' > max_ts THEN TIMESTAMP '{dt}' ELSE max_ts END"
+            )
+        })
+        .unwrap_or_default();
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_partition \
+             SET row_count = row_count + {inserted_rows}{ts_update} \
+             WHERE parent_relid = {parent_oid} AND partition_value = '{}'",
+            sql_string(partition_value)
+        ),
+        [],
+    )
+    .map_err(|e| format!("update partition stats failed: {e}"))?;
+    Ok(())
+}
+

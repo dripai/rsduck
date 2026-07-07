@@ -2,9 +2,8 @@ mod catalog;
 mod config;
 mod db;
 mod pg_compat;
-mod pg_server;
+mod server;
 mod sql_route;
-mod web_server;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -84,7 +83,7 @@ async fn main() {
 
     let pg_bind = cfg.pg.bind.clone();
     let pg_task = tokio::spawn(async move {
-        pg_server::start_pg_server(&pg_bind).await;
+        server::start_pg_server(&pg_bind).await;
     });
 
     let snap_dir = cfg.snapshot.dir.clone();
@@ -106,7 +105,7 @@ async fn main() {
     });
 
     if cfg.web.enabled {
-        let app = web_server::web_router(cfg.snapshot.dir.clone(), cfg.snapshot.prefix.clone());
+        let app = server::web_router(cfg.snapshot.dir.clone(), cfg.snapshot.prefix.clone());
         let shutdown_snapshot_dir = cfg.snapshot.dir.clone();
         let shutdown_snapshot_prefix = cfg.snapshot.prefix.clone();
         let listener = TokioTcpListener::bind(&cfg.web.bind)

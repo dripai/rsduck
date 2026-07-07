@@ -83,6 +83,131 @@ SQL classifier / catalog query rewriter / DDL planner
 
 `duckdb_tables()`、`duckdb_columns()` 等 DuckDB introspection function 只能用于启动校验和诊断，不作为长期事实来源。正常运行时，catalog 查询必须从 `rsduck_catalog.*` 派生。
 
+### 3.1 代码模块拆分目标
+
+当前实现必须按功能边界拆分，避免把 catalog、PG 兼容、连接池和 Web UI 继续堆在少数大文件中。拆分目标不是改变产品能力，而是让本文定义的 catalog contract 可以被稳定实现、测试和维护。
+
+拆分原则：
+
+- 保留稳定门面 API。外部模块仍通过 `catalog::bootstrap_fresh`、`catalog::validate_after_start`、`catalog::execute_catalog_aware_write_as`、`catalog::authorize_sql`、`catalog::authenticate_user` 等入口访问 catalog。
+- 子模块按运行时职责拆分，不按文档章节机械拆分。
+- catalog mutation 的事务入口必须保持集中，不能让各功能模块绕过 `run_catalog_tx`、journal、epoch 和 checksum 约束。
+- 分区维护、用户管理、权限管理、DDL mutation 都必须复用同一套 catalog mutation contract。
+- `pg_compat` 只负责兼容结果、SQL rewrite 和只读 projection SQL，不直接修改 catalog。
+- `db` 只负责 DuckDB 连接池、worker、SQL 调度、snapshot 和 restore，不承载 catalog 业务规则。
+
+目标目录结构：
+
+```text
+src/
+  catalog/
+    mod.rs
+    model.rs
+    bootstrap.rs
+    storage.rs
+    journal.rs
+    oid.rs
+    checksum.rs
+    recovery.rs
+    guard.rs
+    lookup.rs
+    sql_util.rs
+
+    auth/
+      mod.rs
+      password.rs
+      principal.rs
+      authorize.rs
+      privilege.rs
+
+    mutation/
+      mod.rs
+      executor.rs
+      parser.rs
+      schema.rs
+      relation.rs
+      table.rs
+      view.rs
+      index.rs
+      alter_table.rs
+      drop.rs
+      comment.rs
+      user_role.rs
+      grant.rs
+
+    partition/
+      mod.rs
+      create.rs
+      routing.rs
+      entrypoint.rs
+      maintenance.rs
+      repair.rs
+      retention.rs
+      validation.rs
+
+  pg_compat/
+    mod.rs
+    rewrite.rs
+    show.rs
+    functions.rs
+    settings.rs
+    projections.rs
+    parser.rs
+
+  db/
+    mod.rs
+    engine.rs
+    worker.rs
+    execute.rs
+    snapshot.rs
+    restore.rs
+
+  server/
+    pg.rs
+    web.rs
+```
+
+模块职责：
+
+| 模块 | 职责 |
+|------|------|
+| `catalog::model` | catalog 内部结构体、常量、对象类型、状态枚举。 |
+| `catalog::bootstrap` | 创建 catalog storage、默认 schema、默认 `admin/admin`、内置 role 和 bootstrap rows。 |
+| `catalog::storage` | `rsduck_catalog.*` 物理表 DDL。 |
+| `catalog::journal` | journal 写入、完成、失败标记和 mutation 审计入口。 |
+| `catalog::oid` | 持久化 OID 分配。 |
+| `catalog::checksum` | catalog checksum 计算、刷新和校验。 |
+| `catalog::recovery` | 启动恢复、一致性校验、unavailable 标记和分区 entrypoint 重建。 |
+| `catalog::guard` | reserved schema guard、外部 SQL 防护、catalog projection 拦截。 |
+| `catalog::lookup` | namespace、relation、column、user、role、privilege 等 catalog 查询 helper。 |
+| `catalog::sql_util` | SQL 字符串转义、标识符引用、简单 SQL token 解析、通用 parser helper。 |
+| `catalog::auth` | 密码 hash、认证、session principal、授权动作、权限函数计算。 |
+| `catalog::mutation` | catalog mutation 统一执行入口，以及 schema/table/view/index/alter/drop/comment/user/role/grant/revoke 等受控变更。 |
+| `catalog::partition` | range partitioned table 创建、写入路由、null partition、entrypoint、retention、repair 和维护任务。 |
+| `pg_compat` | `pg_catalog` / `information_schema` projection、兼容函数、`SHOW PARTITIONS`、settings、SQL rewrite。 |
+| `db` | DuckDB in-memory engine、read/write worker、SQL 执行、snapshot、restore。 |
+| `server` | PG wire 和 Web HTTP 入口。 |
+
+拆分顺序约束：
+
+```text
+1. 拆 pg_compat：纯 rewrite / projection / compat result，风险最低。
+2. 拆 catalog 公共底座：model、sql_util、lookup、storage、journal、oid、checksum。
+3. 拆 catalog auth：认证、principal、授权、权限函数。
+4. 拆 catalog mutation：保持 executor 统一事务入口，再拆各 mutation handler。
+5. 拆 catalog partition：保持 mutation contract 不变，再拆 create/routing/entrypoint/maintenance/repair/retention。
+6. 拆 db：engine、worker、execute、snapshot、restore。
+7. 拆 server：pg 和 web；Web 静态资源是否外置可单独处理。
+```
+
+每一步拆分都必须满足：
+
+- 对外 public API 尽量不变。
+- `cargo fmt` 必须通过。
+- `cargo test` 必须通过。
+- 不得在拆分过程中改变 catalog 行为语义。
+- 不得因为移动模块引入 fallback、兼容分支或重复实现。
+
 ## 4. Schema 规则
 
 保留 schema：
