@@ -1061,7 +1061,100 @@ rs_user_role:
 - 管理员应在生产部署后通过管理命令或 Web 控制台自行修改默认密码。
 - 默认管理员账号不得被删除；如需禁用，必须先确保存在另一个 active admin 用户。
 
-### 8.3 授权动作
+### 8.3 密码修改与离线重置
+
+密码修改分两类：正常在线修改和忘记 `admin` 密码后的离线重置。
+
+#### 8.3.1 正常在线修改
+
+管理员已登录时，使用标准 catalog mutation：
+
+```sql
+ALTER USER admin PASSWORD 'new_password';
+```
+
+执行规则：
+
+1. SQL router 将该语句归类为 write。
+2. 请求进入 single write worker。
+3. `catalog::mutation::user_role` 校验调用者拥有 `manage_user` 权限。
+4. 使用当前密码 hash 算法生成新 `password_hash`。
+5. 在 `run_catalog_tx` 中写入 `rs_catalog_journal pending`。
+6. 更新 `rsduck_catalog.rs_user.password_hash` 和 `password_algo`。
+7. `finish_journal` 将 journal 标记为 applied。
+8. 推进 `catalog_epoch` 并刷新 `catalog_checksum`。
+
+禁止事项：
+
+- 禁止直接 `UPDATE rsduck_catalog.rs_user`。
+- 禁止把明文密码写入 `rsduck.toml`。
+- 禁止保留旧密码兼容字段或临时 fallback 认证路径。
+
+#### 8.3.2 忘记 admin 密码时的离线重置
+
+当 `admin` 密码遗忘且没有其他 active admin 用户时，目标产品能力是离线维护命令：
+
+```powershell
+rsduck reset-admin-password
+rsduck reset-admin-password --password admin123
+```
+
+不传 `--password` 时固定把内置 `admin` 用户密码重置为 `admin`；传入 `--password` 时重置为指定密码。它是离线工具能力，不启动 rsduck 服务，不监听 PG/Web 端口，不启动 read/write/snapshot workers。它只在当前进程内打开临时 DuckDB connection。
+
+执行前置条件：
+
+- rsduck 正常服务必须已停止。
+- 命令必须先尝试获取 rsduck 进程独占锁。
+- 进程锁被占用时必须失败，不得继续操作 snapshot。
+- `.rsduck.lock` 可获取但文件已存在时，视为 stale lock；命令可读取 PID 诊断信息后覆盖。
+
+`.rsduck.lock` 保存 JSON 诊断信息：
+
+```json
+{
+  "pid": 12345,
+  "mode": "service",
+  "started_at": "2026-07-07T21:40:00+08:00",
+  "workdir": "D:\\workspace\\12.aiwork\\demo\\rsduck",
+  "pg_bind": "127.0.0.1:15432",
+  "web_bind": "127.0.0.1:8080"
+}
+```
+
+rsduck 当前是单进程服务，PG wire、Web、read/write worker、snapshot worker 和 partition maintenance 都在同一个 OS 进程内，因此 lock 中只记录一个 PID。跨进程独占锁可由 `.rsduck.lock.guard` 持有，`.rsduck.lock` 本身用于在锁被占用时读取 PID 和启动参数。
+
+判断服务是否仍在运行必须依赖文件独占锁；PID 只用于错误提示和人工诊断，不能作为唯一判断依据。
+
+离线重置流程：
+
+1. 读取当前目录 `rsduck.toml`。
+2. 定位 `snapshot.dir` 下最新正式 snapshot 目录。
+3. 拒绝使用 `.tmp` snapshot 目录。
+4. 打开临时 DuckDB connection。
+5. `IMPORT DATABASE '<latest_snapshot>'`。
+6. 校验 `rsduck_snapshot_manifest.json` 和 catalog checksum。
+7. 调用受控 catalog mutation 等价逻辑执行 `ALTER USER admin PASSWORD '<new_password>'`。
+8. `EXPORT DATABASE` 到新的 `.tmp` snapshot 目录。
+9. 写入新的 snapshot manifest。
+10. 原子 rename 为新的正式 snapshot 目录。
+11. 保留原 snapshot，不覆盖、不原地修改。
+
+禁止事项：
+
+- 禁止直接修改 `rsduck_catalog_rs_user.parquet`。
+- 禁止只修改 `rs_user` 而不刷新 `rs_catalog_version.catalog_checksum`。
+- 禁止手写 manifest checksum。
+- 禁止在 rsduck 服务仍持锁运行时执行重置。
+- 禁止重置不存在的用户；当前离线重置只面向内置 `admin`。
+
+失败处理：
+
+- 导入 snapshot 失败：不生成新 snapshot。
+- manifest 或 checksum 校验失败：拒绝重置。
+- 写 `.tmp` snapshot 失败：删除本次 `.tmp` 目录，保留原 snapshot。
+- rename 失败：保留原 snapshot，并返回明确错误。
+
+### 8.4 授权动作
 
 SQL router 在执行前必须把请求归类成 action：
 
@@ -1087,7 +1180,7 @@ SQL router 在执行前必须把请求归类成 action：
 - 对 managed physical partition table 的直接读写默认拒绝，即使用户拥有 parent 分区表权限。
 - 分区表查询入口的权限继承自 parent relation，不继承 physical partition table。
 
-### 8.4 Reserved Schema 权限
+### 8.5 Reserved Schema 权限
 
 reserved schema 权限规则：
 
@@ -1104,7 +1197,7 @@ reserved schema 权限规则：
 - 内部 mutation planner 不通过用户 SQL 权限绕行，而是使用 internal execution context。
 - 诊断模式查询必须写审计日志。
 
-### 8.5 PG 兼容投影
+### 8.6 PG 兼容投影
 
 PG 兼容对象必须反映 rsduck session 用户，但不实现完整 PG ACL：
 
@@ -1114,7 +1207,7 @@ PG 兼容对象必须反映 rsduck session 用户，但不实现完整 PG ACL：
 - `pg_roles` 和 `pg_user` 从 `rs_user` / `rs_role` 派生兼容行。
 - `relowner`、`nspowner` 当前只用于兼容展示，不作为授权判断来源。
 
-### 8.6 审计要求
+### 8.7 审计要求
 
 以下操作必须记录审计事件：
 

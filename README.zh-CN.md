@@ -174,17 +174,25 @@ HTTP 返回格式：
 
 ### 使用 PostgreSQL wire 协议访问
 
-支持 PG 协议的工具和驱动可以连接 PG wire 端口。当前适配器不做账号鉴权，`database`、`user`、`password` 只是兼容字段，不代表 DuckDB 内部有多个数据库或用户。
+支持 PG 协议的工具和驱动可以连接 PG wire 端口。PG wire 和 Web 控制台共用 catalog 认证。首次 bootstrap 默认管理员为 `admin/admin`，生产使用前应主动修改密码。
 
 连接参数：
 
 ```text
 host:     127.0.0.1
 port:     15432
-database: postgres
-user:     postgres
-password: 任意值或留空
+database: memory
+user:     admin
+password: admin
 ```
+
+登录后正常修改密码：
+
+```sql
+ALTER USER admin PASSWORD 'new_password';
+```
+
+如果忘记 `admin` 密码且没有其他 active admin 用户，在服务停止后执行 `rsduck reset-admin-password --password <new_password>`。不传 `--password` 时默认把 `admin` 密码重置为 `admin`。该命令会获取 `.rsduck.lock`，把最新 snapshot 导入临时 DuckDB connection，通过 catalog mutation 重置密码，再导出新 snapshot。不要直接修改 snapshot 中的 parquet 文件。
 
 Python `psycopg` 示例：
 
@@ -198,9 +206,9 @@ import psycopg
 conn = psycopg.connect(
     host="127.0.0.1",
     port=15432,
-    dbname="postgres",
-    user="postgres",
-    password="postgres",
+    dbname="memory",
+    user="admin",
+    password="admin",
 )
 
 with conn:

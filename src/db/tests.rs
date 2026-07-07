@@ -1,12 +1,13 @@
 mod tests {
     use super::{
         execute_sql_blocking, export_database_sql, find_latest_snapshot_dir, import_database_sql,
-        parse_snapshot_dir_timestamp, restore_or_initialize, save_snapshot_blocking, SqlResult,
-        SNAPSHOT_MANIFEST_FILE,
+        parse_snapshot_dir_timestamp, reset_admin_password_offline, restore_or_initialize,
+        save_snapshot_blocking, SqlResult, SNAPSHOT_MANIFEST_FILE,
     };
     use crate::sql_route::route_sql;
     use duckdb::Connection;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn parse_snapshot_dir_timestamp_only_accepts_final_snapshot_dirs() {
@@ -234,6 +235,40 @@ mod tests {
         let restored = Connection::open_in_memory().unwrap();
         let err = restore_or_initialize(&restored, Some(&snapshot), "").unwrap_err();
         assert!(err.contains("snapshot manifest catalog_checksum mismatch"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reset_admin_password_offline_exports_new_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "rsduck_reset_admin_password_{}_{}",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(&conn, "ALTER USER admin PASSWORD 'secret'")
+            .unwrap();
+        assert!(crate::catalog::authenticate_user(&conn, "admin", "secret").is_ok());
+        assert!(crate::catalog::authenticate_user(&conn, "admin", "admin").is_err());
+
+        let original = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let reset =
+            reset_admin_password_offline(dir.to_str().unwrap(), "rsduck", "admin123").unwrap();
+
+        assert_ne!(PathBuf::from(&original), PathBuf::from(&reset));
+        assert!(PathBuf::from(&original).exists());
+        assert!(PathBuf::from(&reset).exists());
+
+        let restored = Connection::open_in_memory().unwrap();
+        restore_or_initialize(&restored, Some(&reset), "").unwrap();
+        assert!(crate::catalog::authenticate_user(&restored, "admin", "admin123").is_ok());
+        assert!(crate::catalog::authenticate_user(&restored, "admin", "secret").is_err());
 
         let _ = std::fs::remove_dir_all(dir);
     }

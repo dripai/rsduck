@@ -2,6 +2,7 @@ mod catalog;
 mod config;
 mod db;
 mod pg_compat;
+mod process_lock;
 mod server;
 mod sql_route;
 
@@ -12,6 +13,9 @@ use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
 use tracing_subscriber::filter::LevelFilter;
+
+const PROCESS_LOCK_FILE: &str = ".rsduck.lock";
+const DEFAULT_RESET_ADMIN_PASSWORD_VALUE: &str = "admin";
 
 fn parse_log_level(level: &str) -> LevelFilter {
     match level.trim().to_ascii_lowercase().as_str() {
@@ -25,6 +29,27 @@ fn parse_log_level(level: &str) -> LevelFilter {
             "invalid log_level in rsduck.toml: {level}; expected trace, debug, info, warn, error, or off"
         ),
     }
+}
+
+fn init_tracing(log_level: &str) {
+    tracing_subscriber::fmt()
+        .with_max_level(parse_log_level(log_level))
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+        .init();
+}
+
+fn process_lock_payload(cfg: &config::RsduckConfig, mode: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pid": std::process::id(),
+        "mode": mode,
+        "started_at": chrono::Local::now().to_rfc3339(),
+        "workdir": std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string()),
+        "pg_bind": cfg.pg.bind.as_str(),
+        "web_bind": cfg.web.bind.as_str(),
+    })
 }
 
 fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u64) {
@@ -58,16 +83,35 @@ fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u6
 
 #[tokio::main]
 async fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
     let cfg = config::load_config();
-    tracing_subscriber::fmt()
-        .with_max_level(parse_log_level(&cfg.log_level))
-        .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-        .init();
+    init_tracing(&cfg.log_level);
+
+    if let Some(command) = args.first() {
+        if command != "reset-admin-password" {
+            eprintln!("usage: rsduck reset-admin-password [--password <password>]");
+            std::process::exit(2);
+        }
+        let password = match parse_reset_admin_password_args(&args[1..]) {
+            Ok(password) => password,
+            Err(e) => {
+                eprintln!("{e}");
+                eprintln!("usage: rsduck reset-admin-password [--password <password>]");
+                std::process::exit(2);
+            }
+        };
+        run_reset_admin_password(&cfg, &password);
+        return;
+    }
 
     info!("Config loaded");
     db::validate_snapshot_prefix(&cfg.snapshot.prefix)
         .unwrap_or_else(|e| panic!("invalid snapshot prefix: {e}"));
+    let _process_lock = process_lock::ProcessLock::acquire(
+        PROCESS_LOCK_FILE,
+        process_lock_payload(&cfg, "service"),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let snapshot_dir = if cfg.snapshot.restore_on_startup {
         db::find_latest_snapshot_dir(&cfg.snapshot.dir, &cfg.snapshot.prefix)
@@ -146,6 +190,73 @@ async fn main() {
     }
     pg_task.abort();
     db::shutdown_workers();
+}
+
+fn parse_reset_admin_password_args(args: &[String]) -> Result<String, String> {
+    match args {
+        [] => Ok(DEFAULT_RESET_ADMIN_PASSWORD_VALUE.to_string()),
+        [flag, password] if flag == "--password" => {
+            if password.is_empty() {
+                Err("reset admin password cannot be empty".into())
+            } else {
+                Ok(password.clone())
+            }
+        }
+        _ => Err("invalid reset-admin-password arguments".into()),
+    }
+}
+
+fn run_reset_admin_password(cfg: &config::RsduckConfig, password: &str) {
+    if let Err(e) = db::validate_snapshot_prefix(&cfg.snapshot.prefix) {
+        eprintln!("invalid snapshot prefix: {e}");
+        std::process::exit(1);
+    }
+    let _process_lock = match process_lock::ProcessLock::acquire(
+        PROCESS_LOCK_FILE,
+        process_lock_payload(cfg, "reset-admin-password"),
+    ) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    match db::reset_admin_password_offline(&cfg.snapshot.dir, &cfg.snapshot.prefix, password) {
+        Ok(path) => {
+            println!("admin password reset; new snapshot: {}", path);
+        }
+        Err(e) => {
+            eprintln!("reset admin password failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod main_tests {
+    use super::{parse_reset_admin_password_args, DEFAULT_RESET_ADMIN_PASSWORD_VALUE};
+
+    #[test]
+    fn reset_admin_password_args_default_to_admin() {
+        let args: Vec<String> = vec![];
+        assert_eq!(
+            parse_reset_admin_password_args(&args).unwrap(),
+            DEFAULT_RESET_ADMIN_PASSWORD_VALUE
+        );
+    }
+
+    #[test]
+    fn reset_admin_password_args_accept_password_flag() {
+        let args = vec!["--password".to_string(), "admin123".to_string()];
+        assert_eq!(parse_reset_admin_password_args(&args).unwrap(), "admin123");
+    }
+
+    #[test]
+    fn reset_admin_password_args_reject_unknown_shape() {
+        let args = vec!["--password".to_string()];
+        assert!(parse_reset_admin_password_args(&args).is_err());
+    }
 }
 
 async fn wait_for_shutdown(snapshot_dir: String, snapshot_prefix: String) {

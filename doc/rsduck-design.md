@@ -46,11 +46,59 @@ password = admin
 role     = admin
 ```
 
-rsduck 不强制首次登录修改密码。生产部署时管理员应主动执行：
+rsduck 不强制首次登录修改密码。生产部署时管理员应主动修改默认密码。
+
+#### 2.1.1 正常修改密码
+
+管理员仍可登录时，直接通过 Web SQL Console 或 PG wire 执行：
 
 ```sql
 ALTER USER admin PASSWORD 'new_password';
 ```
+
+该语句必须走 single write worker 和 catalog mutation 流程，更新 `rsduck_catalog.rs_user.password_hash`，写入 catalog journal，推进 catalog epoch，并刷新 catalog checksum。禁止直接写 `rsduck_catalog.rs_user`。
+
+#### 2.1.2 忘记 admin 密码时的离线重置
+
+如果忘记 `admin` 密码，且没有其他 active admin 用户，不能通过在线 SQL 重置。目标维护方式是提供离线命令：
+
+```powershell
+rsduck reset-admin-password
+rsduck reset-admin-password --password admin123
+```
+
+不传 `--password` 时固定把内置 `admin` 用户密码重置为 `admin`；传入 `--password` 时重置为指定密码。命令不启动 PG wire、不启动 Web、不启动 read/write/snapshot worker，只在当前进程内创建一个临时 DuckDB connection 处理最新 snapshot。
+
+离线重置流程必须满足：
+
+1. 先停止正在运行的 rsduck 服务。
+2. 命令启动后尝试获取 rsduck 进程独占锁，并读取或写入 `.rsduck.lock`。
+3. 如果锁被占用，说明 rsduck 仍在运行，命令必须失败并提示锁文件中的 PID。
+4. 如果锁文件存在但可独占获取，视为 stale lock，可读取其中 PID 用于提示，然后覆盖。
+5. 读取 `rsduck.toml`，找到 `snapshot.dir` 下最新正式 snapshot。
+6. 打开临时 DuckDB connection，`IMPORT DATABASE` 最新 snapshot。
+7. 校验 snapshot manifest 和 catalog checksum。
+8. 执行受控 catalog mutation：`ALTER USER admin PASSWORD '<new_password>'`。
+9. `EXPORT DATABASE` 到新的 `.tmp` snapshot 目录。
+10. 写入新的 `rsduck_snapshot_manifest.json`。
+11. 原子 rename 为新的正式 snapshot 目录，不覆盖原 snapshot。
+
+`.rsduck.lock` 保存 JSON 诊断信息，至少包含：
+
+```json
+{
+  "pid": 12345,
+  "mode": "service",
+  "started_at": "2026-07-07T21:40:00+08:00",
+  "workdir": "D:\\workspace\\12.aiwork\\demo\\rsduck",
+  "pg_bind": "127.0.0.1:15432",
+  "web_bind": "127.0.0.1:8080"
+}
+```
+
+rsduck 当前是单进程服务，PG wire、Web、read/write worker、snapshot worker 和 partition maintenance 都在同一个 OS 进程内，因此 lock 中只记录一个 PID。跨进程独占锁可由 `.rsduck.lock.guard` 持有，`.rsduck.lock` 本身用于在锁被占用时读取 PID 和启动参数。
+
+判断服务是否停止必须以文件独占锁为准，PID 只用于诊断提示。禁止直接修改 snapshot 中的 parquet 文件，因为需要同步 catalog journal、catalog epoch、catalog checksum 和 snapshot manifest。
 
 ### 2.2 对象模型
 

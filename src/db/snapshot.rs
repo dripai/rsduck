@@ -202,6 +202,46 @@ fn value_ref_to_string(value: ValueRef<'_>) -> String {
     }
 }
 
+pub fn reset_admin_password_offline(
+    snapshot_dir: &str,
+    snapshot_prefix: &str,
+    new_password: &str,
+) -> Result<String, String> {
+    validate_snapshot_prefix(snapshot_prefix)?;
+    let snapshot = find_latest_snapshot_dir(snapshot_dir, snapshot_prefix)
+        .ok_or_else(|| format!("no snapshot found in {snapshot_dir} with prefix {snapshot_prefix}"))?;
+    let snapshot_path = PathBuf::from(&snapshot);
+    let snapshot_name = snapshot_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .ok_or_else(|| format!("snapshot path has no file name: {}", snapshot_path.display()))?;
+    if snapshot_name.ends_with(".tmp") {
+        return Err(format!(
+            "refuse to reset admin password from temp snapshot: {}",
+            snapshot_path.display()
+        ));
+    }
+
+    let conn =
+        Connection::open_in_memory().map_err(|e| format!("open maintenance DuckDB failed: {e}"))?;
+    prepare_snapshot_parquet_extension(&conn, snapshot_path.parent())?;
+    conn.execute_batch(&import_database_sql(&snapshot))
+        .map_err(|e| format!("import snapshot failed: {e}"))?;
+    validate_snapshot_manifest(&conn, &snapshot_path)?;
+    crate::catalog::validate_after_start(&conn)?;
+
+    let sql = format!(
+        "ALTER USER admin PASSWORD '{}'",
+        escape_sql_string(new_password)
+    );
+    let affected = crate::catalog::execute_catalog_aware_write(&conn, &sql)?;
+    if affected != Some(1) {
+        return Err("admin password reset did not update exactly one user".into());
+    }
+
+    save_snapshot_blocking(&conn, snapshot_dir, snapshot_prefix)
+}
+
 pub fn find_latest_snapshot_dir(snapshot_dir: &str, snapshot_prefix: &str) -> Option<String> {
     let base = Path::new(snapshot_dir);
     if !base.exists() {
@@ -267,4 +307,3 @@ pub fn validate_snapshot_prefix(prefix: &str) -> Result<(), String> {
 fn escape_sql_string(input: &str) -> String {
     input.replace('\'', "''")
 }
-

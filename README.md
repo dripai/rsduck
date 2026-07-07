@@ -174,17 +174,25 @@ Response shape:
 
 ### PostgreSQL Wire Protocol
 
-PG-compatible tools and drivers can connect through the PG wire endpoint. The current adapter does not enforce authentication; `dbname`, `user`, and `password` are compatibility fields, not separate DuckDB databases or users.
+PG-compatible tools and drivers can connect through the PG wire endpoint. PG wire and the Web console share catalog authentication. The default bootstrap administrator is `admin/admin`; change it before production use.
 
 Connection values:
 
 ```text
 host:     127.0.0.1
 port:     15432
-database: postgres
-user:     postgres
-password: any value or empty
+database: memory
+user:     admin
+password: admin
 ```
+
+Change the password after login:
+
+```sql
+ALTER USER admin PASSWORD 'new_password';
+```
+
+If the `admin` password is forgotten and no other active admin user exists, run `rsduck reset-admin-password --password <new_password>` while the service is stopped. Without `--password`, the command resets `admin` back to password `admin`. The command obtains `.rsduck.lock`, imports the latest snapshot into a temporary DuckDB connection, resets the password through catalog mutation, and exports a new snapshot. Do not edit snapshot parquet files directly.
 
 Python example with `psycopg`:
 
@@ -198,9 +206,9 @@ import psycopg
 conn = psycopg.connect(
     host="127.0.0.1",
     port=15432,
-    dbname="postgres",
-    user="postgres",
-    password="postgres",
+    dbname="memory",
+    user="admin",
+    password="admin",
 )
 
 with conn:
