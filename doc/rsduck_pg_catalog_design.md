@@ -1,6 +1,6 @@
 # rsduck PG-compatible Catalog 落地设计
 
-项目设计总览见 [rsduck-design.md](rsduck-design.md)。本文是 catalog 深入设计，重点描述 PG-compatible 元数据模型、账号权限、metadata mutation、兼容查询和恢复校验。
+项目设计总览已合并到 [README.zh-CN.md](../README.zh-CN.md#架构设计与项目设计)。本文是 catalog 深入设计，重点描述 PG-compatible 元数据模型、账号权限、metadata mutation、兼容查询和恢复校验。
 
 本文定义 rsduck 的元数据 catalog 方案。它不是 PostgreSQL 内核复刻方案，也不是 MySQL catalog 兼容方案；它是 rsduck 当前目标版本必须稳定实现的产品契约。
 

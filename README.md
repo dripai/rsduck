@@ -2,7 +2,7 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-rsduck is an in-memory database middleware service built on DuckDB. It starts an in-process DuckDB memory database, exposes a PostgreSQL wire protocol endpoint and a Web SQL console, and persists the in-memory database through directory-based snapshots.
+rsduck is a Rust service that wraps DuckDB as an in-memory database middleware. It starts an in-process DuckDB memory database, exposes a PostgreSQL wire protocol endpoint and a Web SQL console, and persists the in-memory database through directory-based snapshots.
 
 ## Features
 
@@ -22,15 +22,6 @@ rsduck is an in-memory database middleware service built on DuckDB. It starts an
 - In-memory analysis for K-line data, factors, logs, metrics, and monitoring data.
 - Local development, strategy backtesting, data experiments, and temporary data APIs.
 - In-memory database services that need fast startup and low-frequency snapshot persistence.
-
-## Architecture
-
-Architecture overview: [rsduck project design](doc/rsduck-design.md).
-
-Deep dives:
-
-- [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md)
-- [PG-compatible catalog design](doc/rsduck_pg_catalog_design.md)
 
 ## Quick Start
 
@@ -98,20 +89,15 @@ PG wire: 127.0.0.1:15432
 Web:     http://127.0.0.1:8080
 ```
 
-## Web Console
+## Ways To Use
+
+### Web Console
 
 The Web console shows database tables on the left, a SQL editor on the top-right, and query results below. It also provides pagination, manual snapshots, and a draggable splitter between the editor and result panel.
 
 ![rsduck Web SQL Console](console.png)
 
-## Programmatic Access
-
-rsduck exposes two programmatic entry points:
-
-- HTTP SQL API at `http://127.0.0.1:8080/sql`
-- PostgreSQL wire protocol at `127.0.0.1:15432`
-
-### HTTP API With Python Standard Library
+### HTTP SQL API
 
 This example has no third-party Python dependency. It sends complete SQL text to the Web API and can query or write rows:
 
@@ -295,7 +281,9 @@ Parameter reference, in `rsduck.toml` order:
 - 【web.enabled】Whether to start the Web SQL console.
 - 【web.bind】Listen address for the Web console and HTTP SQL API.
 
-## Snapshots
+## Snapshots And Recovery
+
+At startup, when `restore_on_startup = true`, rsduck selects the latest finalized snapshot directory from `snapshot.dir` and runs `IMPORT DATABASE`; `db.init_sql` runs only when no snapshot exists.
 
 rsduck uses directory snapshots to persist the full DuckDB database:
 
@@ -321,6 +309,70 @@ snapshot/rsduck_yyyyMMdd_HHmmss
 ```
 
 The `Save Snapshot` button in the top-right corner of the Web console can trigger a manual snapshot.
+
+## Architecture
+
+rsduck wraps DuckDB in a Rust service instead of reimplementing a PostgreSQL kernel. DuckDB remains the only SQL execution engine; rsduck adds network endpoints, a PG-compatible catalog, authentication, execution scheduling, managed range partitions, and snapshot-based recovery around it.
+
+Runtime model:
+
+- One shared in-memory DuckDB database is opened in the process.
+- Internal DuckDB connections are cloned from the same base connection with `try_clone()`.
+- Read SQL is dispatched to read worker threads, while writes, DDL, catalog mutations, and partition maintenance are serialized through one write worker.
+- Snapshot work uses a dedicated snapshot worker and DuckDB `EXPORT DATABASE` / `IMPORT DATABASE` directory snapshots.
+- Network services, session handling, scheduled tasks, and the Web console run outside the DuckDB worker threads.
+
+User-facing model:
+
+- Web SQL Console: `http://127.0.0.1:8080`.
+- PostgreSQL wire endpoint: `127.0.0.1:15432`.
+- HTTP SQL API: `http://127.0.0.1:8080/sql`.
+- Default bootstrap administrator: `admin/admin`; change it before production use.
+- Business objects are created in the DuckDB default schema `main` unless another schema is explicitly used.
+- `pg_catalog.*` and `information_schema.*` are read-only compatibility projections.
+- `rsduck_catalog.*` and `rsduck_internal.*` are internal schemas and are not normal application surfaces.
+
+Developer module map:
+
+```text
+src/
+  main.rs              process startup, schedulers, service lifecycle
+  config.rs            configuration loading and defaults
+  sql_route.rs         SQL read/write routing
+
+  db/                  DuckDB engine, workers, SQL execution, snapshot, restore
+  catalog/             catalog source of truth, auth, mutation, partition, recovery
+  pg_compat/           pg_catalog / information_schema rewrite and compatibility
+  server/              PostgreSQL wire server and Web server
+```
+
+Request flow:
+
+```text
+client
+  -> server authenticates user
+  -> db::execute_sql_as(username, sql)
+  -> sql_route::route_sql
+  -> read worker or write worker
+  -> pg_compat rewrite if metadata query
+  -> catalog guard and authorization
+  -> DuckDB execute/query
+  -> result returned to client
+```
+
+Core design boundaries:
+
+- DuckDB is the only SQL execution engine.
+- `rsduck_catalog.*` is the metadata source of truth.
+- Writes, DDL, and catalog mutations must go through the single write worker.
+- `pg_catalog.*` and `information_schema.*` are read-only projections derived from rsduck catalog metadata.
+- Unsupported compatibility behavior returns a clear error or a defined empty result; rsduck does not silently fall back to DuckDB internal catalog tables.
+- Snapshot restore reads only the latest finalized snapshot directory and does not automatically try older snapshots.
+
+Deep-dive design docs:
+
+- [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md)
+- [PG-compatible catalog design](doc/rsduck_pg_catalog_design.md)
 
 ## Example: Real-Time K-Line Writes And Queries
 
