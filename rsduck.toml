@@ -1,4 +1,4 @@
-log_level = "debug"
+log_level = "info"
 
 [db]
 init_sql = "init.sql"
@@ -20,4 +20,4 @@ bind = "127.0.0.1:15432"
 
 [web]
 enabled = true
-bind = "127.0.0.1:8080"
+bind = "127.0.0.1:15433"
