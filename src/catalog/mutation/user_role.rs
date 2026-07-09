@@ -16,6 +16,7 @@ pub(in crate::catalog) fn create_user_account(
         .next()
         .ok_or_else(|| "CREATE USER requires PASSWORD '<password>'".to_string())?;
     let password_hash = hash_password(&password)?;
+    let mysql_auth_string = mysql_caching_sha2_verifier(&password);
 
     run_catalog_tx(conn, || {
         if user_exists(conn, username)? {
@@ -28,10 +29,11 @@ pub(in crate::catalog) fn create_user_account(
         let journal_id = insert_journal(conn, "create_user", user_id, sql)?;
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, status, is_builtin, created_at, updated_at, last_login_at) \
-                 VALUES ({user_id}, '{}', '{}', 'argon2id', 'active', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+                "INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, mysql_auth_plugin, mysql_auth_string, status, is_builtin, created_at, updated_at, last_login_at) \
+                 VALUES ({user_id}, '{}', '{}', 'argon2id', '{MYSQL_CACHING_SHA2_PASSWORD}', '{}', 'active', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
                 sql_string(username),
-                sql_string(&password_hash)
+                sql_string(&password_hash),
+                sql_string(&mysql_auth_string)
             ),
             [],
         )
@@ -146,6 +148,7 @@ pub(in crate::catalog) fn alter_user_account(
         .as_ref()
         .ok_or_else(|| "ALTER USER PASSWORD NULL is not supported".to_string())?;
     let password_hash = hash_password(password)?;
+    let mysql_auth_string = mysql_caching_sha2_verifier(password);
 
     run_catalog_tx(conn, || {
         let Some(user_id) = user_id_by_name_opt(conn, username)? else {
@@ -158,9 +161,10 @@ pub(in crate::catalog) fn alter_user_account(
         conn.execute(
             &format!(
                 "UPDATE rsduck_catalog.rs_user \
-                 SET password_hash = '{}', password_algo = 'argon2id', updated_at = CURRENT_TIMESTAMP \
+                 SET password_hash = '{}', password_algo = 'argon2id', mysql_auth_plugin = '{MYSQL_CACHING_SHA2_PASSWORD}', mysql_auth_string = '{}', updated_at = CURRENT_TIMESTAMP \
                  WHERE user_id = {user_id}",
-                sql_string(&password_hash)
+                sql_string(&password_hash),
+                sql_string(&mysql_auth_string)
             ),
             [],
         )

@@ -1,3 +1,4 @@
+use crate::auth::{AuthRequest, AuthenticatedPrincipal};
 use crate::sql_route::SqlRoute;
 use duckdb::Connection;
 use std::sync::atomic::AtomicUsize;
@@ -26,6 +27,7 @@ pub enum SqlType {
     Timestamp,
     TimestampTz,
     Uuid,
+    Json,
 }
 
 impl SqlType {
@@ -45,6 +47,7 @@ impl SqlType {
             SqlType::Timestamp => 1114,
             SqlType::TimestampTz => 1184,
             SqlType::Uuid => 2950,
+            SqlType::Json => 25,
         }
     }
 }
@@ -68,6 +71,67 @@ impl SqlColumn {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlValue {
+    Null,
+    Bool(bool),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
+    Decimal(rust_decimal::Decimal),
+    NumericText(String),
+    Text(String),
+    Bytes(Vec<u8>),
+    Date(chrono::NaiveDate),
+    Time(chrono::NaiveTime),
+    Timestamp(chrono::NaiveDateTime),
+    TimestampTz(chrono::DateTime<chrono::Utc>),
+    Uuid(uuid::Uuid),
+    Json(serde_json::Value),
+    Interval { months: i32, days: i32, nanos: i64 },
+}
+
+impl SqlValue {
+    pub fn text_value(&self) -> Option<String> {
+        match self {
+            SqlValue::Null => None,
+            SqlValue::Bool(value) => Some(if *value { "t" } else { "f" }.to_string()),
+            SqlValue::Int16(value) => Some(value.to_string()),
+            SqlValue::Int32(value) => Some(value.to_string()),
+            SqlValue::Int64(value) => Some(value.to_string()),
+            SqlValue::Float32(value) => Some(value.to_string()),
+            SqlValue::Float64(value) => Some(value.to_string()),
+            SqlValue::Decimal(value) => Some(value.to_string()),
+            SqlValue::NumericText(value) => Some(value.clone()),
+            SqlValue::Text(value) => Some(value.clone()),
+            SqlValue::Bytes(value) => Some(format!("\\x{}", hex_encode(value))),
+            SqlValue::Date(value) => Some(value.format("%Y-%m-%d").to_string()),
+            SqlValue::Time(value) => Some(value.format("%H:%M:%S%.6f").to_string()),
+            SqlValue::Timestamp(value) => Some(value.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
+            SqlValue::TimestampTz(value) => {
+                Some(value.format("%Y-%m-%d %H:%M:%S%.6f%:z").to_string())
+            }
+            SqlValue::Uuid(value) => Some(value.to_string()),
+            SqlValue::Json(value) => Some(value.to_string()),
+            SqlValue::Interval {
+                months,
+                days,
+                nanos,
+            } => Some(format!("{months} months {days} days {nanos} ns")),
+        }
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub enum SqlResult {
     Query {
@@ -84,7 +148,7 @@ pub enum SqlResult {
 pub enum SqlTypedResult {
     Query {
         columns: Vec<SqlColumn>,
-        rows: Vec<Vec<Option<String>>>,
+        rows: Vec<Vec<SqlValue>>,
     },
     Execute {
         command: String,
@@ -106,7 +170,7 @@ impl From<SqlTypedResult> for SqlResult {
                     .into_iter()
                     .map(|row| {
                         row.into_iter()
-                            .map(|cell| cell.unwrap_or_default())
+                            .map(|cell| cell.text_value().unwrap_or_default())
                             .collect()
                     })
                     .collect(),
@@ -131,9 +195,8 @@ pub(super) enum SqlCommand {
         resp: oneshot::Sender<DbResult<SqlTypedResult>>,
     },
     Authenticate {
-        username: String,
-        password: String,
-        resp: oneshot::Sender<DbResult<()>>,
+        request: AuthRequest,
+        resp: oneshot::Sender<DbResult<AuthenticatedPrincipal>>,
     },
     Describe {
         username: String,

@@ -187,6 +187,8 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             username VARCHAR NOT NULL UNIQUE,
             password_hash VARCHAR NOT NULL,
             password_algo VARCHAR NOT NULL,
+            mysql_auth_plugin VARCHAR NOT NULL,
+            mysql_auth_string VARCHAR NOT NULL,
             status VARCHAR NOT NULL,
             is_builtin BOOLEAN NOT NULL,
             created_at TIMESTAMP NOT NULL,

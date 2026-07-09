@@ -36,6 +36,8 @@ pub(super) fn information_schema_schemata_sql() -> String {
         current_database() AS default_character_set_catalog,
         'pg_catalog' AS default_character_set_schema,
         'UTF8' AS default_character_set_name,
+        'utf8mb4_general_ci' AS default_collation_name,
+        'NO' AS default_encryption,
         '' AS sql_path,
         COALESCE(d.description, '') AS description
     FROM rsduck_catalog.pg_namespace n
@@ -156,11 +158,31 @@ pub(super) fn information_schema_tables_sql() -> String {
         CASE WHEN c.relkind IN ('r', 'p') THEN 'YES' ELSE 'NO' END AS is_insertable_into,
         'NO' AS is_typed,
         '' AS commit_action,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 'InnoDB' END AS engine,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 10 END AS version,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 'Dynamic' END AS row_format,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE CAST(c.reltuples AS BIGINT) END AS table_rows,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 0 END AS avg_row_length,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 0 END AS data_length,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 0 END AS max_data_length,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 0 END AS index_length,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 0 END AS data_free,
+        CAST(NULL AS BIGINT) AS auto_increment,
+        CAST(NULL AS VARCHAR) AS create_time,
+        CAST(NULL AS VARCHAR) AS update_time,
+        CAST(NULL AS VARCHAR) AS check_time,
+        CASE WHEN c.relkind = 'v' THEN NULL ELSE 'utf8mb4_general_ci' END AS table_collation,
+        CAST(NULL AS BIGINT) AS checksum,
+        '' AS create_options,
+        CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE COALESCE(d.description, '') END AS table_comment,
+        COALESCE(d.description, '') AS description,
         c.status AS rsduck_status,
         c.error_message AS rsduck_error_message
     FROM rsduck_catalog.pg_class c
     JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
+    LEFT JOIN rsduck_catalog.pg_description d
+      ON d.objoid = c.oid AND d.objsubid = 0
     WHERE c.status IN ('active', 'unavailable')
       AND COALESCE(ext.visibility, 'user') = 'user'
       AND c.relkind IN ('r', 'p', 'v')

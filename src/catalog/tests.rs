@@ -1,8 +1,10 @@
 use super::{
     allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, evaluate_privilege_function,
     execute_catalog_aware_write, execute_catalog_aware_write_as, hash_password, namespace_oid,
-    relation_oid, sql_string, validate_after_start, verify_password, PG_CLASS_CLASSOID,
+    relation_oid, sql_string, validate_after_start, verify_password, CatalogAuthenticator,
+    PG_CLASS_CLASSOID,
 };
+use crate::auth::{AuthCredential, AuthProtocol, AuthRequest, BlockingAuthenticator};
 use duckdb::Connection;
 
 #[test]
@@ -74,6 +76,45 @@ fn authenticate_default_admin_uses_catalog_password_hash() {
 
     let err = super::authenticate_user(&conn, "admin", "wrong").unwrap_err();
     assert!(err.contains("invalid username or password"));
+}
+
+#[test]
+fn catalog_authenticator_uses_protocol_neutral_request() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    let authenticator = CatalogAuthenticator;
+    let principal = authenticator
+        .authenticate(
+            &conn,
+            &AuthRequest::cleartext(AuthProtocol::PgWire, "admin", "admin"),
+        )
+        .unwrap();
+    assert_eq!(principal.user_id, 10);
+    assert_eq!(principal.username, "admin");
+
+    let err = authenticator
+        .authenticate(
+            &conn,
+            &AuthRequest::cleartext(AuthProtocol::MySqlWire, "admin", "admin"),
+        )
+        .unwrap_err();
+    assert_eq!(err, "invalid username or password");
+
+    let err = authenticator
+        .authenticate(
+            &conn,
+            &AuthRequest {
+                protocol: AuthProtocol::MySqlWire,
+                username: "admin".to_string(),
+                credential: AuthCredential::MySqlNativePassword {
+                    nonce: vec![1, 2, 3],
+                    response: vec![4, 5, 6],
+                },
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err, "invalid username or password");
 }
 
 #[test]
@@ -1793,12 +1834,15 @@ fn reserved_schema_write_is_rejected() {
 
 fn insert_test_user(conn: &Connection, user_id: i64, username: &str) -> Result<(), String> {
     let password_hash = hash_password("pw")?;
+    let mysql_auth_string = super::mysql_caching_sha2_verifier("pw");
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, status, is_builtin, created_at, updated_at, last_login_at) \
-             VALUES ({user_id}, '{}', '{}', 'argon2id', 'active', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
+            "INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, mysql_auth_plugin, mysql_auth_string, status, is_builtin, created_at, updated_at, last_login_at) \
+             VALUES ({user_id}, '{}', '{}', 'argon2id', '{}', '{}', 'active', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)",
             sql_string(username),
-            sql_string(&password_hash)
+            sql_string(&password_hash),
+            super::MYSQL_CACHING_SHA2_PASSWORD,
+            sql_string(&mysql_auth_string)
         ),
         [],
     )

@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::{AuthRequest, AuthenticatedPrincipal};
 use std::sync::Arc;
 
 impl DbHandle {
@@ -138,8 +139,8 @@ impl DbHandle {
             .await
     }
 
-    pub async fn authenticate_user(&self, username: String, password: String) -> DbResult<()> {
-        self.engine.authenticate(username, password).await
+    pub async fn authenticate(&self, request: AuthRequest) -> DbResult<AuthenticatedPrincipal> {
+        self.engine.authenticate(request).await
     }
 
     pub async fn run_partition_maintenance(&self) -> DbResult<SqlResult> {
@@ -202,11 +203,10 @@ impl DbEngine {
         }
     }
 
-    async fn authenticate(&self, username: String, password: String) -> DbResult<()> {
+    async fn authenticate(&self, request: AuthRequest) -> DbResult<AuthenticatedPrincipal> {
         let (resp_tx, resp_rx) = oneshot::channel();
         match self.write_tx.try_send(SqlCommand::Authenticate {
-            username,
-            password,
+            request,
             resp: resp_tx,
         }) {
             Ok(()) => resp_rx

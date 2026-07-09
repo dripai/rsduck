@@ -6,9 +6,9 @@
   <executable>%BASE%\rsduck.exe</executable>
   <workingdirectory>%BASE%</workingdirectory>
   <startmode>Automatic</startmode>
-  <stoptimeout>30sec</stoptimeout>
+  <stoptimeout>120sec</stoptimeout>
   <preshutdown>true</preshutdown>
-  <preshutdownTimeout>30sec</preshutdownTimeout>
+  <preshutdownTimeout>120sec</preshutdownTimeout>
   <hidewindow>true</hidewindow>
 
   <logpath>%BASE%\logs</logpath>

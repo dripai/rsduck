@@ -115,7 +115,7 @@ pub(super) fn catalog_checksum_queries() -> &'static [(&'static str, &'static st
         ),
         (
             "rs_user",
-            "SELECT user_id, username, password_hash, password_algo, status, is_builtin \
+            "SELECT user_id, username, password_hash, password_algo, mysql_auth_plugin, mysql_auth_string, status, is_builtin \
              FROM rsduck_catalog.rs_user ORDER BY user_id",
         ),
         (

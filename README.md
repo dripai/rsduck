@@ -2,12 +2,13 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-rsduck is a Rust service that wraps DuckDB as an in-memory database middleware. It starts an in-process DuckDB memory database, exposes a PostgreSQL wire protocol endpoint and a Web SQL console, and persists the in-memory database through directory-based snapshots.
+rsduck is a Rust service that wraps DuckDB as an in-memory database middleware. It starts an in-process DuckDB memory database, exposes PostgreSQL wire, MySQL wire, and a Web SQL console, and persists the in-memory database through directory-based snapshots.
 
 ## Features
 
 - In-memory DuckDB: data is mainly read and written in memory after startup, suitable for low-latency analytical queries.
 - PostgreSQL wire protocol: external tools can connect to rsduck through a PG-compatible endpoint.
+- MySQL wire protocol: external tools can connect through a MySQL-compatible endpoint that reuses the same authentication, authorization, and SQL execution path.
 - Web SQL console: browse tables, execute SQL, page through results, and trigger snapshots from the browser.
 - Multi-read single-write architecture: read requests are dispatched to read workers, while write requests go through one write worker to reduce read/write blocking.
 - Directory snapshots: uses DuckDB `EXPORT DATABASE` / `IMPORT DATABASE` to save and restore the full database.
@@ -18,7 +19,7 @@ rsduck is a Rust service that wraps DuckDB as an in-memory database middleware. 
 ## Use Cases
 
 - Temporary analytical stores with high-frequency writes and real-time queries.
-- Lightweight PG-compatible data services without deploying a full database server.
+- Lightweight PG-compatible or MySQL-compatible data services without deploying a full database server.
 - In-memory analysis for K-line data, factors, logs, metrics, and monitoring data.
 - Local development, strategy backtesting, data experiments, and temporary data APIs.
 - In-memory database services that need fast startup and low-frequency snapshot persistence.
@@ -91,6 +92,7 @@ Default endpoints:
 
 ```text
 PG wire: 127.0.0.1:15432
+MySQL:   127.0.0.1:13306
 Web:     http://127.0.0.1:8080
 ```
 
@@ -226,6 +228,26 @@ For long-running load tests, use:
 python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query-workers 4 --query-interval 0.2
 ```
 
+### MySQL Wire Protocol
+
+When `mysql.enabled = true`, MySQL-compatible tools and drivers can connect through the MySQL wire endpoint. MySQL wire, PG wire, and the Web console are only entry adapters; after authentication they share `DbHandle`, authorization checks, typed SQL execution, and result metadata.
+
+Connection values:
+
+```text
+host:     127.0.0.1
+port:     13306
+database: memory
+user:     admin
+password: admin
+```
+
+The MySQL endpoint currently declares `caching_sha2_password`, matching the MySQL 8 default authentication plugin. It does not automatically downgrade to `mysql_native_password` based on client version or client name. `CREATE USER` and `ALTER USER PASSWORD` maintain both the Argon2 verifier used by Web / PG and the verifier used by MySQL. Existing users without a MySQL verifier need a password reset before they can log in through MySQL wire.
+
+Supported commands include `COM_QUERY`, `COM_PING`, `COM_INIT_DB`, `COM_QUIT`, `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, `COM_STMT_CLOSE`, and `COM_STMT_RESET`. Prepared statements use MySQL binary results and encode scalar values directly from `SqlValue`. DuckDB complex types such as `LIST`, `STRUCT`, `MAP`, `ARRAY`, `UNION`, and `VARIANT` are exposed as JSON; `INTERVAL` and `TIMETZ` are exposed as stable text types.
+
+The first MySQL wire version does not support TLS. Bind it to `127.0.0.1` or a trusted private network address.
+
 ## Configuration
 
 The default configuration file is `rsduck.toml`:
@@ -262,6 +284,10 @@ max_jobs_per_tick = 100
 [pg]
 bind = "127.0.0.1:15432"
 
+[mysql]
+enabled = true
+bind = "127.0.0.1:13306"
+
 [web]
 enabled = true
 bind = "127.0.0.1:8080"
@@ -297,6 +323,8 @@ Parameter reference, in `rsduck.toml` order:
 - 【partition.verify_interval_secs】Reserved interval for partition verification scans.
 - 【partition.max_jobs_per_tick】Reserved limit for maintenance jobs submitted by one scheduler tick.
 - 【pg.bind】Listen address for the PostgreSQL wire endpoint. Keep `127.0.0.1` for local-only access; use an explicit LAN address only when external clients should connect.
+- 【mysql.enabled】Whether to start the MySQL wire endpoint. The built-in default is `false`; the repository sample `rsduck.toml` enables it for local client testing.
+- 【mysql.bind】Listen address for the MySQL wire endpoint. The default is `127.0.0.1:13306` to avoid colliding with a local MySQL server on `3306`.
 - 【web.enabled】Whether to start the Web SQL console.
 - 【web.bind】Listen address for the Web console and HTTP SQL API.
 
@@ -331,7 +359,7 @@ The `Save Snapshot` button in the top-right corner of the Web console can trigge
 
 ## Architecture
 
-rsduck wraps DuckDB in a Rust service instead of reimplementing a PostgreSQL kernel. DuckDB remains the only SQL execution engine; rsduck adds network endpoints, a PG-compatible catalog, authentication, execution scheduling, managed range partitions, and snapshot-based recovery around it.
+rsduck wraps DuckDB in a Rust service instead of reimplementing a PostgreSQL or MySQL kernel. DuckDB remains the only SQL execution engine; rsduck adds network endpoints, a PG-compatible catalog, authentication, execution scheduling, managed range partitions, and snapshot-based recovery around it.
 
 Runtime model:
 
@@ -345,6 +373,7 @@ User-facing model:
 
 - Web SQL Console: `http://127.0.0.1:8080`.
 - PostgreSQL wire endpoint: `127.0.0.1:15432`.
+- MySQL wire endpoint: `127.0.0.1:13306`.
 - HTTP SQL API: `http://127.0.0.1:8080/sql`.
 - Default bootstrap administrator: `admin/admin`; change it before production use.
 - Business objects are created in the DuckDB default schema `main` unless another schema is explicitly used.
@@ -362,14 +391,14 @@ src/
   db/                  DuckDB engine, workers, SQL execution, snapshot, restore
   catalog/             catalog source of truth, auth, mutation, partition, recovery
   pg_compat/           pg_catalog / information_schema rewrite and compatibility
-  server/              PostgreSQL wire server and Web server
+  server/              PostgreSQL wire, MySQL wire, and Web server
 ```
 
 Request flow:
 
 ```text
 client
-  -> Web API or PG wire entry authenticates user and handles protocol encoding
+  -> Web API, PG wire, or MySQL wire entry authenticates user and handles protocol encoding
   -> db::execute_typed_sql_as(username, sql) / db::describe_sql_with_params_as(username, sql, params)
   -> sql_route::route_sql
   -> read worker or write worker
@@ -377,14 +406,14 @@ client
   -> catalog guard and authorization
   -> DuckDB execute/query
   -> SqlTypedResult / SqlColumn
-  -> Web API JSON or PG RowDescription/DataRow encoding
+  -> Web API JSON, PG RowDescription/DataRow, or MySQL resultset encoding
 ```
 
 Core design boundaries:
 
 - DuckDB is the only SQL execution engine.
 - `rsduck_catalog.*` is the metadata source of truth.
-- Web API and PG wire are entry adapters only; after authentication they share the same typed SQL execution and Describe paths.
+- Web API, PG wire, and MySQL wire are entry adapters only; after authentication they share the same typed SQL execution and Describe paths.
 - Writes, DDL, and catalog mutations must go through the single write worker.
 - `pg_catalog.*` and `information_schema.*` are read-only projections derived from rsduck catalog metadata.
 - Unsupported compatibility behavior returns a clear error or a defined empty result; rsduck does not silently fall back to DuckDB internal catalog tables.
@@ -394,6 +423,7 @@ Deep-dive design docs:
 
 - [DuckDB connection pool and single-write multi-read design](doc/duckdb-pool-design.md)
 - [PG-compatible catalog design](doc/rsduck_pg_catalog_design.md)
+- [MySQL protocol development checklist](doc/mysql_protocol_todo.md)
 
 ## Example: Real-Time K-Line Writes And Queries
 
@@ -491,6 +521,8 @@ Start-Service rsduck
 Stop-Service rsduck
 ```
 
+Windows service mode is managed by WinSW. When the service is stopped, WinSW first sends Ctrl+C to console applications; rsduck handles that signal and saves one shutdown snapshot before exiting. The `stoptimeout` value in `rsduck-service.xml` gives shutdown snapshots 120 seconds by default.
+
 Uninstall from Windows Apps/Programs, or use the Start Menu item `Uninstall rsduck`.
 
 ### Linux
@@ -516,8 +548,7 @@ WorkingDirectory=/opt/rsduck
 ExecStart=/opt/rsduck/rsduck
 Restart=always
 RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=30
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target
@@ -588,4 +619,4 @@ Stop and unload:
 sudo launchctl bootout system /Library/LaunchDaemons/com.rsduck.plist
 ```
 
-For graceful shutdown snapshots, rsduck currently handles Ctrl+C/SIGINT. The Linux `systemd` example sends SIGINT. On macOS, take a manual snapshot before `launchctl bootout` if the latest in-memory changes must be persisted immediately.
+For graceful shutdown snapshots, rsduck handles Ctrl+C on Windows and both Ctrl+C/SIGINT and SIGTERM on Unix systems such as Linux and macOS. `systemctl stop rsduck`, `launchctl bootout`, and console Ctrl+C all trigger a shutdown snapshot before exit.

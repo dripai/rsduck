@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::BlockingAuthenticator;
 
 pub(super) async fn send_typed_sql(
     tx: &SyncSender<SqlCommand>,
@@ -61,14 +62,9 @@ where
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result.map_err(DbError::execution));
                     }
-                    SqlCommand::Authenticate {
-                        username,
-                        password,
-                        resp,
-                    } => {
+                    SqlCommand::Authenticate { request, resp } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            crate::catalog::authenticate_user(&conn, &username, &password)
-                                .map(|_| ())
+                            crate::catalog::CatalogAuthenticator.authenticate(&conn, &request)
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result.map_err(DbError::execution));

@@ -31,7 +31,7 @@ pub(super) fn execute_typed_sql_blocking(
             crate::catalog::evaluate_privilege_function(conn, username, sql_trimmed)?;
         return Ok(SqlTypedResult::Query {
             columns: vec![SqlColumn::new(column, SqlType::Bool)],
-            rows: vec![vec![Some(if allowed { "t" } else { "f" }.to_string())]],
+            rows: vec![vec![SqlValue::Bool(allowed)]],
         });
     }
 
@@ -89,7 +89,7 @@ pub(super) fn query_typed_sql_blocking(
         }
         let mut line = Vec::with_capacity(cols.len());
         for idx in 0..cols.len() {
-            line.push(cell_to_pg_text(row, idx));
+            line.push(cell_to_sql_value(row, idx, cols[idx].data_type));
         }
         data.push(line);
     }
@@ -159,7 +159,7 @@ pub(super) fn typed_result_from_sql_result(result: SqlResult) -> SqlTypedResult 
             columns: columns.into_iter().map(SqlColumn::text).collect(),
             rows: rows
                 .into_iter()
-                .map(|row| row.into_iter().map(Some).collect())
+                .map(|row| row.into_iter().map(SqlValue::Text).collect())
                 .collect(),
         },
         SqlResult::Execute {
@@ -218,71 +218,129 @@ pub(super) fn sql_type_for_duckdb_type(type_id: duckdb::core::LogicalTypeId) -> 
         | LogicalTypeId::StringLiteral
         | LogicalTypeId::Enum
         | LogicalTypeId::Interval
-        | LogicalTypeId::List
+        | LogicalTypeId::Bit
+        | LogicalTypeId::TimeTZ
+        | LogicalTypeId::Any
+        | LogicalTypeId::SqlNull
+        | LogicalTypeId::Invalid
+        | LogicalTypeId::Unsupported => SqlType::Text,
+        LogicalTypeId::List
         | LogicalTypeId::Struct
         | LogicalTypeId::Map
         | LogicalTypeId::Union
-        | LogicalTypeId::Bit
-        | LogicalTypeId::TimeTZ
         | LogicalTypeId::Array
-        | LogicalTypeId::Any
-        | LogicalTypeId::SqlNull
-        | LogicalTypeId::Variant
-        | LogicalTypeId::Invalid
-        | LogicalTypeId::Unsupported => SqlType::Text,
+        | LogicalTypeId::Variant => SqlType::Json,
         _ => SqlType::Text,
     }
 }
 
-pub(super) fn cell_to_pg_text(row: &duckdb::Row<'_>, idx: usize) -> Option<String> {
-    row.get_ref(idx).ok().and_then(value_ref_to_pg_text)
+pub(super) fn cell_to_sql_value(row: &duckdb::Row<'_>, idx: usize, data_type: SqlType) -> SqlValue {
+    row.get_ref(idx)
+        .map(|value| value_ref_to_sql_value(value, data_type))
+        .unwrap_or(SqlValue::Null)
 }
 
-pub(super) fn value_ref_to_pg_text(value: ValueRef<'_>) -> Option<String> {
+pub(super) fn value_ref_to_sql_value(value: ValueRef<'_>, data_type: SqlType) -> SqlValue {
     match value {
-        ValueRef::Null => None,
-        ValueRef::Boolean(v) => Some(if v { "t" } else { "f" }.to_string()),
-        ValueRef::TinyInt(v) => Some(v.to_string()),
-        ValueRef::SmallInt(v) => Some(v.to_string()),
-        ValueRef::Int(v) => Some(v.to_string()),
-        ValueRef::BigInt(v) => Some(v.to_string()),
-        ValueRef::HugeInt(v) => Some(v.to_string()),
-        ValueRef::UTinyInt(v) => Some(v.to_string()),
-        ValueRef::USmallInt(v) => Some(v.to_string()),
-        ValueRef::UInt(v) => Some(v.to_string()),
-        ValueRef::UBigInt(v) => Some(v.to_string()),
-        ValueRef::Float(v) => Some(v.to_string()),
-        ValueRef::Double(v) => Some(v.to_string()),
-        ValueRef::Decimal(v) => Some(v.to_string()),
-        ValueRef::Timestamp(unit, value) => Some(format_timestamp(unit, value)),
-        ValueRef::Text(v) => Some(String::from_utf8_lossy(v).into_owned()),
-        ValueRef::Blob(v) => Some(format!("\\x{}", hex_encode(v))),
-        ValueRef::Date32(v) => Some(format_date32(v)),
-        ValueRef::Time64(unit, value) => Some(format_time64(unit, value)),
+        ValueRef::Null => SqlValue::Null,
+        ValueRef::Boolean(v) => SqlValue::Bool(v),
+        ValueRef::TinyInt(v) => SqlValue::Int16(v as i16),
+        ValueRef::SmallInt(v) => SqlValue::Int16(v),
+        ValueRef::Int(v) => SqlValue::Int32(v),
+        ValueRef::BigInt(v) => SqlValue::Int64(v),
+        ValueRef::HugeInt(v) => decimal_from_i128(v)
+            .map(SqlValue::Decimal)
+            .unwrap_or_else(|| SqlValue::NumericText(v.to_string())),
+        ValueRef::UTinyInt(v) => SqlValue::Int16(v as i16),
+        ValueRef::USmallInt(v) => SqlValue::Int32(v as i32),
+        ValueRef::UInt(v) => SqlValue::Int64(v as i64),
+        ValueRef::UBigInt(v) => SqlValue::Decimal(rust_decimal::Decimal::from(v)),
+        ValueRef::Float(v) => SqlValue::Float32(v),
+        ValueRef::Double(v) => SqlValue::Float64(v),
+        ValueRef::Decimal(v) => SqlValue::Decimal(v),
+        ValueRef::Timestamp(unit, value) => timestamp_value(unit, value, data_type),
+        ValueRef::Text(v) => {
+            let text = String::from_utf8_lossy(v).into_owned();
+            if data_type == SqlType::Uuid {
+                uuid::Uuid::parse_str(&text)
+                    .map(SqlValue::Uuid)
+                    .unwrap_or(SqlValue::Text(text))
+            } else {
+                SqlValue::Text(text)
+            }
+        }
+        ValueRef::Blob(v) => SqlValue::Bytes(v.to_vec()),
+        ValueRef::Date32(v) => date32_to_date(v)
+            .map(SqlValue::Date)
+            .unwrap_or_else(|| SqlValue::Text(v.to_string())),
+        ValueRef::Time64(unit, value) => time64_to_time(unit, value)
+            .map(SqlValue::Time)
+            .unwrap_or_else(|| SqlValue::Text(format_time64(unit, value))),
         ValueRef::Interval {
             months,
             days,
             nanos,
-        } => Some(format!("{months} months {days} days {nanos} ns")),
-        other => Some(format!("{other:?}")),
+        } => SqlValue::Interval {
+            months,
+            days,
+            nanos,
+        },
+        ValueRef::Enum(enum_type, idx) => enum_value_to_text(enum_type, idx)
+            .map(SqlValue::Text)
+            .unwrap_or_else(|| SqlValue::Json(duckdb_value_to_json(value.to_owned()))),
+        ValueRef::List(..)
+        | ValueRef::Struct(..)
+        | ValueRef::Array(..)
+        | ValueRef::Map(..)
+        | ValueRef::Union(..) => SqlValue::Json(duckdb_value_to_json(value.to_owned())),
     }
 }
 
-pub(super) fn format_date32(days: i32) -> String {
-    let Some(epoch) = chrono::NaiveDate::from_ymd_opt(1970, 1, 1) else {
-        return days.to_string();
-    };
-    epoch
-        .checked_add_signed(chrono::Duration::days(days as i64))
-        .map(|date| date.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| days.to_string())
+fn decimal_from_i128(value: i128) -> Option<rust_decimal::Decimal> {
+    rust_decimal::Decimal::try_from_i128_with_scale(value, 0).ok()
 }
 
-pub(super) fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
+fn enum_value_to_text(enum_type: duckdb::types::EnumType<'_>, idx: usize) -> Option<String> {
+    ValueRef::Enum(enum_type, idx)
+        .as_str()
+        .ok()
+        .map(str::to_string)
+}
+
+fn timestamp_value(unit: duckdb::types::TimeUnit, value: i64, data_type: SqlType) -> SqlValue {
+    let Some(timestamp) = timestamp_to_utc(unit, value) else {
+        return SqlValue::Text(format_timestamp(unit, value));
+    };
+    if data_type == SqlType::TimestampTz {
+        SqlValue::TimestampTz(timestamp)
+    } else {
+        SqlValue::Timestamp(timestamp.naive_utc())
+    }
+}
+
+fn timestamp_to_utc(
+    unit: duckdb::types::TimeUnit,
+    value: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
     let micros = unit.to_micros(value);
     let secs = micros.div_euclid(1_000_000);
     let nanos = micros.rem_euclid(1_000_000) as u32 * 1_000;
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+}
+
+pub(super) fn format_date32(days: i32) -> String {
+    date32_to_date(days)
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| days.to_string())
+}
+
+fn date32_to_date(days: i32) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?
+        .checked_add_signed(chrono::Duration::days(days as i64))
+}
+
+pub(super) fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
+    timestamp_to_utc(unit, value)
         .map(|datetime| {
             datetime
                 .naive_utc()
@@ -293,15 +351,94 @@ pub(super) fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> Str
 }
 
 pub(super) fn format_time64(unit: duckdb::types::TimeUnit, value: i64) -> String {
+    time64_to_time(unit, value)
+        .map(|time| time.format("%H:%M:%S%.6f").to_string())
+        .unwrap_or_else(|| format!("{value} {unit:?}"))
+}
+
+fn time64_to_time(unit: duckdb::types::TimeUnit, value: i64) -> Option<chrono::NaiveTime> {
     let micros_per_day = 86_400_000_000_i64;
     let micros = unit.to_micros(value).rem_euclid(micros_per_day);
-    let hours = micros / 3_600_000_000;
-    let minutes = (micros / 60_000_000) % 60;
-    let seconds = (micros / 1_000_000) % 60;
-    let subsecond = micros % 1_000_000;
-    if subsecond == 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{hours:02}:{minutes:02}:{seconds:02}.{subsecond:06}")
+    let seconds = micros / 1_000_000;
+    let nanos = (micros % 1_000_000) as u32 * 1_000;
+    chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds as u32, nanos)
+}
+
+fn duckdb_value_to_json(value: duckdb::types::Value) -> serde_json::Value {
+    match value {
+        duckdb::types::Value::Null => serde_json::Value::Null,
+        duckdb::types::Value::Boolean(v) => serde_json::Value::Bool(v),
+        duckdb::types::Value::TinyInt(v) => number_json(v),
+        duckdb::types::Value::SmallInt(v) => number_json(v),
+        duckdb::types::Value::Int(v) => number_json(v),
+        duckdb::types::Value::BigInt(v) => number_json(v),
+        duckdb::types::Value::HugeInt(v) => serde_json::Value::String(v.to_string()),
+        duckdb::types::Value::UTinyInt(v) => number_json(v),
+        duckdb::types::Value::USmallInt(v) => number_json(v),
+        duckdb::types::Value::UInt(v) => number_json(v),
+        duckdb::types::Value::UBigInt(v) => number_json(v),
+        duckdb::types::Value::Float(v) => float_json(v as f64),
+        duckdb::types::Value::Double(v) => float_json(v),
+        duckdb::types::Value::Decimal(v) => serde_json::Value::String(v.to_string()),
+        duckdb::types::Value::Timestamp(unit, value) => {
+            serde_json::Value::String(format_timestamp(unit, value))
+        }
+        duckdb::types::Value::Text(v) => serde_json::Value::String(v),
+        duckdb::types::Value::Blob(v) => {
+            serde_json::Value::String(format!("\\x{}", hex_encode(&v)))
+        }
+        duckdb::types::Value::Date32(v) => serde_json::Value::String(format_date32(v)),
+        duckdb::types::Value::Time64(unit, value) => {
+            serde_json::Value::String(format_time64(unit, value))
+        }
+        duckdb::types::Value::Interval {
+            months,
+            days,
+            nanos,
+        } => serde_json::json!({
+            "months": months,
+            "days": days,
+            "nanos": nanos
+        }),
+        duckdb::types::Value::List(values) | duckdb::types::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(duckdb_value_to_json).collect())
+        }
+        duckdb::types::Value::Enum(value) => serde_json::Value::String(value),
+        duckdb::types::Value::Struct(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), duckdb_value_to_json(value.clone())))
+                .collect(),
+        ),
+        duckdb::types::Value::Map(entries) => serde_json::Value::Array(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    serde_json::json!({
+                        "key": duckdb_value_to_json(key.clone()),
+                        "value": duckdb_value_to_json(value.clone())
+                    })
+                })
+                .collect(),
+        ),
+        duckdb::types::Value::Union(value) => duckdb_value_to_json(*value),
     }
+}
+
+fn number_json(value: impl Into<serde_json::Number>) -> serde_json::Value {
+    serde_json::Value::Number(value.into())
+}
+
+fn float_json(value: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(value)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| serde_json::Value::String(value.to_string()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }

@@ -10,6 +10,7 @@ pub fn bootstrap_fresh(conn: &Connection) -> Result<(), String> {
 
 pub(super) fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
     let admin_password_hash = hash_password("admin")?;
+    let admin_mysql_auth_string = mysql_caching_sha2_verifier("admin");
     run_catalog_tx(conn, || {
         conn.execute(
             &format!(
@@ -57,13 +58,14 @@ pub(super) fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
               ({ROLE_WRITER_ID}, 'writer', 'relation data writes', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
               ({ROLE_READER_ID}, 'reader', 'relation reads', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 
-            INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, status, is_builtin, created_at, updated_at, last_login_at)
-              VALUES ({ADMIN_USER_ID}, 'admin', '{}', 'argon2id', 'active', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL);
+            INSERT INTO rsduck_catalog.rs_user(user_id, username, password_hash, password_algo, mysql_auth_plugin, mysql_auth_string, status, is_builtin, created_at, updated_at, last_login_at)
+              VALUES ({ADMIN_USER_ID}, 'admin', '{}', 'argon2id', '{MYSQL_CACHING_SHA2_PASSWORD}', '{}', 'active', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL);
 
             INSERT INTO rsduck_catalog.rs_user_role(user_id, role_id, granted_by, created_at)
               VALUES ({ADMIN_USER_ID}, {ROLE_ADMIN_ID}, {ADMIN_USER_ID}, CURRENT_TIMESTAMP);
             ",
-            sql_string(&admin_password_hash)
+            sql_string(&admin_password_hash),
+            sql_string(&admin_mysql_auth_string)
         ))
         .map_err(|e| format!("write bootstrap catalog rows failed: {e}"))?;
 

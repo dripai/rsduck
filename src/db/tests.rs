@@ -2,7 +2,7 @@ use super::{
     describe_sql_blocking, execute_sql_blocking, execute_typed_sql_blocking, export_database_sql,
     find_latest_snapshot_dir, import_database_sql, parse_snapshot_dir_timestamp,
     reset_admin_password_offline, restore_or_initialize, save_snapshot_blocking, SqlParam,
-    SqlResult, SqlType, SqlTypedResult, SNAPSHOT_MANIFEST_FILE,
+    SqlResult, SqlType, SqlTypedResult, SqlValue, SNAPSHOT_MANIFEST_FILE,
 };
 use crate::sql_route::route_sql;
 use duckdb::Connection;
@@ -136,11 +136,56 @@ fn typed_query_preserves_common_pg_types_and_null_cells() {
     assert_eq!(
         rows,
         vec![vec![
-            Some("1".to_string()),
-            Some("1.5".to_string()),
-            Some("2026-07-09".to_string()),
-            Some(String::new()),
-            None,
+            SqlValue::Int32(1),
+            SqlValue::Float64(1.5),
+            SqlValue::Date(chrono::NaiveDate::from_ymd_opt(2026, 7, 9).unwrap()),
+            SqlValue::Text(String::new()),
+            SqlValue::Null,
+        ]]
+    );
+}
+
+#[test]
+fn typed_query_preserves_complex_values_as_json() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+    let sql = "\
+        SELECT \
+            [1, NULL, 2] AS items, \
+            {'code': 'AAPL', 'price': 1.5, 'halted': NULL} AS quote, \
+            map(['a', 'b'], [1, NULL]) AS labels, \
+            array_value(1, NULL, 3) AS fixed_items";
+    let decision = route_sql(sql).unwrap();
+    let result =
+        execute_typed_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap();
+
+    let SqlTypedResult::Query { columns, rows } = result else {
+        panic!("expected typed query result");
+    };
+    assert_eq!(
+        columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.data_type))
+            .collect::<Vec<_>>(),
+        vec![
+            ("items", SqlType::Json),
+            ("quote", SqlType::Json),
+            ("labels", SqlType::Json),
+            ("fixed_items", SqlType::Json),
+        ]
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            SqlValue::Json(serde_json::json!([1, null, 2])),
+            SqlValue::Json(serde_json::json!({"code": "AAPL", "price": "1.5", "halted": null})),
+            SqlValue::Json(serde_json::json!([
+                {"key": "a", "value": 1},
+                {"key": "b", "value": null}
+            ])),
+            SqlValue::Json(serde_json::json!([1, null, 3])),
         ]]
     );
 }

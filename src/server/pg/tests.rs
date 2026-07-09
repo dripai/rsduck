@@ -52,6 +52,24 @@ async fn tokio_postgres_extended_query_handles_params_and_typed_rows() {
     let int_param_value: i32 = rows[0].try_get(0).unwrap();
     assert_eq!(int_param_value, 2);
 
+    let rows = client
+        .query("select 12.34::decimal(10, 2) as amount", &[])
+        .await
+        .unwrap();
+    let decimal_value: rust_decimal::Decimal = rows[0].try_get(0).unwrap();
+    assert_eq!(decimal_value.to_string(), "12.34");
+
+    let uuid_text = "550e8400-e29b-41d4-a716-446655440000";
+    let rows = client
+        .query(
+            "select cast('550e8400-e29b-41d4-a716-446655440000' as uuid) as id",
+            &[],
+        )
+        .await
+        .unwrap();
+    let uuid_value: uuid::Uuid = rows[0].try_get(0).unwrap();
+    assert_eq!(uuid_value.to_string(), uuid_text);
+
     connection_task.abort();
     server.abort();
     db.shutdown();

@@ -1,17 +1,19 @@
+use std::error::Error;
 use std::sync::Arc;
 
+use bytes::{BufMut, BytesMut};
 use futures::stream;
 use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::types::ToSqlText;
+use postgres_types::{IsNull, ToSql};
 
-use crate::db::SqlColumn;
-
-use super::params::{parse_pg_bool_text, parse_pg_bytea_text};
+use crate::db::{SqlColumn, SqlValue};
 
 pub(super) fn query_to_response<'a>(
     columns: Vec<SqlColumn>,
-    rows: Vec<Vec<Option<String>>>,
+    rows: Vec<Vec<SqlValue>>,
     format: FieldFormat,
 ) -> PgWireResult<Response<'a>> {
     let schema = Arc::new(fields_for_columns(columns, format));
@@ -26,12 +28,7 @@ pub(super) fn query_to_response<'a>(
                         "row has more fields than described columns: index {idx}"
                     )));
                 };
-                encode_pg_cell(
-                    &mut encoder,
-                    cell.as_deref(),
-                    field.datatype(),
-                    field.format(),
-                )?;
+                encode_pg_cell(&mut encoder, cell, field.datatype(), field.format())?;
             }
             encoder.finish()
         }
@@ -56,79 +53,75 @@ pub(super) fn fields_for_columns(columns: Vec<SqlColumn>, format: FieldFormat) -
 
 fn encode_pg_cell(
     encoder: &mut DataRowEncoder,
-    value: Option<&str>,
+    value: SqlValue,
     data_type: &Type,
     format: FieldFormat,
 ) -> PgWireResult<()> {
-    let Some(value) = value else {
+    if matches!(value, SqlValue::Null) {
         return encoder.encode_field_with_type_and_format(&None::<i8>, data_type, format);
-    };
+    }
 
     if format == FieldFormat::Text {
-        return encoder.encode_field_with_type_and_format(&value, data_type, format);
+        let text = value.text_value().unwrap_or_default();
+        return encoder.encode_field_with_type_and_format(&text, data_type, format);
     }
 
     match *data_type {
         Type::BOOL => {
-            let value = parse_pg_bool(value)?;
+            let value = bool_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::INT2 => {
-            let value = value
-                .parse::<i16>()
-                .map_err(|e| pg_api_error(format!("failed to encode int2 value '{value}': {e}")))?;
+            let value = int16_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::INT4 => {
-            let value = value
-                .parse::<i32>()
-                .map_err(|e| pg_api_error(format!("failed to encode int4 value '{value}': {e}")))?;
+            let value = int32_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::INT8 => {
-            let value = value
-                .parse::<i64>()
-                .map_err(|e| pg_api_error(format!("failed to encode int8 value '{value}': {e}")))?;
+            let value = int64_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::FLOAT4 => {
-            let value = value.parse::<f32>().map_err(|e| {
-                pg_api_error(format!("failed to encode float4 value '{value}': {e}"))
-            })?;
+            let value = float32_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::FLOAT8 => {
-            let value = value.parse::<f64>().map_err(|e| {
-                pg_api_error(format!("failed to encode float8 value '{value}': {e}"))
-            })?;
+            let value = float64_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
+            let value = value.text_value().unwrap_or_default();
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::DATE => {
-            let value = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .map_err(|e| pg_api_error(format!("failed to encode date value '{value}': {e}")))?;
+            let value = date_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::TIME => {
-            let value = parse_pg_time(value)?;
+            let value = time_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::TIMESTAMP => {
-            let value = parse_pg_timestamp(value)?;
+            let value = timestamp_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::TIMESTAMPTZ => {
-            let value = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-                parse_pg_timestamp(value)?,
-                chrono::Utc,
-            );
+            let value = timestamptz_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
         }
         Type::BYTEA => {
-            let value = parse_pg_bytea(value)?;
+            let value = bytes_value(value, data_type)?;
             encoder.encode_field_with_type_and_format(&value, data_type, format)
+        }
+        Type::NUMERIC => {
+            let value = decimal_value(value, data_type)?;
+            encoder.encode_field_with_type_and_format(&value, data_type, format)
+        }
+        Type::UUID => {
+            let value = uuid_value(value, data_type)?;
+            encoder.encode_field_with_type_and_format(&PgUuid(value), data_type, format)
         }
         _ => Err(pg_api_error(format!(
             "unsupported PG binary column type: {}",
@@ -137,24 +130,192 @@ fn encode_pg_cell(
     }
 }
 
-fn parse_pg_bool(value: &str) -> PgWireResult<bool> {
-    parse_pg_bool_text(value).map_err(pg_api_error)
+fn bool_value(value: SqlValue, data_type: &Type) -> PgWireResult<bool> {
+    match value {
+        SqlValue::Bool(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
 }
 
-fn parse_pg_time(value: &str) -> PgWireResult<chrono::NaiveTime> {
-    chrono::NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveTime::parse_from_str(value, "%H:%M:%S"))
-        .map_err(|e| pg_api_error(format!("failed to encode time value '{value}': {e}")))
+fn int16_value(value: SqlValue, data_type: &Type) -> PgWireResult<i16> {
+    match value {
+        SqlValue::Int16(value) => Ok(value),
+        SqlValue::Int32(value) => {
+            i16::try_from(value).map_err(|_| type_mismatch_i64(value as i64, data_type))
+        }
+        SqlValue::Int64(value) => {
+            i16::try_from(value).map_err(|_| type_mismatch_i64(value, data_type))
+        }
+        other => Err(type_mismatch(other, data_type)),
+    }
 }
 
-fn parse_pg_timestamp(value: &str) -> PgWireResult<chrono::NaiveDateTime> {
-    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S"))
-        .map_err(|e| pg_api_error(format!("failed to encode timestamp value '{value}': {e}")))
+fn int32_value(value: SqlValue, data_type: &Type) -> PgWireResult<i32> {
+    match value {
+        SqlValue::Int16(value) => Ok(value as i32),
+        SqlValue::Int32(value) => Ok(value),
+        SqlValue::Int64(value) => {
+            i32::try_from(value).map_err(|_| type_mismatch_i64(value, data_type))
+        }
+        other => Err(type_mismatch(other, data_type)),
+    }
 }
 
-fn parse_pg_bytea(value: &str) -> PgWireResult<Vec<u8>> {
-    parse_pg_bytea_text(value).map_err(pg_api_error)
+fn int64_value(value: SqlValue, data_type: &Type) -> PgWireResult<i64> {
+    match value {
+        SqlValue::Int16(value) => Ok(value as i64),
+        SqlValue::Int32(value) => Ok(value as i64),
+        SqlValue::Int64(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn float32_value(value: SqlValue, data_type: &Type) -> PgWireResult<f32> {
+    match value {
+        SqlValue::Float32(value) => Ok(value),
+        SqlValue::Float64(value) => Ok(value as f32),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn float64_value(value: SqlValue, data_type: &Type) -> PgWireResult<f64> {
+    match value {
+        SqlValue::Float32(value) => Ok(value as f64),
+        SqlValue::Float64(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn date_value(value: SqlValue, data_type: &Type) -> PgWireResult<chrono::NaiveDate> {
+    match value {
+        SqlValue::Date(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn time_value(value: SqlValue, data_type: &Type) -> PgWireResult<chrono::NaiveTime> {
+    match value {
+        SqlValue::Time(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn timestamp_value(value: SqlValue, data_type: &Type) -> PgWireResult<chrono::NaiveDateTime> {
+    match value {
+        SqlValue::Timestamp(value) => Ok(value),
+        SqlValue::TimestampTz(value) => Ok(value.naive_utc()),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn timestamptz_value(
+    value: SqlValue,
+    data_type: &Type,
+) -> PgWireResult<chrono::DateTime<chrono::Utc>> {
+    match value {
+        SqlValue::TimestampTz(value) => Ok(value),
+        SqlValue::Timestamp(value) => Ok(
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(value, chrono::Utc),
+        ),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn bytes_value(value: SqlValue, data_type: &Type) -> PgWireResult<Vec<u8>> {
+    match value {
+        SqlValue::Bytes(value) => Ok(value),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn decimal_value(value: SqlValue, data_type: &Type) -> PgWireResult<rust_decimal::Decimal> {
+    match value {
+        SqlValue::Decimal(value) => Ok(value),
+        SqlValue::NumericText(value) => value.parse::<rust_decimal::Decimal>().map_err(|e| {
+            pg_api_error(format!(
+                "failed to encode numeric value '{value}' as {}: {e}",
+                data_type.name()
+            ))
+        }),
+        SqlValue::Int16(value) => Ok(rust_decimal::Decimal::from(value)),
+        SqlValue::Int32(value) => Ok(rust_decimal::Decimal::from(value)),
+        SqlValue::Int64(value) => Ok(rust_decimal::Decimal::from(value)),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn uuid_value(value: SqlValue, data_type: &Type) -> PgWireResult<uuid::Uuid> {
+    match value {
+        SqlValue::Uuid(value) => Ok(value),
+        SqlValue::Text(value) => uuid::Uuid::parse_str(&value).map_err(|e| {
+            pg_api_error(format!(
+                "failed to encode uuid value '{value}' as {}: {e}",
+                data_type.name()
+            ))
+        }),
+        other => Err(type_mismatch(other, data_type)),
+    }
+}
+
+fn type_mismatch(value: SqlValue, data_type: &Type) -> PgWireError {
+    pg_api_error(format!(
+        "cannot encode value {:?} as PG binary {}",
+        value,
+        data_type.name()
+    ))
+}
+
+fn type_mismatch_i64(value: i64, data_type: &Type) -> PgWireError {
+    pg_api_error(format!(
+        "integer value {value} is out of range for PG binary {}",
+        data_type.name()
+    ))
+}
+
+#[derive(Debug)]
+struct PgUuid(uuid::Uuid);
+
+impl ToSqlText for PgUuid {
+    fn to_sql_text(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        if *ty != Type::UUID {
+            return Err(Box::new(postgres_types::WrongType::new::<PgUuid>(
+                ty.clone(),
+            )));
+        }
+        out.put_slice(self.0.to_string().as_bytes());
+        Ok(IsNull::No)
+    }
+}
+
+impl ToSql for PgUuid {
+    fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        if *ty != Type::UUID {
+            return Err(Box::new(postgres_types::WrongType::new::<PgUuid>(
+                ty.clone(),
+            )));
+        }
+        out.put_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool
+    where
+        Self: Sized,
+    {
+        *ty == Type::UUID
+    }
+
+    postgres_types::to_sql_checked!();
 }
 
 pub(super) fn pg_api_error(message: String) -> PgWireError {

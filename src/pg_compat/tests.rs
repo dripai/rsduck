@@ -322,16 +322,17 @@ fn owner_projection_uses_catalog_user_names() {
     assert_eq!(schema_description, "owned schema comment");
 
     let standard_schema_sql = rewrite_sql(
-        "SELECT catalog_name, default_character_set_name FROM information_schema.schemata WHERE schema_name = 'owned_schema'",
+        "SELECT catalog_name, default_character_set_name, default_collation_name FROM information_schema.schemata WHERE schema_name = 'owned_schema'",
     )
     .expect("rewrite standard schema columns");
-    let (catalog_name, charset_name): (String, String) = conn
+    let (catalog_name, charset_name, collation_name): (String, String, String) = conn
         .query_row(&standard_schema_sql, [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .unwrap();
     assert_eq!(catalog_name, "memory");
     assert_eq!(charset_name, "UTF8");
+    assert_eq!(collation_name, "utf8mb4_general_ci");
 
     let table_sql =
         rewrite_sql("SELECT tableowner FROM pg_catalog.pg_tables WHERE tablename = 'owned_table'")

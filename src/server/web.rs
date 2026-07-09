@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::db::{DbHandle, SqlTypedResult};
+use crate::auth::{AuthProtocol, AuthRequest};
+use crate::db::{DbHandle, SqlTypedResult, SqlValue};
 
 use super::web_assets::{CODEMIRROR_JS, INDEX_HTML};
 
@@ -100,7 +101,7 @@ async fn sql_handler(
                 .collect();
             Json(SqlResp {
                 columns,
-                rows,
+                rows: sql_values_to_resp_rows(rows),
                 success: true,
                 msg: "ok".into(),
             })
@@ -137,6 +138,12 @@ fn paged_sql(sql: &str, page: usize, page_size: usize) -> String {
     format!("SELECT * FROM ({sql}) __rsduck_page LIMIT {page_size} OFFSET {offset}")
 }
 
+fn sql_values_to_resp_rows(rows: Vec<Vec<SqlValue>>) -> Vec<Vec<Option<String>>> {
+    rows.into_iter()
+        .map(|row| row.into_iter().map(|value| value.text_value()).collect())
+        .collect()
+}
+
 async fn index_page() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
@@ -154,10 +161,14 @@ async fn login_handler(State(state): State<WebState>, Json(req): Json<LoginReq>)
 
     match state
         .db
-        .authenticate_user(username.clone(), req.password)
+        .authenticate(AuthRequest::cleartext(
+            AuthProtocol::WebApi,
+            username.clone(),
+            req.password,
+        ))
         .await
     {
-        Ok(()) => {
+        Ok(_) => {
             let token = new_session_token();
             if let Ok(mut sessions) = state.sessions.lock() {
                 sessions.insert(token.clone(), username.clone());

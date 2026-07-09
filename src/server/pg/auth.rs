@@ -14,6 +14,8 @@ use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use tracing::debug;
 
+use crate::auth::{AuthProtocol, AuthRequest};
+
 use super::handler::DuckdbProcessor;
 use super::session::{metadata_value, session_database};
 
@@ -84,8 +86,16 @@ impl StartupHandler for DuckdbProcessor {
                     database = %session_database(client),
                     "PG auth attempt"
                 );
-                match self.db.authenticate_user(username, password).await {
-                    Ok(()) => {
+                match self
+                    .db
+                    .authenticate(AuthRequest::cleartext(
+                        AuthProtocol::PgWire,
+                        username,
+                        password,
+                    ))
+                    .await
+                {
+                    Ok(_) => {
                         debug!(
                             target: "rsduck::pg",
                             user = %auth_user,

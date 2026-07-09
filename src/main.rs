@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rsduck::{config, db, logging, process_lock, server};
+use rsduck::{config, db, logging, process_lock, server, shutdown};
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
@@ -18,6 +18,7 @@ fn process_lock_payload(cfg: &config::RsduckConfig, mode: &str) -> serde_json::V
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
         "pg_bind": cfg.pg.bind.as_str(),
+        "mysql_bind": cfg.mysql.bind.as_str(),
         "web_bind": cfg.web.bind.as_str(),
     })
 }
@@ -118,6 +119,17 @@ async fn main() {
         server::start_pg_server(&pg_bind, pg_db).await;
     });
 
+    let mysql_task = if cfg.mysql.enabled {
+        let mysql_bind = cfg.mysql.bind.clone();
+        let mysql_db = db.clone();
+        Some(tokio::spawn(async move {
+            server::start_mysql_server(&mysql_bind, mysql_db).await;
+        }))
+    } else {
+        info!("MySQL wire protocol disabled by config");
+        None
+    };
+
     let snap_dir = cfg.snapshot.dir.clone();
     let snap_prefix = cfg.snapshot.prefix.clone();
     let interval = cfg.snapshot.interval_secs;
@@ -169,6 +181,9 @@ async fn main() {
 
     snapshot_task.abort();
     if let Some(task) = partition_task {
+        task.abort();
+    }
+    if let Some(task) = mysql_task {
         task.abort();
     }
     pg_task.abort();
@@ -243,12 +258,18 @@ mod main_tests {
 }
 
 async fn wait_for_shutdown(db: db::DbHandle, snapshot_dir: String, snapshot_prefix: String) {
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        error!("Listen shutdown signal failed: {}", e);
-        return;
-    }
+    let signal = match shutdown::wait_for_shutdown_signal().await {
+        Ok(signal) => signal,
+        Err(e) => {
+            error!("Listen shutdown signal failed: {}", e);
+            return;
+        }
+    };
 
-    info!("Shutdown signal received, saving snapshot before exit");
+    info!(
+        "Shutdown signal received ({}), saving snapshot before exit",
+        signal
+    );
     let t0 = Instant::now();
     match db.save_snapshot(&snapshot_dir, &snapshot_prefix).await {
         Ok(path) => info!("Shutdown snapshot saved to {} ({:.2?})", path, t0.elapsed()),

@@ -1,5 +1,5 @@
 [log]
-level = "info"
+level = "debug"
 dir = "logs"
 file_name = "rsduck.log"
 retain_files = 3
@@ -22,6 +22,10 @@ retain_hours = 2
 
 [pg]
 bind = "127.0.0.1:15432"
+
+[mysql]
+enabled = true
+bind = "127.0.0.1:13306"
 
 [web]
 enabled = true
