@@ -1,4 +1,6 @@
-fn alter_table_relation(
+use super::*;
+
+pub(in crate::catalog) fn alter_table_relation(
     conn: &Connection,
     alter_table: &AlterTable,
     sql: &str,
@@ -93,7 +95,7 @@ fn alter_table_relation(
     }
 }
 
-fn alter_partitioned_table_add_column(
+pub(in crate::catalog) fn alter_partitioned_table_add_column(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
@@ -149,7 +151,7 @@ fn alter_partitioned_table_add_column(
     refresh_partition_entrypoint(conn, parent_oid, schema, table)
 }
 
-fn alter_table_drop_columns(
+pub(in crate::catalog) fn alter_table_drop_columns(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -191,7 +193,7 @@ fn alter_table_drop_columns(
     set_relnatts_to_active_attribute_count(conn, rel_oid)
 }
 
-fn alter_partitioned_table_drop_columns(
+pub(in crate::catalog) fn alter_partitioned_table_drop_columns(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
@@ -256,7 +258,7 @@ fn alter_partitioned_table_drop_columns(
     refresh_partition_entrypoint(conn, parent_oid, schema, table)
 }
 
-fn drop_column_targets(
+pub(in crate::catalog) fn drop_column_targets(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -280,7 +282,7 @@ fn drop_column_targets(
     Ok(columns)
 }
 
-fn ensure_column_can_drop(
+pub(in crate::catalog) fn ensure_column_can_drop(
     conn: &Connection,
     rel_oid: i64,
     attnum: i32,
@@ -327,7 +329,7 @@ fn ensure_column_can_drop(
     Ok(())
 }
 
-fn column_attnum_list_contains(
+pub(in crate::catalog) fn column_attnum_list_contains(
     conn: &Connection,
     table_name: &str,
     relid_column: &str,
@@ -362,7 +364,11 @@ fn column_attnum_list_contains(
     Ok(false)
 }
 
-fn mark_column_dropped(conn: &Connection, rel_oid: i64, attnum: i32) -> Result<(), String> {
+pub(in crate::catalog) fn mark_column_dropped(
+    conn: &Connection,
+    rel_oid: i64,
+    attnum: i32,
+) -> Result<(), String> {
     conn.execute(
         &format!(
             "UPDATE rsduck_catalog.pg_attribute \
@@ -382,7 +388,10 @@ fn mark_column_dropped(conn: &Connection, rel_oid: i64, attnum: i32) -> Result<(
     Ok(())
 }
 
-fn next_attribute_num(conn: &Connection, rel_oid: i64) -> Result<i32, String> {
+pub(in crate::catalog) fn next_attribute_num(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<i32, String> {
     let max_attnum: Option<i32> = conn
         .query_row(
             &format!(
@@ -395,7 +404,10 @@ fn next_attribute_num(conn: &Connection, rel_oid: i64) -> Result<i32, String> {
     Ok(max_attnum.unwrap_or(0) + 1)
 }
 
-fn set_relnatts_to_active_attribute_count(conn: &Connection, rel_oid: i64) -> Result<(), String> {
+pub(in crate::catalog) fn set_relnatts_to_active_attribute_count(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<(), String> {
     let active_count: i64 = conn
         .query_row(
             &format!(
@@ -415,4 +427,3 @@ fn set_relnatts_to_active_attribute_count(conn: &Connection, rel_oid: i64) -> Re
     .map_err(|e| format!("update active relnatts failed: {e}"))?;
     Ok(())
 }
-

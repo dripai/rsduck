@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn looks_like_privilege_function(sql: &str) -> bool {
     let normalized = normalize_for_guard(sql);
     normalized.starts_with("select ")
@@ -50,8 +52,10 @@ pub fn evaluate_privilege_function(
     Err("unsupported privilege function".into())
 }
 
-
-fn privilege_args(current_user: &str, args: &[String]) -> Result<(String, String, String), String> {
+pub(in crate::catalog) fn privilege_args(
+    current_user: &str,
+    args: &[String],
+) -> Result<(String, String, String), String> {
     match args {
         [object, privilege] => Ok((
             current_user.to_string(),
@@ -65,7 +69,7 @@ fn privilege_args(current_user: &str, args: &[String]) -> Result<(String, String
     }
 }
 
-fn table_privilege_action(privilege: &str) -> &str {
+pub(in crate::catalog) fn table_privilege_action(privilege: &str) -> &str {
     if privilege.contains("select") || privilege.contains("read") {
         "read"
     } else if privilege.contains("insert")
@@ -79,7 +83,7 @@ fn table_privilege_action(privilege: &str) -> &str {
     }
 }
 
-fn schema_privilege_action(privilege: &str) -> &str {
+pub(in crate::catalog) fn schema_privilege_action(privilege: &str) -> &str {
     if privilege.contains("usage") || privilege.contains("read") {
         "read"
     } else {
@@ -87,7 +91,7 @@ fn schema_privilege_action(privilege: &str) -> &str {
     }
 }
 
-fn database_privilege_action(privilege: &str) -> &str {
+pub(in crate::catalog) fn database_privilege_action(privilege: &str) -> &str {
     if privilege.contains("create") {
         "manage_catalog"
     } else if privilege.contains("temporary") || privilege.contains("temp") {
@@ -98,4 +102,3 @@ fn database_privilege_action(privilege: &str) -> &str {
         "manage_catalog"
     }
 }
-

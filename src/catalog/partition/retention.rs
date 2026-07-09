@@ -1,4 +1,6 @@
-fn retention_partitions(
+use super::*;
+
+pub(in crate::catalog) fn retention_partitions(
     conn: &Connection,
     parent_oid: i64,
 ) -> Result<Vec<RetentionPartition>, String> {
@@ -51,7 +53,7 @@ fn retention_partitions(
     Ok(partitions)
 }
 
-fn expire_partition(
+pub(in crate::catalog) fn expire_partition(
     conn: &Connection,
     parent_oid: i64,
     partition: RetentionPartition,
@@ -97,7 +99,10 @@ fn expire_partition(
     Ok(())
 }
 
-fn delete_partition_child_catalog(conn: &Connection, meta: &RelationMeta) -> Result<(), String> {
+pub(in crate::catalog) fn delete_partition_child_catalog(
+    conn: &Connection,
+    meta: &RelationMeta,
+) -> Result<(), String> {
     for sql in [
         format!(
             "DELETE FROM rsduck_catalog.pg_depend WHERE objid = {} OR refobjid = {}",
@@ -142,7 +147,7 @@ fn delete_partition_child_catalog(conn: &Connection, meta: &RelationMeta) -> Res
     Ok(())
 }
 
-fn partition_bounds(
+pub(in crate::catalog) fn partition_bounds(
     partition_value: &str,
     partition_unit: &str,
 ) -> Result<PartitionBounds, String> {
@@ -177,7 +182,10 @@ fn partition_bounds(
     })
 }
 
-fn add_months(value: NaiveDateTime, months: u32) -> Result<NaiveDateTime, String> {
+pub(in crate::catalog) fn add_months(
+    value: NaiveDateTime,
+    months: u32,
+) -> Result<NaiveDateTime, String> {
     let total_month = value.year() * 12 + value.month0() as i32 + months as i32;
     let year = total_month.div_euclid(12);
     let month0 = total_month.rem_euclid(12) as u32;
@@ -185,4 +193,3 @@ fn add_months(value: NaiveDateTime, months: u32) -> Result<NaiveDateTime, String
         .and_then(|date| date.and_hms_opt(value.hour(), value.minute(), value.second()))
         .ok_or_else(|| format!("invalid month arithmetic for {value}"))
 }
-

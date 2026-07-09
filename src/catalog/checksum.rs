@@ -1,4 +1,6 @@
-fn validate_catalog_checksum(conn: &Connection) -> Result<(), String> {
+use super::*;
+
+pub(super) fn validate_catalog_checksum(conn: &Connection) -> Result<(), String> {
     let expected: String = conn
         .query_row(
             "SELECT catalog_checksum FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
@@ -16,7 +18,7 @@ fn validate_catalog_checksum(conn: &Connection) -> Result<(), String> {
     }
 }
 
-fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
+pub(super) fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
     let checksum = calculate_catalog_checksum(conn)?;
     conn.execute(
         &format!(
@@ -31,7 +33,7 @@ fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn calculate_catalog_checksum(conn: &Connection) -> Result<String, String> {
+pub(super) fn calculate_catalog_checksum(conn: &Connection) -> Result<String, String> {
     let mut state = FNV64_OFFSET;
     for (label, sql) in catalog_checksum_queries() {
         hash_checksum_part(&mut state, label);
@@ -40,7 +42,7 @@ fn calculate_catalog_checksum(conn: &Connection) -> Result<String, String> {
     Ok(format!("fnv1a64:{state:016x}"))
 }
 
-fn catalog_checksum_queries() -> &'static [(&'static str, &'static str)] {
+pub(super) fn catalog_checksum_queries() -> &'static [(&'static str, &'static str)] {
     &[
         (
             "rs_catalog_version",
@@ -134,7 +136,7 @@ fn catalog_checksum_queries() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-fn hash_query_rows(conn: &Connection, state: &mut u64, sql: &str) -> Result<(), String> {
+pub(super) fn hash_query_rows(conn: &Connection, state: &mut u64, sql: &str) -> Result<(), String> {
     let mut stmt = conn
         .prepare(sql)
         .map_err(|e| format!("prepare catalog checksum query failed: {e}"))?;
@@ -160,7 +162,7 @@ fn hash_query_rows(conn: &Connection, state: &mut u64, sql: &str) -> Result<(), 
     Ok(())
 }
 
-fn checksum_value_to_string(value: ValueRef<'_>) -> String {
+pub(super) fn checksum_value_to_string(value: ValueRef<'_>) -> String {
     match value {
         ValueRef::Null => "<null>".to_string(),
         ValueRef::Boolean(v) => v.to_string(),
@@ -190,17 +192,16 @@ fn checksum_value_to_string(value: ValueRef<'_>) -> String {
     }
 }
 
-fn hash_checksum_part(state: &mut u64, value: &str) {
+pub(super) fn hash_checksum_part(state: &mut u64, value: &str) {
     hash_checksum_bytes(state, value.len().to_string().as_bytes());
     hash_checksum_bytes(state, b":");
     hash_checksum_bytes(state, value.as_bytes());
     hash_checksum_bytes(state, b";");
 }
 
-fn hash_checksum_bytes(state: &mut u64, bytes: &[u8]) {
+pub(super) fn hash_checksum_bytes(state: &mut u64, bytes: &[u8]) {
     for byte in bytes {
         *state ^= u64::from(*byte);
         *state = state.wrapping_mul(FNV64_PRIME);
     }
 }
-

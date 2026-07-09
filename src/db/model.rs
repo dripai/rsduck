@@ -1,51 +1,70 @@
-use crate::config::DbConfig;
-use crate::sql_route::{route_sql, SqlRoute};
-use duckdb::{types::ValueRef, Connection};
-use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use crate::sql_route::SqlRoute;
+use duckdb::Connection;
+use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use tokio::sync::oneshot;
-use tracing::{error, info};
 
-static DB_ENGINE: OnceLock<DbEngine> = OnceLock::new();
-const SNAPSHOT_MANIFEST_FILE: &str = "rsduck_snapshot_manifest.json";
+use super::error::DbResult;
 
-const PG_TYPE_BOOL: u32 = 16;
-const PG_TYPE_BYTEA: u32 = 17;
-const PG_TYPE_INT8: u32 = 20;
-const PG_TYPE_INT2: u32 = 21;
-const PG_TYPE_INT4: u32 = 23;
-const PG_TYPE_TEXT: u32 = 25;
-const PG_TYPE_FLOAT4: u32 = 700;
-const PG_TYPE_FLOAT8: u32 = 701;
-const PG_TYPE_NUMERIC: u32 = 1700;
-const PG_TYPE_DATE: u32 = 1082;
-const PG_TYPE_TIME: u32 = 1083;
-const PG_TYPE_TIMESTAMP: u32 = 1114;
-const PG_TYPE_TIMESTAMPTZ: u32 = 1184;
-const PG_TYPE_UUID: u32 = 2950;
+pub(super) const SNAPSHOT_MANIFEST_FILE: &str = "rsduck_snapshot_manifest.json";
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SqlType {
+    Bool,
+    Bytea,
+    Int8,
+    Int2,
+    Int4,
+    Text,
+    Float4,
+    Float8,
+    Numeric,
+    Date,
+    Time,
+    Timestamp,
+    TimestampTz,
+    Uuid,
+}
+
+impl SqlType {
+    pub fn pg_type_oid(self) -> u32 {
+        match self {
+            SqlType::Bool => 16,
+            SqlType::Bytea => 17,
+            SqlType::Int8 => 20,
+            SqlType::Int2 => 21,
+            SqlType::Int4 => 23,
+            SqlType::Text => 25,
+            SqlType::Float4 => 700,
+            SqlType::Float8 => 701,
+            SqlType::Numeric => 1700,
+            SqlType::Date => 1082,
+            SqlType::Time => 1083,
+            SqlType::Timestamp => 1114,
+            SqlType::TimestampTz => 1184,
+            SqlType::Uuid => 2950,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SqlColumn {
     pub name: String,
-    pub pg_type_oid: u32,
+    pub data_type: SqlType,
 }
 
 impl SqlColumn {
-    fn new(name: impl Into<String>, pg_type_oid: u32) -> Self {
+    pub(super) fn new(name: impl Into<String>, data_type: SqlType) -> Self {
         Self {
             name: name.into(),
-            pg_type_oid,
+            data_type,
         }
     }
 
-    fn text(name: impl Into<String>) -> Self {
-        Self::new(name, PG_TYPE_TEXT)
+    pub(super) fn text(name: impl Into<String>) -> Self {
+        Self::new(name, SqlType::Text)
     }
 }
 
@@ -73,14 +92,9 @@ pub enum SqlTypedResult {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SqlParam {
-    Null,
-    Text(String),
-    Bool(bool),
-    Integer(i64),
-    Float(f64),
-    Bytes(Vec<u8>),
+#[derive(Clone)]
+pub struct DbHandle {
+    pub(super) engine: Arc<DbEngine>,
 }
 
 impl From<SqlTypedResult> for SqlResult {
@@ -108,43 +122,43 @@ impl From<SqlTypedResult> for SqlResult {
     }
 }
 
-enum SqlCommand {
+pub(super) enum SqlCommand {
     RunTyped {
         username: String,
         sql: String,
         route: SqlRoute,
         command: String,
-        resp: oneshot::Sender<Result<SqlTypedResult, String>>,
+        resp: oneshot::Sender<DbResult<SqlTypedResult>>,
     },
     Authenticate {
         username: String,
         password: String,
-        resp: oneshot::Sender<Result<(), String>>,
+        resp: oneshot::Sender<DbResult<()>>,
     },
     Describe {
         username: String,
         sql: String,
         route: SqlRoute,
-        resp: oneshot::Sender<Result<Vec<SqlColumn>, String>>,
+        resp: oneshot::Sender<DbResult<Vec<SqlColumn>>>,
     },
     Shutdown,
 }
 
-enum SnapshotCommand {
+pub(super) enum SnapshotCommand {
     Save {
         username: Option<String>,
         dir: String,
         prefix: String,
-        resp: oneshot::Sender<Result<String, String>>,
+        resp: oneshot::Sender<DbResult<String>>,
     },
     Shutdown,
 }
 
-struct DbEngine {
-    read_txs: Vec<SyncSender<SqlCommand>>,
-    write_tx: SyncSender<SqlCommand>,
-    snapshot_tx: SyncSender<SnapshotCommand>,
-    next_read: AtomicUsize,
-    _base_conn: Mutex<Connection>,
-    workers: Mutex<Vec<JoinHandle<()>>>,
+pub(super) struct DbEngine {
+    pub(super) read_txs: Vec<SyncSender<SqlCommand>>,
+    pub(super) write_tx: SyncSender<SqlCommand>,
+    pub(super) snapshot_tx: SyncSender<SnapshotCommand>,
+    pub(super) next_read: AtomicUsize,
+    pub(super) _base_conn: Mutex<Connection>,
+    pub(super) workers: Mutex<Vec<JoinHandle<()>>>,
 }

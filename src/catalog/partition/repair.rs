@@ -1,4 +1,6 @@
-fn mark_partition_unavailable(
+use super::*;
+
+pub(in crate::catalog) fn mark_partition_unavailable(
     conn: &Connection,
     schema: &str,
     table: &str,
@@ -35,7 +37,7 @@ fn mark_partition_unavailable(
     })
 }
 
-fn repair_partition(
+pub(in crate::catalog) fn repair_partition(
     conn: &Connection,
     schema: &str,
     table: &str,
@@ -65,7 +67,7 @@ fn repair_partition(
     })
 }
 
-fn repair_non_active_partition(
+pub(in crate::catalog) fn repair_non_active_partition(
     conn: &Connection,
     relation: &PartitionedRelation,
     partition_value: &str,

@@ -1,4 +1,6 @@
-fn insert_relation_rows(
+use super::*;
+
+pub(in crate::catalog) fn insert_relation_rows(
     conn: &Connection,
     rel_oid: i64,
     type_oid: i64,
@@ -56,7 +58,7 @@ fn insert_relation_rows(
     Ok(())
 }
 
-fn insert_attribute_row(
+pub(in crate::catalog) fn insert_attribute_row(
     conn: &Connection,
     rel_oid: i64,
     column: &CatalogColumn,
@@ -92,7 +94,7 @@ fn insert_attribute_row(
     Ok(())
 }
 
-fn update_partition_relation_ext(
+pub(in crate::catalog) fn update_partition_relation_ext(
     conn: &Connection,
     rel_oid: i64,
     partition_key: &str,
@@ -117,4 +119,3 @@ fn update_partition_relation_ext(
     .map_err(|e| format!("update partition relation extension failed: {e}"))?;
     Ok(())
 }
-

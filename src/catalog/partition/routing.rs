@@ -1,4 +1,6 @@
-fn partition_insert_groups(
+use super::*;
+
+pub(in crate::catalog) fn partition_insert_groups(
     conn: &Connection,
     source: &sqlparser::ast::Query,
     target_columns: &[String],
@@ -45,7 +47,7 @@ fn partition_insert_groups(
     )
 }
 
-fn materialize_query_partition_insert_groups(
+pub(in crate::catalog) fn materialize_query_partition_insert_groups(
     conn: &Connection,
     source: &sqlparser::ast::Query,
     target_columns: &[String],
@@ -101,7 +103,7 @@ fn materialize_query_partition_insert_groups(
     Ok(groups)
 }
 
-fn push_partition_insert_group(
+pub(in crate::catalog) fn push_partition_insert_group(
     groups: &mut PartitionInsertGroups,
     route: PartitionRoute,
     exprs: Vec<String>,
@@ -119,7 +121,7 @@ fn push_partition_insert_group(
     }
 }
 
-fn partition_route_for_value_ref(
+pub(in crate::catalog) fn partition_route_for_value_ref(
     value: ValueRef<'_>,
     partition_key_type: &str,
     partition_unit: &str,
@@ -134,7 +136,7 @@ fn partition_route_for_value_ref(
     }
 }
 
-fn partition_datetime_from_value_ref(
+pub(in crate::catalog) fn partition_datetime_from_value_ref(
     value: ValueRef<'_>,
     partition_key_type: &str,
 ) -> Option<NaiveDateTime> {
@@ -149,7 +151,7 @@ fn partition_datetime_from_value_ref(
     }
 }
 
-fn value_ref_to_sql_literal(value: ValueRef<'_>) -> Result<String, String> {
+pub(in crate::catalog) fn value_ref_to_sql_literal(value: ValueRef<'_>) -> Result<String, String> {
     match value {
         ValueRef::Null => Ok("NULL".to_string()),
         ValueRef::Boolean(v) => Ok(v.to_string()),
@@ -193,7 +195,10 @@ fn value_ref_to_sql_literal(value: ValueRef<'_>) -> Result<String, String> {
     }
 }
 
-fn timestamp_value_to_naive(unit: TimeUnit, value: i64) -> Option<NaiveDateTime> {
+pub(in crate::catalog) fn timestamp_value_to_naive(
+    unit: TimeUnit,
+    value: i64,
+) -> Option<NaiveDateTime> {
     let (secs, nanos) = match unit {
         TimeUnit::Second => (value, 0),
         TimeUnit::Millisecond => (value / 1_000, (value % 1_000) * 1_000_000),
@@ -203,13 +208,13 @@ fn timestamp_value_to_naive(unit: TimeUnit, value: i64) -> Option<NaiveDateTime>
     chrono::DateTime::from_timestamp(secs, nanos as u32).map(|dt| dt.naive_utc())
 }
 
-fn date32_value_to_naive(value: i32) -> Option<NaiveDateTime> {
+pub(in crate::catalog) fn date32_value_to_naive(value: i32) -> Option<NaiveDateTime> {
     NaiveDate::from_ymd_opt(1970, 1, 1)?
         .checked_add_signed(Duration::days(i64::from(value)))?
         .and_hms_opt(0, 0, 0)
 }
 
-fn format_naive_datetime(dt: NaiveDateTime) -> String {
+pub(in crate::catalog) fn format_naive_datetime(dt: NaiveDateTime) -> String {
     format!(
         "{}.{:06}",
         dt.format("%Y-%m-%d %H:%M:%S"),
@@ -217,7 +222,10 @@ fn format_naive_datetime(dt: NaiveDateTime) -> String {
     )
 }
 
-fn format_time64_value(unit: TimeUnit, value: i64) -> Result<String, String> {
+pub(in crate::catalog) fn format_time64_value(
+    unit: TimeUnit,
+    value: i64,
+) -> Result<String, String> {
     let micros = match unit {
         TimeUnit::Microsecond => value,
         TimeUnit::Millisecond => value * 1_000,
@@ -238,7 +246,7 @@ fn format_time64_value(unit: TimeUnit, value: i64) -> Result<String, String> {
     ))
 }
 
-fn partitioned_relation(
+pub(in crate::catalog) fn partitioned_relation(
     conn: &Connection,
     schema: &str,
     table: &str,
@@ -278,7 +286,7 @@ fn partitioned_relation(
     }))
 }
 
-fn insert_target_columns(
+pub(in crate::catalog) fn insert_target_columns(
     insert: &Insert,
     relation: &PartitionedRelation,
 ) -> Result<Vec<String>, String> {
@@ -308,7 +316,7 @@ fn insert_target_columns(
         .collect()
 }
 
-fn partition_route_for_expr(
+pub(in crate::catalog) fn partition_route_for_expr(
     expr: &Expr,
     partition_key_type: &str,
     partition_unit: &str,
@@ -322,7 +330,10 @@ fn partition_route_for_expr(
     })
 }
 
-fn partition_datetime_from_expr(expr: &Expr, partition_key_type: &str) -> Option<NaiveDateTime> {
+pub(in crate::catalog) fn partition_datetime_from_expr(
+    expr: &Expr,
+    partition_key_type: &str,
+) -> Option<NaiveDateTime> {
     match expr {
         Expr::Value(value) => match &value.value {
             Value::Null => None,
@@ -347,7 +358,10 @@ fn partition_datetime_from_expr(expr: &Expr, partition_key_type: &str) -> Option
     }
 }
 
-fn parse_partition_datetime(value: &str, partition_key_type: &str) -> Option<NaiveDateTime> {
+pub(in crate::catalog) fn parse_partition_datetime(
+    value: &str,
+    partition_key_type: &str,
+) -> Option<NaiveDateTime> {
     let value = value.trim();
     if partition_key_type == "date" {
         return NaiveDate::parse_from_str(value, "%Y-%m-%d")
@@ -357,7 +371,7 @@ fn parse_partition_datetime(value: &str, partition_key_type: &str) -> Option<Nai
     parse_timestamp_literal(value)
 }
 
-fn parse_timestamp_literal(value: &str) -> Option<NaiveDateTime> {
+pub(in crate::catalog) fn parse_timestamp_literal(value: &str) -> Option<NaiveDateTime> {
     for pattern in [
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%dT%H:%M:%S%.f",
@@ -373,7 +387,10 @@ fn parse_timestamp_literal(value: &str) -> Option<NaiveDateTime> {
         .and_then(|date| date.and_hms_opt(0, 0, 0))
 }
 
-fn partition_value_for_datetime(dt: NaiveDateTime, partition_unit: &str) -> String {
+pub(in crate::catalog) fn partition_value_for_datetime(
+    dt: NaiveDateTime,
+    partition_unit: &str,
+) -> String {
     match partition_unit {
         "hour" => format!(
             "{:04}{:02}{:02}{:02}",
@@ -389,8 +406,7 @@ fn partition_value_for_datetime(dt: NaiveDateTime, partition_unit: &str) -> Stri
     }
 }
 
-
-fn ensure_active_partition(
+pub(in crate::catalog) fn ensure_active_partition(
     conn: &Connection,
     relation: &PartitionedRelation,
     partition_value: &str,
@@ -407,7 +423,7 @@ fn ensure_active_partition(
     create_range_partition(conn, relation, partition_value)
 }
 
-fn active_partition_by_value(
+pub(in crate::catalog) fn active_partition_by_value(
     conn: &Connection,
     parent_oid: i64,
     partition_value: &str,
@@ -449,7 +465,7 @@ fn active_partition_by_value(
     }))
 }
 
-fn partition_child_by_value(
+pub(in crate::catalog) fn partition_child_by_value(
     conn: &Connection,
     parent_oid: i64,
     partition_value: &str,
@@ -490,7 +506,7 @@ fn partition_child_by_value(
     }))
 }
 
-fn partition_status_by_value(
+pub(in crate::catalog) fn partition_status_by_value(
     conn: &Connection,
     parent_oid: i64,
     partition_value: &str,

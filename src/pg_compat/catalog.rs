@@ -1,4 +1,6 @@
-fn pg_namespace_sql() -> String {
+use super::*;
+
+pub(super) fn pg_namespace_sql() -> String {
     format!(
         "
     SELECT
@@ -24,7 +26,7 @@ fn pg_namespace_sql() -> String {
     )
 }
 
-fn information_schema_schemata_sql() -> String {
+pub(super) fn information_schema_schemata_sql() -> String {
     format!(
         "
     SELECT
@@ -51,7 +53,7 @@ fn information_schema_schemata_sql() -> String {
     )
 }
 
-fn pg_class_sql() -> String {
+pub(super) fn pg_class_sql() -> String {
     "
     SELECT
         CAST(c.oid AS VARCHAR) AS oid,
@@ -113,7 +115,7 @@ fn pg_class_sql() -> String {
     .to_string()
 }
 
-fn pg_tables_sql() -> String {
+pub(super) fn pg_tables_sql() -> String {
     "
     SELECT
         n.nspname AS schemaname,
@@ -139,7 +141,7 @@ fn pg_tables_sql() -> String {
     .to_string()
 }
 
-fn information_schema_tables_sql() -> String {
+pub(super) fn information_schema_tables_sql() -> String {
     "
     SELECT
         current_database() AS table_catalog,
@@ -167,7 +169,7 @@ fn information_schema_tables_sql() -> String {
     .to_string()
 }
 
-fn pg_attribute_sql(include_dropped: bool) -> String {
+pub(super) fn pg_attribute_sql(include_dropped: bool) -> String {
     let dropped_filter = if include_dropped {
         ""
     } else {
@@ -227,7 +229,7 @@ fn pg_attribute_sql(include_dropped: bool) -> String {
     )
 }
 
-fn information_schema_columns_sql() -> String {
+pub(super) fn information_schema_columns_sql() -> String {
     "
     SELECT
         current_database() AS table_catalog,
@@ -310,7 +312,7 @@ fn information_schema_columns_sql() -> String {
     .to_string()
 }
 
-fn pg_type_sql() -> String {
+pub(super) fn pg_type_sql() -> String {
     "
     SELECT
         CAST(t.oid AS VARCHAR) AS oid,
@@ -340,7 +342,7 @@ fn pg_type_sql() -> String {
     .to_string()
 }
 
-fn pg_database_sql() -> String {
+pub(super) fn pg_database_sql() -> String {
     "
     SELECT
         '1' AS oid,
@@ -366,7 +368,7 @@ fn pg_database_sql() -> String {
     .to_string()
 }
 
-fn pg_user_sql() -> String {
+pub(super) fn pg_user_sql() -> String {
     "
     SELECT
         u.username AS usename,
@@ -394,7 +396,7 @@ fn pg_user_sql() -> String {
     .to_string()
 }
 
-fn pg_roles_sql() -> String {
+pub(super) fn pg_roles_sql() -> String {
     "
     SELECT
         CAST(role_id AS VARCHAR) AS oid,
@@ -416,7 +418,7 @@ fn pg_roles_sql() -> String {
     .to_string()
 }
 
-fn pg_settings_sql() -> String {
+pub(super) fn pg_settings_sql() -> String {
     let rows = pg_settings_rows()
         .into_iter()
         .map(|(name, setting)| {
@@ -437,7 +439,7 @@ fn pg_settings_sql() -> String {
     format!("{rows}\nORDER BY name")
 }
 
-fn pg_index_sql() -> String {
+pub(super) fn pg_index_sql() -> String {
     "
     SELECT
         CAST(indexrelid AS VARCHAR) AS indexrelid,
@@ -457,7 +459,7 @@ fn pg_index_sql() -> String {
     .to_string()
 }
 
-fn pg_inherits_sql() -> String {
+pub(super) fn pg_inherits_sql() -> String {
     "
     SELECT
         CAST(child_relid AS VARCHAR) AS inhrelid,
@@ -470,7 +472,7 @@ fn pg_inherits_sql() -> String {
     .to_string()
 }
 
-fn pg_tablespace_sql() -> String {
+pub(super) fn pg_tablespace_sql() -> String {
     "
     SELECT
         '0' AS oid,
@@ -482,7 +484,7 @@ fn pg_tablespace_sql() -> String {
     .to_string()
 }
 
-fn pg_collation_sql() -> String {
+pub(super) fn pg_collation_sql() -> String {
     "
     SELECT
         '0' AS oid,
@@ -502,7 +504,7 @@ fn pg_collation_sql() -> String {
     .to_string()
 }
 
-fn pg_sequence_sql() -> String {
+pub(super) fn pg_sequence_sql() -> String {
     "
     SELECT
         '0' AS seqrelid,
@@ -518,7 +520,7 @@ fn pg_sequence_sql() -> String {
     .to_string()
 }
 
-fn pg_constraint_sql() -> String {
+pub(super) fn pg_constraint_sql() -> String {
     "
     SELECT
         CAST(con.oid AS VARCHAR) AS oid,
@@ -552,7 +554,7 @@ fn pg_constraint_sql() -> String {
     .to_string()
 }
 
-fn information_schema_table_constraints_sql() -> String {
+pub(super) fn information_schema_table_constraints_sql() -> String {
     "
     SELECT
         current_database() AS constraint_catalog,
@@ -581,7 +583,7 @@ fn information_schema_table_constraints_sql() -> String {
     .to_string()
 }
 
-fn information_schema_key_column_usage_sql() -> String {
+pub(super) fn information_schema_key_column_usage_sql() -> String {
     "
     SELECT
         current_database() AS constraint_catalog,
@@ -611,7 +613,7 @@ fn information_schema_key_column_usage_sql() -> String {
     .to_string()
 }
 
-fn information_schema_constraint_column_usage_sql() -> String {
+pub(super) fn information_schema_constraint_column_usage_sql() -> String {
     "
     SELECT
         current_database() AS table_catalog,
@@ -653,7 +655,7 @@ fn information_schema_constraint_column_usage_sql() -> String {
     .to_string()
 }
 
-fn pg_attrdef_sql() -> String {
+pub(super) fn pg_attrdef_sql() -> String {
     "
     SELECT
         CAST(d.oid AS VARCHAR) AS oid,
@@ -670,7 +672,7 @@ fn pg_attrdef_sql() -> String {
     .to_string()
 }
 
-fn pg_depend_sql() -> String {
+pub(super) fn pg_depend_sql() -> String {
     "
     SELECT
         CAST(classid AS VARCHAR) AS classid,
@@ -686,7 +688,7 @@ fn pg_depend_sql() -> String {
     .to_string()
 }
 
-fn pg_description_sql() -> String {
+pub(super) fn pg_description_sql() -> String {
     "
     SELECT
         CAST(objoid AS VARCHAR) AS objoid,
@@ -699,7 +701,7 @@ fn pg_description_sql() -> String {
     .to_string()
 }
 
-fn pg_views_sql() -> String {
+pub(super) fn pg_views_sql() -> String {
     "
     SELECT
         n.nspname AS schemaname,
@@ -718,7 +720,7 @@ fn pg_views_sql() -> String {
     .to_string()
 }
 
-fn information_schema_views_sql() -> String {
+pub(super) fn information_schema_views_sql() -> String {
     "
     SELECT
         current_database() AS table_catalog,
@@ -742,7 +744,7 @@ fn information_schema_views_sql() -> String {
     .to_string()
 }
 
-fn pg_indexes_sql() -> String {
+pub(super) fn pg_indexes_sql() -> String {
     "
     SELECT
         tn.nspname AS schemaname,
@@ -766,7 +768,7 @@ fn pg_indexes_sql() -> String {
     .to_string()
 }
 
-fn pg_proc_sql() -> String {
+pub(super) fn pg_proc_sql() -> String {
     let rows = [
         (20001, "version", "25", "", 0),
         (20002, "current_database", "25", "", 0),
@@ -809,7 +811,7 @@ fn pg_proc_sql() -> String {
     format!("{sql}\nORDER BY proname")
 }
 
-fn empty_pg_catalog_sql(sql: &str) -> Option<String> {
+pub(super) fn empty_pg_catalog_sql(sql: &str) -> Option<String> {
     if contains_from_table(sql, "pg_trigger") {
         return Some(
             "
@@ -939,7 +941,7 @@ fn empty_pg_catalog_sql(sql: &str) -> Option<String> {
     None
 }
 
-fn contains_from_table(sql: &str, table: &str) -> bool {
+pub(super) fn contains_from_table(sql: &str, table: &str) -> bool {
     let pg_catalog_table = format!("pg_catalog.{table}");
     let quoted_pg_catalog_table = format!("\"pg_catalog\".\"{table}\"");
     sql.contains(&format!(" from {table}"))

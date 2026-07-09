@@ -1,11 +1,13 @@
-async fn send_typed_sql(
+use super::*;
+
+pub(super) async fn send_typed_sql(
     tx: &SyncSender<SqlCommand>,
     username: String,
     sql: String,
     route: SqlRoute,
     command: String,
     queue_name: &str,
-) -> Result<SqlTypedResult, String> {
+) -> DbResult<SqlTypedResult> {
     let (resp_tx, resp_rx) = oneshot::channel();
     match tx.try_send(SqlCommand::RunTyped {
         username,
@@ -16,13 +18,13 @@ async fn send_typed_sql(
     }) {
         Ok(()) => resp_rx
             .await
-            .unwrap_or_else(|_| Err(format!("{queue_name} worker stopped"))),
-        Err(TrySendError::Full(_)) => Err(format!("{queue_name} queue is full")),
-        Err(TrySendError::Disconnected(_)) => Err(format!("{queue_name} worker stopped")),
+            .unwrap_or_else(|_| Err(DbError::worker_stopped(queue_name))),
+        Err(TrySendError::Full(_)) => Err(DbError::queue_full(queue_name)),
+        Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped(queue_name)),
     }
 }
 
-fn spawn_sql_worker<N>(
+pub(super) fn spawn_sql_worker<N>(
     name: N,
     conn: Connection,
     rx: Receiver<SqlCommand>,
@@ -57,7 +59,7 @@ where
                             )
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
-                        let _ = resp.send(result);
+                        let _ = resp.send(result.map_err(DbError::execution));
                     }
                     SqlCommand::Authenticate {
                         username,
@@ -69,7 +71,7 @@ where
                                 .map(|_| ())
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
-                        let _ = resp.send(result);
+                        let _ = resp.send(result.map_err(DbError::execution));
                     }
                     SqlCommand::Describe {
                         username,
@@ -81,7 +83,7 @@ where
                             describe_sql_blocking(&conn, &username, &sql, route)
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
-                        let _ = resp.send(result);
+                        let _ = resp.send(result.map_err(DbError::execution));
                     }
                     SqlCommand::Shutdown => break,
                 }
@@ -91,7 +93,7 @@ where
         .unwrap_or_else(|e| panic!("spawn DuckDB worker {name} failed: {e}"))
 }
 
-fn spawn_snapshot_worker<N>(
+pub(super) fn spawn_snapshot_worker<N>(
     name: N,
     conn: Connection,
     rx: Receiver<SnapshotCommand>,
@@ -120,6 +122,7 @@ where
                             save_snapshot_blocking(&conn, &dir, &prefix)
                         }))
                         .unwrap_or_else(|e| Err(format!("snapshot worker panicked: {e:?}")));
+                        let result = result.map_err(DbError::snapshot);
                         match &result {
                             Ok(path) => info!(
                                 target: "rsduck_audit",

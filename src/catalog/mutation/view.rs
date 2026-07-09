@@ -1,4 +1,6 @@
-fn create_view_relation(
+use super::*;
+
+pub(in crate::catalog) fn create_view_relation(
     conn: &Connection,
     create_view: &CreateView,
     sql: &str,
@@ -50,7 +52,11 @@ fn create_view_relation(
     })
 }
 
-fn insert_view_dependencies(conn: &Connection, view_oid: i64, sql: &str) -> Result<(), String> {
+pub(in crate::catalog) fn insert_view_dependencies(
+    conn: &Connection,
+    view_oid: i64,
+    sql: &str,
+) -> Result<(), String> {
     for (schema, relation) in extract_read_relations(&normalize_for_guard(sql)) {
         let ref_oid = relation_oid(conn, &schema, &relation)?;
         if ref_oid == view_oid {
@@ -69,4 +75,3 @@ fn insert_view_dependencies(conn: &Connection, view_oid: i64, sql: &str) -> Resu
     }
     Ok(())
 }
-

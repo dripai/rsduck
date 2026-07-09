@@ -1,4 +1,6 @@
-fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
+use super::*;
+
+pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE SCHEMA IF NOT EXISTS rsduck_catalog;
@@ -225,4 +227,3 @@ fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("create catalog storage failed: {e}"))?;
     Ok(())
 }
-

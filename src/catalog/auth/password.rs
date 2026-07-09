@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -14,4 +16,3 @@ pub fn verify_password(password: &str, encoded_hash: &str) -> bool {
         .verify_password(password.as_bytes(), &hash)
         .is_ok()
 }
-

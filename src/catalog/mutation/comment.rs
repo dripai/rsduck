@@ -1,4 +1,6 @@
-fn comment_object(
+use super::*;
+
+pub(in crate::catalog) fn comment_object(
     conn: &Connection,
     object_type: CommentObject,
     object_name: &ObjectName,
@@ -72,4 +74,3 @@ fn comment_object(
         Ok(0)
     })
 }
-

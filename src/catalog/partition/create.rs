@@ -1,9 +1,11 @@
-fn physical_partition_name(parent: &str, partition_value: &str) -> String {
+use super::*;
+
+pub(in crate::catalog) fn physical_partition_name(parent: &str, partition_value: &str) -> String {
     let suffix = partition_value.trim_start_matches('_');
     format!("{parent}_{suffix}")
 }
 
-fn physical_partition_create_from_catalog_sql(
+pub(in crate::catalog) fn physical_partition_create_from_catalog_sql(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
@@ -36,7 +38,7 @@ fn physical_partition_create_from_catalog_sql(
     ))
 }
 
-fn physical_partition_constraints_from_catalog(
+pub(in crate::catalog) fn physical_partition_constraints_from_catalog(
     conn: &Connection,
     parent_oid: i64,
 ) -> Result<Vec<String>, String> {
@@ -100,7 +102,7 @@ fn physical_partition_constraints_from_catalog(
     Ok(constraints)
 }
 
-fn constraint_column_list(
+pub(in crate::catalog) fn constraint_column_list(
     conn: &Connection,
     rel_oid: i64,
     attnums: &str,
@@ -113,7 +115,7 @@ fn constraint_column_list(
     Ok(columns.join(", "))
 }
 
-fn parse_attnum_list(attnums: &str) -> Result<Vec<i32>, String> {
+pub(in crate::catalog) fn parse_attnum_list(attnums: &str) -> Result<Vec<i32>, String> {
     if attnums.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -127,8 +129,7 @@ fn parse_attnum_list(attnums: &str) -> Result<Vec<i32>, String> {
         .collect()
 }
 
-
-fn create_range_partition(
+pub(in crate::catalog) fn create_range_partition(
     conn: &Connection,
     relation: &PartitionedRelation,
     partition_value: &str,
@@ -215,9 +216,9 @@ fn create_range_partition(
 }
 
 #[derive(Debug)]
-struct RetentionPartition {
-    partition_value: String,
-    schema: String,
-    relname: String,
-    meta: RelationMeta,
+pub(in crate::catalog) struct RetentionPartition {
+    pub(in crate::catalog) partition_value: String,
+    pub(in crate::catalog) schema: String,
+    pub(in crate::catalog) relname: String,
+    pub(in crate::catalog) meta: RelationMeta,
 }

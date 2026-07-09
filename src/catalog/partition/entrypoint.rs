@@ -1,4 +1,10 @@
-fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str)]) -> String {
+use super::*;
+
+pub(in crate::catalog) fn partition_entrypoint_sql(
+    schema: &str,
+    table: &str,
+    partitions: &[(&str, &str)],
+) -> String {
     let selects = partitions
         .iter()
         .map(|(partition_schema, partition_name)| {
@@ -15,7 +21,7 @@ fn partition_entrypoint_sql(schema: &str, table: &str, partitions: &[(&str, &str
     )
 }
 
-fn empty_partition_entrypoint_sql_from_create_table(
+pub(in crate::catalog) fn empty_partition_entrypoint_sql_from_create_table(
     schema: &str,
     table: &str,
     create_table: &CreateTable,
@@ -38,7 +44,7 @@ fn empty_partition_entrypoint_sql_from_create_table(
     )
 }
 
-fn partition_entrypoint_sql_from_catalog(
+pub(in crate::catalog) fn partition_entrypoint_sql_from_catalog(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
@@ -71,20 +77,21 @@ fn partition_entrypoint_sql_from_catalog(
     ))
 }
 
-fn refresh_partition_entrypoint(
+pub(in crate::catalog) fn refresh_partition_entrypoint(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
     relname: &str,
 ) -> Result<(), String> {
     let partitions = active_partition_children(conn, parent_oid)?;
-    let sql = partition_entrypoint_sql_from_catalog(conn, parent_oid, schema, relname, &partitions)?;
+    let sql =
+        partition_entrypoint_sql_from_catalog(conn, parent_oid, schema, relname, &partitions)?;
     rebuild_partition_entrypoint(conn, parent_oid, &sql)?;
     sync_partition_dependencies(conn, parent_oid, &partitions)?;
     Ok(())
 }
 
-fn sync_partition_dependencies(
+pub(in crate::catalog) fn sync_partition_dependencies(
     conn: &Connection,
     parent_oid: i64,
     partitions: &[ActivePartitionChild],
@@ -112,7 +119,7 @@ fn sync_partition_dependencies(
     Ok(())
 }
 
-fn update_partition_stats(
+pub(in crate::catalog) fn update_partition_stats(
     conn: &Connection,
     parent_oid: i64,
     partition_value: &str,

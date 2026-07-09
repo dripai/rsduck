@@ -1,14 +1,7 @@
-mod catalog;
-mod config;
-mod db;
-mod pg_compat;
-mod process_lock;
-mod server;
-mod sql_route;
-
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use rsduck::{config, db, process_lock, server};
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
@@ -118,20 +111,21 @@ async fn main() {
     } else {
         None
     };
-    db::init_db(snapshot_dir.as_deref(), &cfg.db);
+    let db = db::DbHandle::open(snapshot_dir.as_deref(), &cfg.db);
     info!("In-memory DuckDB initialized");
 
     let partition_task = if cfg.partition.maintenance_enabled {
         let interval = cfg.partition.maintenance_interval_secs.max(1);
         let _verify_interval = cfg.partition.verify_interval_secs.max(1);
         let _max_jobs_per_tick = cfg.partition.max_jobs_per_tick.max(1);
+        let partition_db = db.clone();
         Some(tokio::spawn(async move {
             let mut ticker = time::interval(Duration::from_secs(interval));
             ticker.tick().await;
             loop {
                 ticker.tick().await;
                 let t0 = Instant::now();
-                match db::run_partition_maintenance().await {
+                match partition_db.run_partition_maintenance().await {
                     Ok(_) => info!("Partition maintenance completed ({:.2?})", t0.elapsed()),
                     Err(e) => error!("Partition maintenance failed ({:.2?}): {}", t0.elapsed(), e),
                 }
@@ -142,21 +136,23 @@ async fn main() {
     };
 
     let pg_bind = cfg.pg.bind.clone();
+    let pg_db = db.clone();
     let pg_task = tokio::spawn(async move {
-        server::start_pg_server(&pg_bind).await;
+        server::start_pg_server(&pg_bind, pg_db).await;
     });
 
     let snap_dir = cfg.snapshot.dir.clone();
     let snap_prefix = cfg.snapshot.prefix.clone();
     let interval = cfg.snapshot.interval_secs;
     let retain = cfg.snapshot.retain_hours;
+    let snapshot_db = db.clone();
     let snapshot_task = tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(interval));
         ticker.tick().await;
         loop {
             ticker.tick().await;
             let t0 = Instant::now();
-            match db::save_snapshot(&snap_dir, &snap_prefix).await {
+            match snapshot_db.save_snapshot(&snap_dir, &snap_prefix).await {
                 Ok(path) => info!("Snapshot saved to {} ({:.2?})", path, t0.elapsed()),
                 Err(e) => error!("Snapshot failed ({:.2?}): {}", t0.elapsed(), e),
             }
@@ -165,7 +161,11 @@ async fn main() {
     });
 
     if cfg.web.enabled {
-        let app = server::web_router(cfg.snapshot.dir.clone(), cfg.snapshot.prefix.clone());
+        let app = server::web_router(
+            db.clone(),
+            cfg.snapshot.dir.clone(),
+            cfg.snapshot.prefix.clone(),
+        );
         let shutdown_snapshot_dir = cfg.snapshot.dir.clone();
         let shutdown_snapshot_prefix = cfg.snapshot.prefix.clone();
         let listener = TokioTcpListener::bind(&cfg.web.bind)
@@ -174,6 +174,7 @@ async fn main() {
         info!("Web console on http://{}", cfg.web.bind);
         axum::serve(listener, app)
             .with_graceful_shutdown(wait_for_shutdown(
+                db.clone(),
                 shutdown_snapshot_dir,
                 shutdown_snapshot_prefix,
             ))
@@ -181,7 +182,12 @@ async fn main() {
             .expect("web server error");
     } else {
         info!("Web console disabled by config");
-        wait_for_shutdown(cfg.snapshot.dir.clone(), cfg.snapshot.prefix.clone()).await;
+        wait_for_shutdown(
+            db.clone(),
+            cfg.snapshot.dir.clone(),
+            cfg.snapshot.prefix.clone(),
+        )
+        .await;
     }
 
     snapshot_task.abort();
@@ -189,7 +195,7 @@ async fn main() {
         task.abort();
     }
     pg_task.abort();
-    db::shutdown_workers();
+    db.shutdown();
 }
 
 fn parse_reset_admin_password_args(args: &[String]) -> Result<String, String> {
@@ -259,7 +265,7 @@ mod main_tests {
     }
 }
 
-async fn wait_for_shutdown(snapshot_dir: String, snapshot_prefix: String) {
+async fn wait_for_shutdown(db: db::DbHandle, snapshot_dir: String, snapshot_prefix: String) {
     if let Err(e) = tokio::signal::ctrl_c().await {
         error!("Listen shutdown signal failed: {}", e);
         return;
@@ -267,7 +273,7 @@ async fn wait_for_shutdown(snapshot_dir: String, snapshot_prefix: String) {
 
     info!("Shutdown signal received, saving snapshot before exit");
     let t0 = Instant::now();
-    match db::save_snapshot(&snapshot_dir, &snapshot_prefix).await {
+    match db.save_snapshot(&snapshot_dir, &snapshot_prefix).await {
         Ok(path) => info!("Shutdown snapshot saved to {} ({:.2?})", path, t0.elapsed()),
         Err(e) => error!("Shutdown snapshot failed ({:.2?}): {}", t0.elapsed(), e),
     }

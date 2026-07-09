@@ -1,4 +1,6 @@
-fn allocate_oid(conn: &Connection) -> Result<i64, String> {
+use super::*;
+
+pub(super) fn allocate_oid(conn: &Connection) -> Result<i64, String> {
     let oid: i64 = conn
         .query_row(
             "SELECT next_oid FROM rsduck_catalog.rs_oid_alloc WHERE id = 1",
@@ -14,7 +16,7 @@ fn allocate_oid(conn: &Connection) -> Result<i64, String> {
     Ok(oid)
 }
 
-fn catalog_epoch(conn: &Connection) -> Result<i64, String> {
+pub(super) fn catalog_epoch(conn: &Connection) -> Result<i64, String> {
     conn.query_row(
         "SELECT catalog_epoch FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
         [],
@@ -22,4 +24,3 @@ fn catalog_epoch(conn: &Connection) -> Result<i64, String> {
     )
     .map_err(|e| format!("read catalog epoch failed: {e}"))
 }
-

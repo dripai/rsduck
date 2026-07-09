@@ -1,10 +1,12 @@
+use super::*;
+
 impl SessionPrincipal {
-    fn is_admin(&self) -> bool {
+    pub(in crate::catalog) fn is_admin(&self) -> bool {
         self.roles.iter().any(|role| role == "admin")
     }
 }
 
-fn require_system_action(
+pub(in crate::catalog) fn require_system_action(
     conn: &Connection,
     principal: &SessionPrincipal,
     action: &str,
@@ -19,7 +21,7 @@ fn require_system_action(
     ))
 }
 
-fn require_schema_action(
+pub(in crate::catalog) fn require_schema_action(
     conn: &Connection,
     principal: &SessionPrincipal,
     schema: &str,
@@ -38,7 +40,7 @@ fn require_schema_action(
     ))
 }
 
-fn require_relation_action(
+pub(in crate::catalog) fn require_relation_action(
     conn: &Connection,
     principal: &SessionPrincipal,
     relation: &(String, String),
@@ -66,7 +68,12 @@ fn require_relation_action(
     ))
 }
 
-fn audit_permission_denied(username: &str, scope: &str, object: &str, action: &str) {
+pub(in crate::catalog) fn audit_permission_denied(
+    username: &str,
+    scope: &str,
+    object: &str,
+    action: &str,
+) {
     warn!(
         target: "rsduck_audit",
         event = "permission_denied",
@@ -77,7 +84,7 @@ fn audit_permission_denied(username: &str, scope: &str, object: &str, action: &s
     );
 }
 
-fn has_relation_action(
+pub(in crate::catalog) fn has_relation_action(
     conn: &Connection,
     username: &str,
     relation: &(String, String),
@@ -93,7 +100,7 @@ fn has_relation_action(
             && has_explicit_privilege(conn, &principal, "schema", namespace_oid, "read")?))
 }
 
-fn has_schema_action(
+pub(in crate::catalog) fn has_schema_action(
     conn: &Connection,
     username: &str,
     schema: &str,
@@ -105,7 +112,7 @@ fn has_schema_action(
         || has_explicit_privilege(conn, &principal, "schema", namespace_oid, action)?)
 }
 
-fn has_database_privilege(
+pub(in crate::catalog) fn has_database_privilege(
     conn: &Connection,
     username: &str,
     database: &str,
@@ -125,7 +132,7 @@ fn has_database_privilege(
     has_explicit_privilege(conn, &principal, "system", 0, action)
 }
 
-fn has_explicit_privilege(
+pub(in crate::catalog) fn has_explicit_privilege(
     conn: &Connection,
     principal: &SessionPrincipal,
     object_type: &str,
@@ -159,4 +166,3 @@ fn has_explicit_privilege(
         .map_err(|e| format!("check explicit privilege failed: {e}"))?;
     Ok(count > 0)
 }
-

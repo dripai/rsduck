@@ -1,4 +1,6 @@
-fn pg_type_oid_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> {
+use super::*;
+
+pub(super) fn pg_type_oid_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> {
     let lower = duckdb_type.to_ascii_lowercase();
     if lower == "boolean" || lower == "bool" {
         Ok(16)
@@ -31,7 +33,10 @@ fn pg_type_oid_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> {
     }
 }
 
-fn duckdb_type_for_pg_type_oid(conn: &Connection, pg_type_oid: i64) -> Result<String, String> {
+pub(super) fn duckdb_type_for_pg_type_oid(
+    conn: &Connection,
+    pg_type_oid: i64,
+) -> Result<String, String> {
     conn.query_row(
         &format!(
             "SELECT rsduck_physical_type FROM rsduck_catalog.pg_type WHERE oid = {pg_type_oid}"
@@ -41,4 +46,3 @@ fn duckdb_type_for_pg_type_oid(conn: &Connection, pg_type_oid: i64) -> Result<St
     )
     .map_err(|e| format!("lookup DuckDB type for pg_type oid {pg_type_oid} failed: {e}"))
 }
-

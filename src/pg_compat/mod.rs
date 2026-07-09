@@ -1,4 +1,21 @@
+mod catalog;
+mod function;
+mod rewrite;
+mod settings;
+mod show;
+
 use crate::db::SqlResult;
+
+#[allow(unused_imports)]
+use self::catalog::*;
+#[allow(unused_imports)]
+use self::function::*;
+#[allow(unused_imports)]
+use self::rewrite::*;
+#[allow(unused_imports)]
+use self::settings::*;
+#[allow(unused_imports)]
+use self::show::*;
 
 const PG_NAMESPACE_CLASSOID: i64 = 2615;
 
@@ -29,11 +46,5 @@ pub fn rewrite_sql(sql: &str) -> Option<String> {
     Some(rewrite_pg_type_casts(&rewritten).unwrap_or(rewritten))
 }
 
-include!("show.rs");
-include!("rewrite.rs");
-include!("settings.rs");
-include!("functions.rs");
-include!("projections.rs");
-
 #[cfg(test)]
-include!("tests.rs");
+mod tests;

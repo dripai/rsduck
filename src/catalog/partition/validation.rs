@@ -1,4 +1,6 @@
-fn validate_partition_key(
+use super::*;
+
+pub(in crate::catalog) fn validate_partition_key(
     create_table: &CreateTable,
     partition_key: &str,
     partition_unit: &str,
@@ -42,7 +44,9 @@ fn validate_partition_key(
     ))
 }
 
-fn validate_create_table_column_types(create_table: &CreateTable) -> Result<(), String> {
+pub(in crate::catalog) fn validate_create_table_column_types(
+    create_table: &CreateTable,
+) -> Result<(), String> {
     for column in &create_table.columns {
         let type_text = column.data_type.to_string();
         pg_type_oid_for_duckdb_type(&type_text)?;

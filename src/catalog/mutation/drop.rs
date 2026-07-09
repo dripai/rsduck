@@ -1,4 +1,6 @@
-fn drop_objects(
+use super::*;
+
+pub(in crate::catalog) fn drop_objects(
     conn: &Connection,
     object_type: ObjectType,
     if_exists: bool,
@@ -56,7 +58,7 @@ fn drop_objects(
     })
 }
 
-fn drop_role_accounts(
+pub(in crate::catalog) fn drop_role_accounts(
     conn: &Connection,
     if_exists: bool,
     names: &[ObjectName],
@@ -100,7 +102,7 @@ fn drop_role_accounts(
     })
 }
 
-fn drop_user_accounts(
+pub(in crate::catalog) fn drop_user_accounts(
     conn: &Connection,
     if_exists: bool,
     names: &[ObjectName],
@@ -138,7 +140,7 @@ fn drop_user_accounts(
     })
 }
 
-fn drop_partitioned_relation(
+pub(in crate::catalog) fn drop_partitioned_relation(
     conn: &Connection,
     meta: &RelationMeta,
     schema: &str,
@@ -169,7 +171,10 @@ fn drop_partitioned_relation(
     delete_relation_catalog(conn, meta)
 }
 
-fn drop_partitioned_index(conn: &Connection, meta: &RelationMeta) -> Result<(), String> {
+pub(in crate::catalog) fn drop_partitioned_index(
+    conn: &Connection,
+    meta: &RelationMeta,
+) -> Result<(), String> {
     if let Some(parent_oid) = partitioned_index_parent(conn, meta.oid)? {
         for spec in partition_index_specs(conn, parent_oid)?
             .into_iter()
@@ -195,13 +200,13 @@ fn drop_partitioned_index(conn: &Connection, meta: &RelationMeta) -> Result<(), 
 }
 
 #[derive(Debug)]
-struct PartitionChildMeta {
-    meta: RelationMeta,
-    schema: String,
-    relname: String,
+pub(in crate::catalog) struct PartitionChildMeta {
+    pub(in crate::catalog) meta: RelationMeta,
+    pub(in crate::catalog) schema: String,
+    pub(in crate::catalog) relname: String,
 }
 
-fn partition_child_metas(
+pub(in crate::catalog) fn partition_child_metas(
     conn: &Connection,
     parent_oid: i64,
 ) -> Result<Vec<PartitionChildMeta>, String> {
@@ -248,4 +253,3 @@ fn partition_child_metas(
     }
     Ok(children)
 }
-

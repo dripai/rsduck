@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn execute_init_sql(conn: &Connection, sql: &str) -> Result<(), String> {
     let dialect = DuckDbDialect {};
     let statements =
@@ -30,8 +32,7 @@ pub fn execute_catalog_aware_write_as(
     execute_catalog_statement(conn, &statement, &normalized_sql, principal.user_id)
 }
 
-
-fn execute_catalog_statement(
+pub(in crate::catalog) fn execute_catalog_statement(
     conn: &Connection,
     statement: &Statement,
     sql: &str,
@@ -118,4 +119,3 @@ fn execute_catalog_statement(
         }
     }
 }
-

@@ -1,4 +1,6 @@
-fn create_index_relation(
+use super::*;
+
+pub(in crate::catalog) fn create_index_relation(
     conn: &Connection,
     create_index: &CreateIndex,
     sql: &str,
@@ -119,14 +121,14 @@ fn create_index_relation(
 }
 
 #[derive(Debug)]
-struct PartitionIndexSpec {
-    index_oid: i64,
-    index_name: String,
-    columns: Vec<String>,
-    unique: bool,
+pub(in crate::catalog) struct PartitionIndexSpec {
+    pub(in crate::catalog) index_oid: i64,
+    pub(in crate::catalog) index_name: String,
+    pub(in crate::catalog) columns: Vec<String>,
+    pub(in crate::catalog) unique: bool,
 }
 
-fn create_partition_indexes_from_columns(
+pub(in crate::catalog) fn create_partition_indexes_from_columns(
     conn: &Connection,
     parent_oid: i64,
     index_name: &str,
@@ -145,7 +147,7 @@ fn create_partition_indexes_from_columns(
     Ok(())
 }
 
-fn create_partition_indexes(
+pub(in crate::catalog) fn create_partition_indexes(
     conn: &Connection,
     parent_oid: i64,
     child_relname: &str,
@@ -156,7 +158,7 @@ fn create_partition_indexes(
     Ok(())
 }
 
-fn create_partition_index(
+pub(in crate::catalog) fn create_partition_index(
     conn: &Connection,
     spec: &PartitionIndexSpec,
     child_relname: &str,
@@ -186,7 +188,7 @@ fn create_partition_index(
     Ok(())
 }
 
-fn partition_index_specs(
+pub(in crate::catalog) fn partition_index_specs(
     conn: &Connection,
     parent_oid: i64,
 ) -> Result<Vec<PartitionIndexSpec>, String> {
@@ -233,7 +235,10 @@ fn partition_index_specs(
     Ok(specs)
 }
 
-fn partitioned_index_parent(conn: &Connection, index_oid: i64) -> Result<Option<i64>, String> {
+pub(in crate::catalog) fn partitioned_index_parent(
+    conn: &Connection,
+    index_oid: i64,
+) -> Result<Option<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT i.indrelid \
@@ -256,7 +261,11 @@ fn partitioned_index_parent(conn: &Connection, index_oid: i64) -> Result<Option<
         .map_err(|e| format!("read partitioned index parent oid failed: {e}"))
 }
 
-fn duckdb_index_exists(conn: &Connection, schema: &str, index_name: &str) -> Result<bool, String> {
+pub(in crate::catalog) fn duckdb_index_exists(
+    conn: &Connection,
+    schema: &str,
+    index_name: &str,
+) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             &format!(
@@ -272,7 +281,9 @@ fn duckdb_index_exists(conn: &Connection, schema: &str, index_name: &str) -> Res
     Ok(count > 0)
 }
 
-fn partition_index_name(child_relname: &str, parent_index_name: &str) -> String {
+pub(in crate::catalog) fn partition_index_name(
+    child_relname: &str,
+    parent_index_name: &str,
+) -> String {
     format!("{child_relname}__{parent_index_name}")
 }
-

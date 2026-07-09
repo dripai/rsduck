@@ -1,4 +1,6 @@
-fn rewrite_catalog_relation_references(sql: &str) -> Option<String> {
+use super::*;
+
+pub(super) fn rewrite_catalog_relation_references(sql: &str) -> Option<String> {
     let bytes = sql.as_bytes();
     let mut output = String::with_capacity(sql.len());
     let mut idx = 0;
@@ -86,7 +88,7 @@ fn rewrite_catalog_relation_references(sql: &str) -> Option<String> {
     }
 }
 
-fn rewrite_catalog_function_calls(sql: &str) -> Option<String> {
+pub(super) fn rewrite_catalog_function_calls(sql: &str) -> Option<String> {
     let bytes = sql.as_bytes();
     let mut output = String::with_capacity(sql.len());
     let mut idx = 0;
@@ -161,7 +163,7 @@ fn rewrite_catalog_function_calls(sql: &str) -> Option<String> {
     }
 }
 
-fn rewrite_pg_any_membership(sql: &str) -> Option<String> {
+pub(super) fn rewrite_pg_any_membership(sql: &str) -> Option<String> {
     let bytes = sql.as_bytes();
     let mut output = String::with_capacity(sql.len());
     let mut idx = 0;
@@ -249,18 +251,16 @@ fn rewrite_pg_any_membership(sql: &str) -> Option<String> {
     }
 }
 
-fn rewrite_pg_type_casts(sql: &str) -> Option<String> {
-    let rewritten = replace_ignore_ascii_case(sql, "::information_schema.character_data", "::VARCHAR");
+pub(super) fn rewrite_pg_type_casts(sql: &str) -> Option<String> {
+    let rewritten =
+        replace_ignore_ascii_case(sql, "::information_schema.character_data", "::VARCHAR");
     let rewritten = replace_ignore_ascii_case(&rewritten, "'pg_class'::regclass::oid", "'1259'");
-    let rewritten = replace_ignore_ascii_case(
-        &rewritten,
-        "'pg_catalog.pg_class'::regclass::oid",
-        "'1259'",
-    );
+    let rewritten =
+        replace_ignore_ascii_case(&rewritten, "'pg_catalog.pg_class'::regclass::oid", "'1259'");
     (rewritten != sql).then_some(rewritten)
 }
 
-fn replace_ignore_ascii_case(input: &str, needle: &str, replacement: &str) -> String {
+pub(super) fn replace_ignore_ascii_case(input: &str, needle: &str, replacement: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut idx = 0;
     while idx < input.len() {
@@ -277,7 +277,7 @@ fn replace_ignore_ascii_case(input: &str, needle: &str, replacement: &str) -> St
     output
 }
 
-fn lhs_for_any_equality(sql: &str, any_idx: usize) -> Option<(usize, usize)> {
+pub(super) fn lhs_for_any_equality(sql: &str, any_idx: usize) -> Option<(usize, usize)> {
     let bytes = sql.as_bytes();
     let mut eq_idx = any_idx.checked_sub(1)?;
     while eq_idx > 0 && bytes[eq_idx].is_ascii_whitespace() {
@@ -303,7 +303,7 @@ fn lhs_for_any_equality(sql: &str, any_idx: usize) -> Option<(usize, usize)> {
     (lhs_start < lhs_end).then_some((lhs_start, lhs_end))
 }
 
-fn is_constraint_key_expr(expr: &str) -> bool {
+pub(super) fn is_constraint_key_expr(expr: &str) -> bool {
     let normalized = expr.trim().trim_matches('"').to_ascii_lowercase();
     normalized == "conkey"
         || normalized == "confkey"
@@ -311,7 +311,7 @@ fn is_constraint_key_expr(expr: &str) -> bool {
         || normalized.ends_with(".confkey")
 }
 
-fn catalog_function_at<'a>(sql: &'a str, idx: usize) -> Option<(&'a str, usize)> {
+pub(super) fn catalog_function_at<'a>(sql: &'a str, idx: usize) -> Option<(&'a str, usize)> {
     for function_name in [
         "format_type",
         "pg_get_expr",
@@ -335,7 +335,7 @@ fn catalog_function_at<'a>(sql: &'a str, idx: usize) -> Option<(&'a str, usize)>
     None
 }
 
-fn catalog_function_expr(function_name: &str, args: &[String]) -> Option<String> {
+pub(super) fn catalog_function_expr(function_name: &str, args: &[String]) -> Option<String> {
     let first_arg = args.first()?.trim();
     match function_name {
         "format_type" => Some(format!(
@@ -371,7 +371,7 @@ fn catalog_function_expr(function_name: &str, args: &[String]) -> Option<String>
     }
 }
 
-fn pg_get_constraintdef_expr(oid_expr: &str) -> String {
+pub(super) fn pg_get_constraintdef_expr(oid_expr: &str) -> String {
     format!(
         "
         COALESCE((
@@ -418,7 +418,7 @@ fn pg_get_constraintdef_expr(oid_expr: &str) -> String {
     )
 }
 
-fn catalog_projection_sql(relation_key: &str, source_sql: &str) -> Option<String> {
+pub(super) fn catalog_projection_sql(relation_key: &str, source_sql: &str) -> Option<String> {
     match relation_key {
         "pg_catalog.pg_attribute" => {
             Some(pg_attribute_sql(pg_attribute_includes_dropped(source_sql)))
@@ -463,11 +463,11 @@ fn catalog_projection_sql(relation_key: &str, source_sql: &str) -> Option<String
     }
 }
 
-fn pg_attribute_includes_dropped(sql: &str) -> bool {
+pub(super) fn pg_attribute_includes_dropped(sql: &str) -> bool {
     normalize_sql(sql).contains("attisdropped")
 }
 
-fn parse_relation_reference(sql: &str, start: usize) -> Option<(String, usize)> {
+pub(super) fn parse_relation_reference(sql: &str, start: usize) -> Option<(String, usize)> {
     let mut idx = start;
     let mut parts = Vec::new();
     loop {
@@ -487,7 +487,7 @@ fn parse_relation_reference(sql: &str, start: usize) -> Option<(String, usize)> 
     Some((key, idx))
 }
 
-fn parse_identifier_part(sql: &str, start: usize) -> Option<(String, usize)> {
+pub(super) fn parse_identifier_part(sql: &str, start: usize) -> Option<(String, usize)> {
     let bytes = sql.as_bytes();
     if bytes.get(start) == Some(&b'"') {
         let mut idx = start + 1;
@@ -518,7 +518,7 @@ fn parse_identifier_part(sql: &str, start: usize) -> Option<(String, usize)> {
     }
 }
 
-fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
+pub(super) fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
     let bytes = sql.as_bytes();
     let end = idx + keyword.len();
     end <= bytes.len()
@@ -527,7 +527,7 @@ fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
         && (end == bytes.len() || !is_ident_byte(bytes[end]))
 }
 
-fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
+pub(super) fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
     let bytes = sql.as_bytes();
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
@@ -535,11 +535,11 @@ fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
     idx
 }
 
-fn is_ident_byte(byte: u8) -> bool {
+pub(super) fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn normalize_sql(sql: &str) -> String {
+pub(super) fn normalize_sql(sql: &str) -> String {
     sql.trim()
         .trim_end_matches(';')
         .split_whitespace()

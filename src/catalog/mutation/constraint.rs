@@ -1,4 +1,6 @@
-fn insert_create_table_constraints(
+use super::*;
+
+pub(in crate::catalog) fn insert_create_table_constraints(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -155,7 +157,7 @@ fn insert_create_table_constraints(
     Ok(())
 }
 
-fn insert_constraint(
+pub(in crate::catalog) fn insert_constraint(
     conn: &Connection,
     oid: i64,
     conname: &str,
@@ -185,7 +187,7 @@ fn insert_constraint(
     Ok(())
 }
 
-fn foreign_key_reference(
+pub(in crate::catalog) fn foreign_key_reference(
     conn: &Connection,
     local_schema: &str,
     table: &str,
@@ -225,7 +227,7 @@ fn foreign_key_reference(
     Ok((foreign_meta.oid, confkey))
 }
 
-fn index_columns_to_attnums(
+pub(in crate::catalog) fn index_columns_to_attnums(
     index_columns: &[sqlparser::ast::IndexColumn],
     columns: &[CatalogColumn],
 ) -> Result<String, String> {
@@ -242,7 +244,7 @@ fn index_columns_to_attnums(
     Ok(attnums.join(","))
 }
 
-fn ident_columns_to_attnums(
+pub(in crate::catalog) fn ident_columns_to_attnums(
     idents: &[sqlparser::ast::Ident],
     columns: &[CatalogColumn],
 ) -> Result<String, String> {
@@ -258,7 +260,7 @@ fn ident_columns_to_attnums(
     Ok(attnums.join(","))
 }
 
-fn insert_constraint_dependencies(
+pub(in crate::catalog) fn insert_constraint_dependencies(
     conn: &Connection,
     constraint_oid: i64,
     rel_oid: i64,
@@ -315,7 +317,7 @@ fn insert_constraint_dependencies(
     Ok(())
 }
 
-fn parse_attnums(value: &str) -> Vec<i32> {
+pub(in crate::catalog) fn parse_attnums(value: &str) -> Vec<i32> {
     value
         .split(',')
         .filter_map(|part| part.trim().parse::<i32>().ok())
@@ -323,7 +325,7 @@ fn parse_attnums(value: &str) -> Vec<i32> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_depend_if_missing(
+pub(in crate::catalog) fn insert_depend_if_missing(
     conn: &Connection,
     classid: i64,
     objid: i64,
@@ -360,7 +362,7 @@ fn insert_depend_if_missing(
     Ok(())
 }
 
-fn simple_index_column_names(
+pub(in crate::catalog) fn simple_index_column_names(
     index_columns: &[sqlparser::ast::IndexColumn],
 ) -> Result<Vec<String>, String> {
     let mut names = Vec::with_capacity(index_columns.len());
@@ -379,7 +381,7 @@ fn simple_index_column_names(
     Ok(names)
 }
 
-fn load_duckdb_columns(
+pub(in crate::catalog) fn load_duckdb_columns(
     conn: &Connection,
     schema: &str,
     relation: &str,
@@ -433,4 +435,3 @@ fn load_duckdb_columns(
     }
     Ok(columns)
 }
-

@@ -1,4 +1,6 @@
-fn schema_name_value(schema_name: &SchemaName) -> Result<String, String> {
+use super::*;
+
+pub(super) fn schema_name_value(schema_name: &SchemaName) -> Result<String, String> {
     match schema_name {
         SchemaName::Simple(name) | SchemaName::NamedAuthorization(name, _) => {
             single_name_part(name)
@@ -7,7 +9,7 @@ fn schema_name_value(schema_name: &SchemaName) -> Result<String, String> {
     }
 }
 
-fn relation_name(name: &ObjectName) -> Result<(String, String), String> {
+pub(super) fn relation_name(name: &ObjectName) -> Result<(String, String), String> {
     let parts = ident_parts(name)?;
     match parts.as_slice() {
         [relation] => Ok(("main".to_string(), relation.clone())),
@@ -16,7 +18,7 @@ fn relation_name(name: &ObjectName) -> Result<(String, String), String> {
     }
 }
 
-fn relation_name_with_default(
+pub(super) fn relation_name_with_default(
     name: &ObjectName,
     default_schema: &str,
 ) -> Result<(String, String), String> {
@@ -28,7 +30,7 @@ fn relation_name_with_default(
     }
 }
 
-fn comment_relation_name(
+pub(super) fn comment_relation_name(
     object_type: CommentObject,
     object_name: &ObjectName,
 ) -> Result<(String, String), String> {
@@ -40,7 +42,7 @@ fn comment_relation_name(
     }
 }
 
-fn column_comment_target(name: &ObjectName) -> Result<(String, String, String), String> {
+pub(super) fn column_comment_target(name: &ObjectName) -> Result<(String, String, String), String> {
     let parts = ident_parts(name)?;
     match parts.as_slice() {
         [relation, column] => Ok(("main".to_string(), relation.clone(), column.clone())),
@@ -49,7 +51,7 @@ fn column_comment_target(name: &ObjectName) -> Result<(String, String, String), 
     }
 }
 
-fn single_name_part(name: &ObjectName) -> Result<String, String> {
+pub(super) fn single_name_part(name: &ObjectName) -> Result<String, String> {
     let parts = ident_parts(name)?;
     match parts.as_slice() {
         [part] => Ok(part.clone()),
@@ -57,7 +59,7 @@ fn single_name_part(name: &ObjectName) -> Result<String, String> {
     }
 }
 
-fn ident_parts(name: &ObjectName) -> Result<Vec<String>, String> {
+pub(super) fn ident_parts(name: &ObjectName) -> Result<Vec<String>, String> {
     name.0
         .iter()
         .map(|part| match part {
@@ -67,7 +69,7 @@ fn ident_parts(name: &ObjectName) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn reject_reserved_schema(schema: &str) -> Result<(), String> {
+pub(super) fn reject_reserved_schema(schema: &str) -> Result<(), String> {
     if is_reserved_schema(schema) {
         Err(format!(
             "reserved schema is managed by rsduck catalog: {schema}"
@@ -77,15 +79,14 @@ fn reject_reserved_schema(schema: &str) -> Result<(), String> {
     }
 }
 
-fn is_reserved_schema(schema: &str) -> bool {
+pub(super) fn is_reserved_schema(schema: &str) -> bool {
     matches!(
         schema.to_ascii_lowercase().as_str(),
         "pg_catalog" | "information_schema" | "rsduck_catalog" | "rsduck_internal"
     )
 }
 
-
-fn normalize_for_guard(sql: &str) -> String {
+pub(super) fn normalize_for_guard(sql: &str) -> String {
     sql.trim()
         .trim_end_matches(';')
         .to_ascii_lowercase()
@@ -95,7 +96,7 @@ fn normalize_for_guard(sql: &str) -> String {
         .join(" ")
 }
 
-fn statement_command(statement: &Statement) -> &'static str {
+pub(super) fn statement_command(statement: &Statement) -> &'static str {
     match statement {
         Statement::CreateSchema { .. }
         | Statement::CreateTable(_)
@@ -115,7 +116,7 @@ fn statement_command(statement: &Statement) -> &'static str {
     }
 }
 
-fn sql_bool(value: bool) -> &'static str {
+pub(super) fn sql_bool(value: bool) -> &'static str {
     if value {
         "TRUE"
     } else {
@@ -123,15 +124,14 @@ fn sql_bool(value: bool) -> &'static str {
     }
 }
 
-fn sql_string(value: &str) -> String {
+pub(super) fn sql_string(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-fn quote_ident(value: &str) -> String {
+pub(super) fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn quote_qualified(schema: &str, relation: &str) -> String {
+pub(super) fn quote_qualified(schema: &str, relation: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(relation))
 }
-

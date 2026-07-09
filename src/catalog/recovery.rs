@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
     if !catalog_exists(conn)? {
         if has_user_objects(conn)? {
@@ -41,7 +43,7 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_catalog_journal_state(conn: &Connection) -> Result<(), String> {
+pub(super) fn validate_catalog_journal_state(conn: &Connection) -> Result<(), String> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM rsduck_catalog.rs_catalog_journal \
@@ -104,7 +106,7 @@ fn validate_catalog_journal_state(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_catalog_integrity(conn: &Connection) -> Result<(), String> {
+pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String> {
     ensure_catalog_count_zero(
         conn,
         "SELECT COUNT(*) \
@@ -212,7 +214,11 @@ fn validate_catalog_integrity(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_catalog_count_zero(conn: &Connection, sql: &str, violation: &str) -> Result<(), String> {
+pub(super) fn ensure_catalog_count_zero(
+    conn: &Connection,
+    sql: &str,
+    violation: &str,
+) -> Result<(), String> {
     let count: i64 = conn
         .query_row(sql, [], |row| row.get(0))
         .map_err(|e| format!("catalog integrity check failed: {violation}: {e}"))?;
@@ -225,8 +231,7 @@ fn ensure_catalog_count_zero(conn: &Connection, sql: &str, violation: &str) -> R
     }
 }
 
-
-fn validate_physical_relations(conn: &Connection) -> Result<(), String> {
+pub(super) fn validate_physical_relations(conn: &Connection) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "SELECT c.oid, n.nspname, c.relname, c.relkind \
@@ -276,7 +281,7 @@ fn validate_physical_relations(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_partitioned_relations(conn: &Connection) -> Result<(), String> {
+pub(super) fn validate_partitioned_relations(conn: &Connection) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "SELECT c.oid, n.nspname, c.relname \
@@ -316,7 +321,7 @@ fn validate_partitioned_relations(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_partitioned_relation(
+pub(super) fn validate_partitioned_relation(
     conn: &Connection,
     parent_oid: i64,
     schema: &str,
@@ -376,14 +381,14 @@ fn validate_partitioned_relation(
 }
 
 #[derive(Debug)]
-struct ActivePartitionChild {
-    child_oid: i64,
-    schema: String,
-    relname: String,
-    child_status: String,
+pub(super) struct ActivePartitionChild {
+    pub(super) child_oid: i64,
+    pub(super) schema: String,
+    pub(super) relname: String,
+    pub(super) child_status: String,
 }
 
-fn active_partition_children(
+pub(super) fn active_partition_children(
     conn: &Connection,
     parent_oid: i64,
 ) -> Result<Vec<ActivePartitionChild>, String> {
@@ -423,7 +428,7 @@ fn active_partition_children(
     Ok(partitions)
 }
 
-fn rebuild_partition_entrypoint(
+pub(super) fn rebuild_partition_entrypoint(
     conn: &Connection,
     parent_oid: i64,
     expected_sql: &str,
@@ -443,7 +448,7 @@ fn rebuild_partition_entrypoint(
     Ok(())
 }
 
-fn mark_partition_failed(
+pub(super) fn mark_partition_failed(
     conn: &Connection,
     parent_oid: i64,
     child_oid: i64,
@@ -462,7 +467,7 @@ fn mark_partition_failed(
     Ok(())
 }
 
-fn validate_table_physical(
+pub(super) fn validate_table_physical(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -475,7 +480,7 @@ fn validate_table_physical(
     validate_catalog_columns_match_duckdb(conn, rel_oid, schema, relname)
 }
 
-fn validate_view_physical(
+pub(super) fn validate_view_physical(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -488,7 +493,7 @@ fn validate_view_physical(
     validate_catalog_columns_match_duckdb(conn, rel_oid, schema, relname)
 }
 
-fn validate_index_physical(
+pub(super) fn validate_index_physical(
     conn: &Connection,
     index_oid: i64,
     schema: &str,
@@ -531,7 +536,7 @@ fn validate_index_physical(
     Ok(())
 }
 
-fn validate_catalog_columns_match_duckdb(
+pub(super) fn validate_catalog_columns_match_duckdb(
     conn: &Connection,
     rel_oid: i64,
     schema: &str,
@@ -561,7 +566,7 @@ fn validate_catalog_columns_match_duckdb(
     Ok(())
 }
 
-fn count_duckdb_relation(
+pub(super) fn count_duckdb_relation(
     conn: &Connection,
     table_function: &str,
     name_column: &str,
@@ -581,7 +586,11 @@ fn count_duckdb_relation(
     .map_err(|e| format!("query DuckDB physical relation failed: {e}"))
 }
 
-fn mark_relation_unavailable(conn: &Connection, rel_oid: i64, reason: &str) -> Result<(), String> {
+pub(super) fn mark_relation_unavailable(
+    conn: &Connection,
+    rel_oid: i64,
+    reason: &str,
+) -> Result<(), String> {
     let error_message = relation_unavailable_message(rel_oid, reason);
     conn.execute(
         &format!(
@@ -596,7 +605,7 @@ fn mark_relation_unavailable(conn: &Connection, rel_oid: i64, reason: &str) -> R
     Ok(())
 }
 
-fn relation_unavailable_message(rel_oid: i64, reason: &str) -> String {
+pub(super) fn relation_unavailable_message(rel_oid: i64, reason: &str) -> String {
     if reason.contains("RS-CATALOG-") {
         reason.to_string()
     } else {

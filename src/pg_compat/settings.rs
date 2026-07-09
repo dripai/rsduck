@@ -1,18 +1,20 @@
-fn one_row(columns: &[&str], values: &[&str]) -> SqlResult {
+use super::*;
+
+pub(super) fn one_row(columns: &[&str], values: &[&str]) -> SqlResult {
     SqlResult::Query {
         columns: columns.iter().map(|v| (*v).to_string()).collect(),
         rows: vec![values.iter().map(|v| (*v).to_string()).collect()],
     }
 }
 
-fn exec_ok(command: &str) -> SqlResult {
+pub(super) fn exec_ok(command: &str) -> SqlResult {
     SqlResult::Execute {
         command: command.to_string(),
         affected_rows: 0,
     }
 }
 
-fn pg_set_result(sql: &str) -> Option<SqlResult> {
+pub(super) fn pg_set_result(sql: &str) -> Option<SqlResult> {
     let sql = sql.strip_prefix("set ")?;
     let supported = [
         "application_name",
@@ -31,7 +33,7 @@ fn pg_set_result(sql: &str) -> Option<SqlResult> {
         .then(|| exec_ok("SET"))
 }
 
-fn pg_show_result(sql: &str) -> Option<SqlResult> {
+pub(super) fn pg_show_result(sql: &str) -> Option<SqlResult> {
     let setting = sql.strip_prefix("show ")?.trim();
     if setting == "all" {
         return Some(pg_settings_table_result());
@@ -45,7 +47,7 @@ fn pg_show_result(sql: &str) -> Option<SqlResult> {
     Some(one_row(&[column], &[value]))
 }
 
-fn pg_scalar_result(sql: &str, current_user: &str) -> Option<SqlResult> {
+pub(super) fn pg_scalar_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     if let Some(result) = current_setting_result(sql) {
         return Some(result);
     }
@@ -101,7 +103,7 @@ fn pg_scalar_result(sql: &str, current_user: &str) -> Option<SqlResult> {
     None
 }
 
-fn current_setting_result(sql: &str) -> Option<SqlResult> {
+pub(super) fn current_setting_result(sql: &str) -> Option<SqlResult> {
     if !sql.starts_with("select ") || sql.contains(" from ") {
         return None;
     }
@@ -114,14 +116,14 @@ fn current_setting_result(sql: &str) -> Option<SqlResult> {
     Some(one_row(&["current_setting"], &[value]))
 }
 
-fn first_quoted_literal(sql: &str) -> Option<String> {
+pub(super) fn first_quoted_literal(sql: &str) -> Option<String> {
     let start = sql.find('\'')? + 1;
     let rest = &sql[start..];
     let end = rest.find('\'')?;
     Some(rest[..end].to_string())
 }
 
-fn pg_database_legacy_result(sql: &str) -> Option<SqlResult> {
+pub(super) fn pg_database_legacy_result(sql: &str) -> Option<SqlResult> {
     if !contains_from_table(sql, "pg_database") {
         return None;
     }
@@ -170,7 +172,7 @@ fn pg_database_legacy_result(sql: &str) -> Option<SqlResult> {
     ))
 }
 
-fn pg_settings_table_result() -> SqlResult {
+pub(super) fn pg_settings_table_result() -> SqlResult {
     SqlResult::Query {
         columns: vec![
             "name".to_string(),
@@ -218,8 +220,7 @@ fn pg_settings_table_result() -> SqlResult {
     }
 }
 
-
-fn pg_setting(name: &str) -> Option<(&'static str, &'static str)> {
+pub(super) fn pg_setting(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim_matches('"') {
         "application_name" => Some(("application_name", "rsduck")),
         "client_encoding" => Some(("client_encoding", "UTF8")),
@@ -243,7 +244,7 @@ fn pg_setting(name: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-fn pg_settings_rows() -> Vec<(&'static str, &'static str)> {
+pub(super) fn pg_settings_rows() -> Vec<(&'static str, &'static str)> {
     vec![
         ("application_name", "rsduck"),
         ("client_encoding", "UTF8"),

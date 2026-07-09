@@ -1,4 +1,6 @@
-fn save_snapshot_blocking(
+use super::*;
+
+pub(super) fn save_snapshot_blocking(
     conn: &Connection,
     snapshot_dir: &str,
     snapshot_prefix: &str,
@@ -42,7 +44,7 @@ fn save_snapshot_blocking(
     Ok(final_path.display().to_string())
 }
 
-fn prepare_snapshot_parquet_extension(
+pub(super) fn prepare_snapshot_parquet_extension(
     conn: &Connection,
     base_dir: Option<&Path>,
 ) -> Result<(), String> {
@@ -61,7 +63,7 @@ fn prepare_snapshot_parquet_extension(
     Ok(())
 }
 
-fn write_snapshot_manifest(
+pub(super) fn write_snapshot_manifest(
     conn: &Connection,
     tmp_path: &Path,
     final_path: &Path,
@@ -97,7 +99,10 @@ fn write_snapshot_manifest(
     Ok(())
 }
 
-fn validate_snapshot_manifest(conn: &Connection, snapshot_path: &Path) -> Result<(), String> {
+pub(super) fn validate_snapshot_manifest(
+    conn: &Connection,
+    snapshot_path: &Path,
+) -> Result<(), String> {
     let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST_FILE);
     let payload = fs::read(&manifest_path).map_err(|e| {
         format!(
@@ -171,13 +176,19 @@ pub fn reset_admin_password_offline(
     new_password: &str,
 ) -> Result<String, String> {
     validate_snapshot_prefix(snapshot_prefix)?;
-    let snapshot = find_latest_snapshot_dir(snapshot_dir, snapshot_prefix)
-        .ok_or_else(|| format!("no snapshot found in {snapshot_dir} with prefix {snapshot_prefix}"))?;
+    let snapshot = find_latest_snapshot_dir(snapshot_dir, snapshot_prefix).ok_or_else(|| {
+        format!("no snapshot found in {snapshot_dir} with prefix {snapshot_prefix}")
+    })?;
     let snapshot_path = PathBuf::from(&snapshot);
     let snapshot_name = snapshot_path
         .file_name()
         .map(|name| name.to_string_lossy())
-        .ok_or_else(|| format!("snapshot path has no file name: {}", snapshot_path.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "snapshot path has no file name: {}",
+                snapshot_path.display()
+            )
+        })?;
     if snapshot_name.ends_with(".tmp") {
         return Err(format!(
             "refuse to reset admin password from temp snapshot: {}",
@@ -267,6 +278,6 @@ pub fn validate_snapshot_prefix(prefix: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn escape_sql_string(input: &str) -> String {
+pub(super) fn escape_sql_string(input: &str) -> String {
     input.replace('\'', "''")
 }

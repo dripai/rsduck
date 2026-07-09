@@ -1,4 +1,6 @@
-fn create_schema(
+use super::*;
+
+pub(in crate::catalog) fn create_schema(
     conn: &Connection,
     schema_name: &SchemaName,
     if_not_exists: bool,
@@ -32,4 +34,3 @@ fn create_schema(
         Ok(0)
     })
 }
-

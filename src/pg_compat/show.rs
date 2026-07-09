@@ -1,4 +1,6 @@
-fn rewrite_show_partitions_sql(sql: &str) -> Option<String> {
+use super::*;
+
+pub(super) fn rewrite_show_partitions_sql(sql: &str) -> Option<String> {
     let (schema, table) = parse_show_partitions_target(sql)?;
     let schema = sql_string_literal(&schema.to_ascii_lowercase());
     let table = sql_string_literal(&table.to_ascii_lowercase());
@@ -23,7 +25,7 @@ fn rewrite_show_partitions_sql(sql: &str) -> Option<String> {
     ))
 }
 
-fn parse_show_partitions_target(sql: &str) -> Option<(String, String)> {
+pub(super) fn parse_show_partitions_target(sql: &str) -> Option<(String, String)> {
     let sql = sql.trim();
     let mut idx = 0_usize;
 
@@ -65,4 +67,3 @@ fn parse_show_partitions_target(sql: &str) -> Option<(String, String)> {
 
     Some((schema, table))
 }
-

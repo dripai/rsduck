@@ -1,4 +1,6 @@
-fn run_catalog_tx<F>(conn: &Connection, f: F) -> Result<usize, String>
+use super::*;
+
+pub(super) fn run_catalog_tx<F>(conn: &Connection, f: F) -> Result<usize, String>
 where
     F: FnOnce() -> Result<usize, String>,
 {
@@ -17,7 +19,7 @@ where
     }
 }
 
-fn insert_journal(
+pub(super) fn insert_journal(
     conn: &Connection,
     mutation_type: &str,
     target_oid: i64,
@@ -38,7 +40,7 @@ fn insert_journal(
     Ok(journal_id)
 }
 
-fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
+pub(super) fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
     let (mutation_type, target_oid): (String, i64) = conn
         .query_row(
             &format!(
@@ -74,4 +76,3 @@ fn finish_journal(conn: &Connection, journal_id: i64) -> Result<(), String> {
     );
     Ok(())
 }
-

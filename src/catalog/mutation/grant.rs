@@ -1,4 +1,6 @@
-fn grant_privileges(
+use super::*;
+
+pub(in crate::catalog) fn grant_privileges(
     conn: &Connection,
     grant: &Grant,
     sql: &str,
@@ -34,7 +36,11 @@ fn grant_privileges(
     })
 }
 
-fn revoke_privileges(conn: &Connection, revoke: &Revoke, sql: &str) -> Result<usize, String> {
+pub(in crate::catalog) fn revoke_privileges(
+    conn: &Connection,
+    revoke: &Revoke,
+    sql: &str,
+) -> Result<usize, String> {
     if revoke.objects.is_none() && grant_contains_role_actions(&revoke.privileges) {
         return revoke_roles(conn, &revoke.privileges, &revoke.grantees, sql);
     }
@@ -71,7 +77,7 @@ fn revoke_privileges(conn: &Connection, revoke: &Revoke, sql: &str) -> Result<us
     })
 }
 
-fn grant_roles(
+pub(in crate::catalog) fn grant_roles(
     conn: &Connection,
     privileges: &Privileges,
     grantees: &[sqlparser::ast::Grantee],
@@ -93,7 +99,7 @@ fn grant_roles(
     })
 }
 
-fn revoke_roles(
+pub(in crate::catalog) fn revoke_roles(
     conn: &Connection,
     privileges: &Privileges,
     grantees: &[sqlparser::ast::Grantee],
@@ -122,7 +128,7 @@ fn revoke_roles(
     })
 }
 
-fn grant_contains_role_actions(privileges: &Privileges) -> bool {
+pub(in crate::catalog) fn grant_contains_role_actions(privileges: &Privileges) -> bool {
     matches!(
         privileges,
         Privileges::Actions(actions)
@@ -130,7 +136,10 @@ fn grant_contains_role_actions(privileges: &Privileges) -> bool {
     )
 }
 
-fn granted_role_ids(conn: &Connection, privileges: &Privileges) -> Result<Vec<i64>, String> {
+pub(in crate::catalog) fn granted_role_ids(
+    conn: &Connection,
+    privileges: &Privileges,
+) -> Result<Vec<i64>, String> {
     let Privileges::Actions(actions) = privileges else {
         return Err("role grant requires explicit ROLE action".into());
     };
@@ -151,7 +160,7 @@ fn granted_role_ids(conn: &Connection, privileges: &Privileges) -> Result<Vec<i6
     Ok(role_ids)
 }
 
-fn role_grantee_user_ids(
+pub(in crate::catalog) fn role_grantee_user_ids(
     conn: &Connection,
     grantees: &[sqlparser::ast::Grantee],
 ) -> Result<Vec<i64>, String> {
@@ -176,7 +185,7 @@ fn role_grantee_user_ids(
     Ok(user_ids)
 }
 
-fn upsert_user_role(
+pub(in crate::catalog) fn upsert_user_role(
     conn: &Connection,
     user_id: i64,
     role_id: i64,
@@ -206,7 +215,7 @@ fn upsert_user_role(
     Ok(1)
 }
 
-fn grant_targets(
+pub(in crate::catalog) fn grant_targets(
     conn: &Connection,
     objects: Option<&GrantObjects>,
 ) -> Result<Vec<(String, i64)>, String> {
@@ -236,7 +245,7 @@ fn grant_targets(
     }
 }
 
-fn grant_principals(
+pub(in crate::catalog) fn grant_principals(
     conn: &Connection,
     grantees: &[sqlparser::ast::Grantee],
 ) -> Result<Vec<(String, i64)>, String> {
@@ -262,7 +271,7 @@ fn grant_principals(
         .collect()
 }
 
-fn privilege_actions(
+pub(in crate::catalog) fn privilege_actions(
     privileges: &Privileges,
     targets: &[(String, i64)],
 ) -> Result<Vec<String>, String> {
@@ -308,7 +317,7 @@ fn privilege_actions(
     Ok(actions)
 }
 
-fn upsert_privilege(
+pub(in crate::catalog) fn upsert_privilege(
     conn: &Connection,
     principal_type: &str,
     principal_id: i64,
@@ -350,4 +359,3 @@ fn upsert_privilege(
     .map_err(|e| format!("insert privilege failed: {e}"))?;
     Ok(1)
 }
-

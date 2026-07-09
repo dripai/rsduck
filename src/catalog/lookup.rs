@@ -1,4 +1,6 @@
-fn namespace_exists(conn: &Connection, schema: &str) -> Result<bool, String> {
+use super::*;
+
+pub(super) fn namespace_exists(conn: &Connection, schema: &str) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             &format!(
@@ -12,7 +14,7 @@ fn namespace_exists(conn: &Connection, schema: &str) -> Result<bool, String> {
     Ok(count > 0)
 }
 
-fn ensure_user_schema_exists(conn: &Connection, schema: &str) -> Result<(), String> {
+pub(super) fn ensure_user_schema_exists(conn: &Connection, schema: &str) -> Result<(), String> {
     if namespace_exists(conn, schema)? {
         Ok(())
     } else {
@@ -20,7 +22,7 @@ fn ensure_user_schema_exists(conn: &Connection, schema: &str) -> Result<(), Stri
     }
 }
 
-fn validate_username(username: &str) -> Result<(), String> {
+pub(super) fn validate_username(username: &str) -> Result<(), String> {
     if username.is_empty() {
         return Err("username cannot be empty".into());
     }
@@ -35,7 +37,7 @@ fn validate_username(username: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_role_name(role_name: &str) -> Result<(), String> {
+pub(super) fn validate_role_name(role_name: &str) -> Result<(), String> {
     if role_name.is_empty() {
         return Err("role name cannot be empty".into());
     }
@@ -50,15 +52,18 @@ fn validate_role_name(role_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn user_exists(conn: &Connection, username: &str) -> Result<bool, String> {
+pub(super) fn user_exists(conn: &Connection, username: &str) -> Result<bool, String> {
     Ok(user_id_by_name_opt(conn, username)?.is_some())
 }
 
-fn user_id_by_name(conn: &Connection, username: &str) -> Result<i64, String> {
+pub(super) fn user_id_by_name(conn: &Connection, username: &str) -> Result<i64, String> {
     user_id_by_name_opt(conn, username)?.ok_or_else(|| format!("user does not exist: {username}"))
 }
 
-fn user_id_by_name_opt(conn: &Connection, username: &str) -> Result<Option<i64>, String> {
+pub(super) fn user_id_by_name_opt(
+    conn: &Connection,
+    username: &str,
+) -> Result<Option<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT user_id FROM rsduck_catalog.rs_user WHERE lower(username) = lower('{}')",
@@ -79,11 +84,14 @@ fn user_id_by_name_opt(conn: &Connection, username: &str) -> Result<Option<i64>,
         .map_err(|e| format!("read user id failed: {e}"))
 }
 
-fn role_id_by_name(conn: &Connection, role_name: &str) -> Result<i64, String> {
+pub(super) fn role_id_by_name(conn: &Connection, role_name: &str) -> Result<i64, String> {
     role_id_by_name_opt(conn, role_name)?.ok_or_else(|| format!("role does not exist: {role_name}"))
 }
 
-fn role_id_by_name_opt(conn: &Connection, role_name: &str) -> Result<Option<i64>, String> {
+pub(super) fn role_id_by_name_opt(
+    conn: &Connection,
+    role_name: &str,
+) -> Result<Option<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT role_id FROM rsduck_catalog.rs_role WHERE lower(role_name) = lower('{}')",
@@ -104,7 +112,7 @@ fn role_id_by_name_opt(conn: &Connection, role_name: &str) -> Result<Option<i64>
         .map_err(|e| format!("read role id failed: {e}"))
 }
 
-fn builtin_role(conn: &Connection, role_id: i64) -> Result<bool, String> {
+pub(super) fn builtin_role(conn: &Connection, role_id: i64) -> Result<bool, String> {
     conn.query_row(
         &format!("SELECT is_builtin FROM rsduck_catalog.rs_role WHERE role_id = {role_id}"),
         [],
@@ -113,7 +121,7 @@ fn builtin_role(conn: &Connection, role_id: i64) -> Result<bool, String> {
     .map_err(|e| format!("read role builtin flag failed: {e}"))
 }
 
-fn role_has_dependents(conn: &Connection, role_id: i64) -> Result<bool, String> {
+pub(super) fn role_has_dependents(conn: &Connection, role_id: i64) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             &format!(
@@ -128,7 +136,7 @@ fn role_has_dependents(conn: &Connection, role_id: i64) -> Result<bool, String> 
     Ok(count > 0)
 }
 
-fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
+pub(super) fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
     conn.query_row(
         &format!(
             "SELECT oid FROM rsduck_catalog.pg_namespace WHERE lower(nspname) = lower('{}')",
@@ -140,7 +148,11 @@ fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
     .map_err(|e| format!("namespace does not exist in catalog: {schema}: {e}"))
 }
 
-fn relation_exists(conn: &Connection, schema: &str, relation: &str) -> Result<bool, String> {
+pub(super) fn relation_exists(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             &format!(
@@ -158,7 +170,7 @@ fn relation_exists(conn: &Connection, schema: &str, relation: &str) -> Result<bo
     Ok(count > 0)
 }
 
-fn find_relation_meta(
+pub(super) fn find_relation_meta(
     conn: &Connection,
     schema: &str,
     relation: &str,
@@ -199,7 +211,7 @@ fn find_relation_meta(
     }))
 }
 
-fn relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, String> {
+pub(super) fn relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, String> {
     conn.query_row(
         &format!(
             "SELECT c.oid \
@@ -216,7 +228,11 @@ fn relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, 
     .map_err(|e| format!("relation does not exist in catalog: {schema}.{relation}: {e}"))
 }
 
-fn available_relation_oid(conn: &Connection, schema: &str, relation: &str) -> Result<i64, String> {
+pub(super) fn available_relation_oid(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+) -> Result<i64, String> {
     let Some(meta) = find_relation_access_meta(conn, schema, relation)? else {
         return Err(format!(
             "relation does not exist in catalog: {schema}.{relation}"
@@ -231,7 +247,7 @@ fn available_relation_oid(conn: &Connection, schema: &str, relation: &str) -> Re
     ))
 }
 
-fn find_relation_access_meta(
+pub(super) fn find_relation_access_meta(
     conn: &Connection,
     schema: &str,
     relation: &str,
@@ -268,11 +284,15 @@ fn find_relation_access_meta(
     }))
 }
 
-fn column_exists(conn: &Connection, rel_oid: i64, column_name: &str) -> Result<bool, String> {
+pub(super) fn column_exists(
+    conn: &Connection,
+    rel_oid: i64,
+    column_name: &str,
+) -> Result<bool, String> {
     Ok(column_attnum(conn, rel_oid, column_name)?.is_some())
 }
 
-fn column_attnum(
+pub(super) fn column_attnum(
     conn: &Connection,
     rel_oid: i64,
     column_name: &str,
@@ -298,7 +318,11 @@ fn column_attnum(
         .map_err(|e| format!("read column attnum failed: {e}"))
 }
 
-fn column_name_by_attnum(conn: &Connection, rel_oid: i64, attnum: i32) -> Result<String, String> {
+pub(super) fn column_name_by_attnum(
+    conn: &Connection,
+    rel_oid: i64,
+    attnum: i32,
+) -> Result<String, String> {
     conn.query_row(
         &format!(
             "SELECT attname FROM rsduck_catalog.pg_attribute \
@@ -312,7 +336,7 @@ fn column_name_by_attnum(conn: &Connection, rel_oid: i64, attnum: i32) -> Result
     })
 }
 
-fn relation_kind(conn: &Connection, rel_oid: i64) -> Result<String, String> {
+pub(super) fn relation_kind(conn: &Connection, rel_oid: i64) -> Result<String, String> {
     conn.query_row(
         &format!("SELECT relkind FROM rsduck_catalog.pg_class WHERE oid = {rel_oid}"),
         [],
@@ -321,7 +345,10 @@ fn relation_kind(conn: &Connection, rel_oid: i64) -> Result<String, String> {
     .map_err(|e| format!("read relation kind failed: {e}"))
 }
 
-fn relation_name_by_oid(conn: &Connection, rel_oid: i64) -> Result<(String, String), String> {
+pub(super) fn relation_name_by_oid(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<(String, String), String> {
     conn.query_row(
         &format!(
             "SELECT n.nspname, c.relname \
@@ -335,7 +362,10 @@ fn relation_name_by_oid(conn: &Connection, rel_oid: i64) -> Result<(String, Stri
     .map_err(|e| format!("relation oid does not exist in catalog: {rel_oid}: {e}"))
 }
 
-fn catalog_columns(conn: &Connection, rel_oid: i64) -> Result<Vec<CatalogColumn>, String> {
+pub(super) fn catalog_columns(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<Vec<CatalogColumn>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT a.attname, a.atttypid, a.attnum, a.attnotnull, d.adbin \
@@ -375,7 +405,7 @@ fn catalog_columns(conn: &Connection, rel_oid: i64) -> Result<Vec<CatalogColumn>
     Ok(columns)
 }
 
-fn ensure_drop_type(object_type: ObjectType, meta: &RelationMeta) -> Result<(), String> {
+pub(super) fn ensure_drop_type(object_type: ObjectType, meta: &RelationMeta) -> Result<(), String> {
     let ok = match object_type {
         ObjectType::Table => meta.relkind == "r" || meta.relkind == "p",
         ObjectType::View => meta.relkind == "v",
@@ -392,7 +422,7 @@ fn ensure_drop_type(object_type: ObjectType, meta: &RelationMeta) -> Result<(), 
     }
 }
 
-fn drop_relation_dependencies(
+pub(super) fn drop_relation_dependencies(
     conn: &Connection,
     meta: &RelationMeta,
     cascade: bool,
@@ -413,7 +443,7 @@ fn drop_relation_dependencies(
     Ok(())
 }
 
-fn dependent_relation_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, String> {
+pub(super) fn dependent_relation_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT objid FROM rsduck_catalog.pg_depend \
@@ -437,7 +467,10 @@ fn dependent_relation_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, 
     Ok(oids)
 }
 
-fn dependent_constraint_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, String> {
+pub(super) fn dependent_constraint_oids(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<Vec<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT DISTINCT d.objid \
@@ -465,7 +498,10 @@ fn dependent_constraint_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>
     Ok(oids)
 }
 
-fn relation_meta_by_oid(conn: &Connection, rel_oid: i64) -> Result<Option<RelationMeta>, String> {
+pub(super) fn relation_meta_by_oid(
+    conn: &Connection,
+    rel_oid: i64,
+) -> Result<Option<RelationMeta>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT oid, reltype, relkind, relispartition \
@@ -497,7 +533,7 @@ fn relation_meta_by_oid(conn: &Connection, rel_oid: i64) -> Result<Option<Relati
     }))
 }
 
-fn execute_physical_drop(
+pub(super) fn execute_physical_drop(
     conn: &Connection,
     object_type: ObjectType,
     schema: &str,
@@ -522,7 +558,10 @@ fn execute_physical_drop(
     Ok(())
 }
 
-fn delete_constraint_catalog(conn: &Connection, constraint_oid: i64) -> Result<(), String> {
+pub(super) fn delete_constraint_catalog(
+    conn: &Connection,
+    constraint_oid: i64,
+) -> Result<(), String> {
     for sql in [
         format!(
             "DELETE FROM rsduck_catalog.pg_depend \
@@ -538,7 +577,10 @@ fn delete_constraint_catalog(conn: &Connection, constraint_oid: i64) -> Result<(
     Ok(())
 }
 
-fn delete_relation_catalog(conn: &Connection, meta: &RelationMeta) -> Result<(), String> {
+pub(super) fn delete_relation_catalog(
+    conn: &Connection,
+    meta: &RelationMeta,
+) -> Result<(), String> {
     let table_oid: Option<i64> = if meta.relkind == "i" {
         conn.query_row(
             &format!(
@@ -621,7 +663,7 @@ fn delete_relation_catalog(conn: &Connection, meta: &RelationMeta) -> Result<(),
     Ok(())
 }
 
-fn catalog_exists(conn: &Connection) -> Result<bool, String> {
+pub(super) fn catalog_exists(conn: &Connection) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables \
@@ -633,7 +675,7 @@ fn catalog_exists(conn: &Connection) -> Result<bool, String> {
     Ok(count > 0)
 }
 
-fn catalog_version_row_exists(conn: &Connection) -> Result<bool, String> {
+pub(super) fn catalog_version_row_exists(conn: &Connection) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
@@ -644,7 +686,7 @@ fn catalog_version_row_exists(conn: &Connection) -> Result<bool, String> {
     Ok(count > 0)
 }
 
-fn has_user_objects(conn: &Connection) -> Result<bool, String> {
+pub(super) fn has_user_objects(conn: &Connection) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM duckdb_tables() \
@@ -656,4 +698,3 @@ fn has_user_objects(conn: &Connection) -> Result<bool, String> {
         .map_err(|e| format!("check existing DuckDB user objects failed: {e}"))?;
     Ok(count > 0)
 }
-

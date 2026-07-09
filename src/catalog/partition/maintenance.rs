@@ -1,4 +1,6 @@
-fn expire_old_partitions(
+use super::*;
+
+pub(in crate::catalog) fn expire_old_partitions(
     conn: &Connection,
     relation: &PartitionedRelation,
 ) -> Result<usize, String> {
@@ -18,7 +20,10 @@ fn expire_old_partitions(
     Ok(expire_count)
 }
 
-fn run_partition_maintenance(conn: &Connection, sql: &str) -> Result<usize, String> {
+pub(in crate::catalog) fn run_partition_maintenance(
+    conn: &Connection,
+    sql: &str,
+) -> Result<usize, String> {
     run_catalog_tx(conn, || {
         let journal_id = insert_journal(conn, "run_partition_maintenance", 0, sql)?;
         let mut expired = 0usize;
@@ -31,7 +36,9 @@ fn run_partition_maintenance(conn: &Connection, sql: &str) -> Result<usize, Stri
     })
 }
 
-fn partitioned_relations(conn: &Connection) -> Result<Vec<PartitionedRelation>, String> {
+pub(in crate::catalog) fn partitioned_relations(
+    conn: &Connection,
+) -> Result<Vec<PartitionedRelation>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT n.nspname, c.relname \
@@ -64,4 +71,3 @@ fn partitioned_relations(conn: &Connection) -> Result<Vec<PartitionedRelation>, 
     }
     Ok(relations)
 }
-

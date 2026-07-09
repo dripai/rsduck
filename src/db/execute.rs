@@ -1,5 +1,7 @@
+use super::*;
+
 #[cfg(test)]
-fn execute_sql_blocking(
+pub(super) fn execute_sql_blocking(
     conn: &Connection,
     username: &str,
     sql: &str,
@@ -11,7 +13,7 @@ fn execute_sql_blocking(
         .map(SqlResult::from)
 }
 
-fn execute_typed_sql_blocking(
+pub(super) fn execute_typed_sql_blocking(
     conn: &Connection,
     username: &str,
     sql: &str,
@@ -28,7 +30,7 @@ fn execute_typed_sql_blocking(
         let (column, allowed) =
             crate::catalog::evaluate_privilege_function(conn, username, sql_trimmed)?;
         return Ok(SqlTypedResult::Query {
-            columns: vec![SqlColumn::new(column, PG_TYPE_BOOL)],
+            columns: vec![SqlColumn::new(column, SqlType::Bool)],
             rows: vec![vec![Some(if allowed { "t" } else { "f" }.to_string())]],
         });
     }
@@ -67,183 +69,7 @@ fn execute_typed_sql_blocking(
     }
 }
 
-pub fn sql_placeholder_count(sql: &str) -> Result<usize, String> {
-    scan_sql_params(sql, None).map(|(_, count)| count)
-}
-
-fn bind_sql_params(sql: &str, params: &[SqlParam]) -> Result<String, String> {
-    scan_sql_params(sql, Some(params)).map(|(sql, _)| sql)
-}
-
-fn scan_sql_params(
-    sql: &str,
-    params: Option<&[SqlParam]>,
-) -> Result<(String, usize), String> {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut idx = 0;
-    let mut max_param = 0;
-    let mut state = SqlScanState::Normal;
-
-    while idx < bytes.len() {
-        match state {
-            SqlScanState::Normal => {
-                if bytes[idx] == b'\'' {
-                    let next = idx + 1;
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                    state = SqlScanState::SingleQuote;
-                } else if bytes[idx] == b'"' {
-                    let next = idx + 1;
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                    state = SqlScanState::DoubleQuote;
-                } else if bytes[idx] == b'-' && bytes.get(idx + 1) == Some(&b'-') {
-                    out.push_str(&sql[idx..idx + 2]);
-                    idx += 2;
-                    state = SqlScanState::LineComment;
-                } else if bytes[idx] == b'/' && bytes.get(idx + 1) == Some(&b'*') {
-                    out.push_str(&sql[idx..idx + 2]);
-                    idx += 2;
-                    state = SqlScanState::BlockComment;
-                } else if bytes[idx] == b'$'
-                    && bytes
-                        .get(idx + 1)
-                        .is_some_and(|byte| byte.is_ascii_digit())
-                {
-                    let start = idx + 1;
-                    let mut end = start;
-                    while bytes.get(end).is_some_and(|byte| byte.is_ascii_digit()) {
-                        end += 1;
-                    }
-                    let param_number = sql[start..end]
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid SQL parameter: ${}", &sql[start..end]))?;
-                    if param_number == 0 {
-                        return Err("invalid SQL parameter: $0".into());
-                    }
-                    max_param = max_param.max(param_number);
-                    if let Some(params) = params {
-                        let param = params.get(param_number - 1).ok_or_else(|| {
-                            format!("missing SQL parameter: ${param_number}")
-                        })?;
-                        out.push_str(&sql_param_literal(param)?);
-                    } else {
-                        out.push_str(&sql[idx..end]);
-                    }
-                    idx = end;
-                } else {
-                    let next = next_char_index(sql, idx);
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                }
-            }
-            SqlScanState::SingleQuote => {
-                if bytes[idx] == b'\'' {
-                    if bytes.get(idx + 1) == Some(&b'\'') {
-                        out.push_str(&sql[idx..idx + 2]);
-                        idx += 2;
-                    } else {
-                        out.push_str(&sql[idx..idx + 1]);
-                        idx += 1;
-                        state = SqlScanState::Normal;
-                    }
-                } else {
-                    let next = next_char_index(sql, idx);
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                }
-            }
-            SqlScanState::DoubleQuote => {
-                if bytes[idx] == b'"' {
-                    if bytes.get(idx + 1) == Some(&b'"') {
-                        out.push_str(&sql[idx..idx + 2]);
-                        idx += 2;
-                    } else {
-                        out.push_str(&sql[idx..idx + 1]);
-                        idx += 1;
-                        state = SqlScanState::Normal;
-                    }
-                } else {
-                    let next = next_char_index(sql, idx);
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                }
-            }
-            SqlScanState::LineComment => {
-                let next = next_char_index(sql, idx);
-                out.push_str(&sql[idx..next]);
-                if bytes[idx] == b'\n' {
-                    state = SqlScanState::Normal;
-                }
-                idx = next;
-            }
-            SqlScanState::BlockComment => {
-                if bytes[idx] == b'*' && bytes.get(idx + 1) == Some(&b'/') {
-                    out.push_str(&sql[idx..idx + 2]);
-                    idx += 2;
-                    state = SqlScanState::Normal;
-                } else {
-                    let next = next_char_index(sql, idx);
-                    out.push_str(&sql[idx..next]);
-                    idx = next;
-                }
-            }
-        }
-    }
-
-    if let Some(params) = params {
-        if params.len() > max_param {
-            return Err(format!(
-                "too many SQL parameters: got {}, used {}",
-                params.len(),
-                max_param
-            ));
-        }
-    }
-
-    Ok((out, max_param))
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SqlScanState {
-    Normal,
-    SingleQuote,
-    DoubleQuote,
-    LineComment,
-    BlockComment,
-}
-
-fn next_char_index(sql: &str, idx: usize) -> usize {
-    idx + sql[idx..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
-        .unwrap_or(1)
-}
-
-fn sql_param_literal(param: &SqlParam) -> Result<String, String> {
-    match param {
-        SqlParam::Null => Ok("NULL".to_string()),
-        SqlParam::Text(value) => Ok(sql_string_literal(value)),
-        SqlParam::Bool(value) => Ok(if *value { "true" } else { "false" }.to_string()),
-        SqlParam::Integer(value) => Ok(value.to_string()),
-        SqlParam::Float(value) => {
-            if value.is_finite() {
-                Ok(value.to_string())
-            } else {
-                Err(format!("non-finite SQL parameter is not supported: {value}"))
-            }
-        }
-        SqlParam::Bytes(value) => Ok(format!("'\\x{}'", hex_encode(value))),
-    }
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn query_typed_sql_blocking(
+pub(super) fn query_typed_sql_blocking(
     conn: &Connection,
     sql: &str,
     max_result_rows: usize,
@@ -274,7 +100,7 @@ fn query_typed_sql_blocking(
     })
 }
 
-fn describe_sql_blocking(
+pub(super) fn describe_sql_blocking(
     conn: &Connection,
     username: &str,
     sql: &str,
@@ -287,14 +113,12 @@ fn describe_sql_blocking(
 
     if crate::catalog::looks_like_privilege_function(sql_trimmed) {
         let (column, _) = crate::catalog::evaluate_privilege_function(conn, username, sql_trimmed)?;
-        return Ok(vec![SqlColumn::new(column, PG_TYPE_BOOL)]);
+        return Ok(vec![SqlColumn::new(column, SqlType::Bool)]);
     }
 
     if let Some(result) = crate::pg_compat::compat_result(sql_trimmed, username) {
         return Ok(match result {
-            SqlResult::Query { columns, .. } => {
-                columns.into_iter().map(SqlColumn::text).collect()
-            }
+            SqlResult::Query { columns, .. } => columns.into_iter().map(SqlColumn::text).collect(),
             SqlResult::Execute { .. } => Vec::new(),
         });
     }
@@ -316,7 +140,10 @@ fn describe_sql_blocking(
     }
 }
 
-fn describe_query_sql_blocking(conn: &Connection, sql: &str) -> Result<Vec<SqlColumn>, String> {
+pub(super) fn describe_query_sql_blocking(
+    conn: &Connection,
+    sql: &str,
+) -> Result<Vec<SqlColumn>, String> {
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt.query([]).map_err(|e| e.to_string())?;
     let stmt_ref = rows
@@ -326,7 +153,7 @@ fn describe_query_sql_blocking(conn: &Connection, sql: &str) -> Result<Vec<SqlCo
     Ok(statement_columns(stmt_ref, col_count))
 }
 
-fn typed_result_from_sql_result(result: SqlResult) -> SqlTypedResult {
+pub(super) fn typed_result_from_sql_result(result: SqlResult) -> SqlTypedResult {
     match result {
         SqlResult::Query { columns, rows } => SqlTypedResult::Query {
             columns: columns.into_iter().map(SqlColumn::text).collect(),
@@ -345,7 +172,7 @@ fn typed_result_from_sql_result(result: SqlResult) -> SqlTypedResult {
     }
 }
 
-fn statement_columns(stmt: &duckdb::Statement<'_>, col_count: usize) -> Vec<SqlColumn> {
+pub(super) fn statement_columns(stmt: &duckdb::Statement<'_>, col_count: usize) -> Vec<SqlColumn> {
     (0..col_count)
         .map(|idx| {
             let name = stmt
@@ -356,37 +183,37 @@ fn statement_columns(stmt: &duckdb::Statement<'_>, col_count: usize) -> Vec<SqlC
             let type_id = logical_type
                 .try_id()
                 .unwrap_or(duckdb::core::LogicalTypeId::Unsupported);
-            SqlColumn::new(name, pg_type_oid_for_duckdb_type(type_id))
+            SqlColumn::new(name, sql_type_for_duckdb_type(type_id))
         })
         .collect()
 }
 
-fn pg_type_oid_for_duckdb_type(type_id: duckdb::core::LogicalTypeId) -> u32 {
+pub(super) fn sql_type_for_duckdb_type(type_id: duckdb::core::LogicalTypeId) -> SqlType {
     use duckdb::core::LogicalTypeId;
 
     match type_id {
-        LogicalTypeId::Boolean => PG_TYPE_BOOL,
-        LogicalTypeId::Tinyint | LogicalTypeId::Smallint | LogicalTypeId::UTinyint => PG_TYPE_INT2,
-        LogicalTypeId::Integer | LogicalTypeId::USmallint => PG_TYPE_INT4,
+        LogicalTypeId::Boolean => SqlType::Bool,
+        LogicalTypeId::Tinyint | LogicalTypeId::Smallint | LogicalTypeId::UTinyint => SqlType::Int2,
+        LogicalTypeId::Integer | LogicalTypeId::USmallint => SqlType::Int4,
         LogicalTypeId::Bigint | LogicalTypeId::UInteger | LogicalTypeId::IntegerLiteral => {
-            PG_TYPE_INT8
+            SqlType::Int8
         }
         LogicalTypeId::Hugeint
         | LogicalTypeId::UHugeint
         | LogicalTypeId::UBigint
         | LogicalTypeId::Decimal
-        | LogicalTypeId::Bignum => PG_TYPE_NUMERIC,
-        LogicalTypeId::Float => PG_TYPE_FLOAT4,
-        LogicalTypeId::Double => PG_TYPE_FLOAT8,
+        | LogicalTypeId::Bignum => SqlType::Numeric,
+        LogicalTypeId::Float => SqlType::Float4,
+        LogicalTypeId::Double => SqlType::Float8,
         LogicalTypeId::Timestamp
         | LogicalTypeId::TimestampS
         | LogicalTypeId::TimestampMs
-        | LogicalTypeId::TimestampNs => PG_TYPE_TIMESTAMP,
-        LogicalTypeId::TimestampTZ => PG_TYPE_TIMESTAMPTZ,
-        LogicalTypeId::Date => PG_TYPE_DATE,
-        LogicalTypeId::Time | LogicalTypeId::TimeNs => PG_TYPE_TIME,
-        LogicalTypeId::Uuid => PG_TYPE_UUID,
-        LogicalTypeId::Blob => PG_TYPE_BYTEA,
+        | LogicalTypeId::TimestampNs => SqlType::Timestamp,
+        LogicalTypeId::TimestampTZ => SqlType::TimestampTz,
+        LogicalTypeId::Date => SqlType::Date,
+        LogicalTypeId::Time | LogicalTypeId::TimeNs => SqlType::Time,
+        LogicalTypeId::Uuid => SqlType::Uuid,
+        LogicalTypeId::Blob => SqlType::Bytea,
         LogicalTypeId::Varchar
         | LogicalTypeId::StringLiteral
         | LogicalTypeId::Enum
@@ -402,18 +229,16 @@ fn pg_type_oid_for_duckdb_type(type_id: duckdb::core::LogicalTypeId) -> u32 {
         | LogicalTypeId::SqlNull
         | LogicalTypeId::Variant
         | LogicalTypeId::Invalid
-        | LogicalTypeId::Unsupported => PG_TYPE_TEXT,
-        _ => PG_TYPE_TEXT,
+        | LogicalTypeId::Unsupported => SqlType::Text,
+        _ => SqlType::Text,
     }
 }
 
-fn cell_to_pg_text(row: &duckdb::Row<'_>, idx: usize) -> Option<String> {
-    row.get_ref(idx)
-        .ok()
-        .and_then(value_ref_to_pg_text)
+pub(super) fn cell_to_pg_text(row: &duckdb::Row<'_>, idx: usize) -> Option<String> {
+    row.get_ref(idx).ok().and_then(value_ref_to_pg_text)
 }
 
-fn value_ref_to_pg_text(value: ValueRef<'_>) -> Option<String> {
+pub(super) fn value_ref_to_pg_text(value: ValueRef<'_>) -> Option<String> {
     match value {
         ValueRef::Null => None,
         ValueRef::Boolean(v) => Some(if v { "t" } else { "f" }.to_string()),
@@ -443,7 +268,7 @@ fn value_ref_to_pg_text(value: ValueRef<'_>) -> Option<String> {
     }
 }
 
-fn format_date32(days: i32) -> String {
+pub(super) fn format_date32(days: i32) -> String {
     let Some(epoch) = chrono::NaiveDate::from_ymd_opt(1970, 1, 1) else {
         return days.to_string();
     };
@@ -453,7 +278,7 @@ fn format_date32(days: i32) -> String {
         .unwrap_or_else(|| days.to_string())
 }
 
-fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
+pub(super) fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
     let micros = unit.to_micros(value);
     let secs = micros.div_euclid(1_000_000);
     let nanos = micros.rem_euclid(1_000_000) as u32 * 1_000;
@@ -467,7 +292,7 @@ fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
         .unwrap_or_else(|| format!("{value} {unit:?}"))
 }
 
-fn format_time64(unit: duckdb::types::TimeUnit, value: i64) -> String {
+pub(super) fn format_time64(unit: duckdb::types::TimeUnit, value: i64) -> String {
     let micros_per_day = 86_400_000_000_i64;
     let micros = unit.to_micros(value).rem_euclid(micros_per_day);
     let hours = micros / 3_600_000_000;
@@ -479,14 +304,4 @@ fn format_time64(unit: duckdb::types::TimeUnit, value: i64) -> String {
     } else {
         format!("{hours:02}:{minutes:02}:{seconds:02}.{subsecond:06}")
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }

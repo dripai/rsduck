@@ -1,4 +1,6 @@
-fn restore_or_initialize(
+use super::*;
+
+pub(super) fn restore_or_initialize(
     conn: &Connection,
     snapshot_dir: Option<&str>,
     init_sql_path: &str,
@@ -42,4 +44,3 @@ fn restore_or_initialize(
     info!("init_sql executed in {:.2?}", t0.elapsed());
     Ok(())
 }
-

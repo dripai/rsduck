@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn bootstrap_fresh(conn: &Connection) -> Result<(), String> {
     create_catalog_storage(conn)?;
     if catalog_version_row_exists(conn)? {
@@ -6,8 +8,7 @@ pub fn bootstrap_fresh(conn: &Connection) -> Result<(), String> {
     insert_bootstrap_rows(conn)
 }
 
-
-fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
+pub(super) fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
     let admin_password_hash = hash_password("admin")?;
     run_catalog_tx(conn, || {
         conn.execute(
@@ -90,4 +91,3 @@ fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
     })?;
     Ok(())
 }
-

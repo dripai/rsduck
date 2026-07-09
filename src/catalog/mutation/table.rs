@@ -1,4 +1,6 @@
-fn create_table_relation(
+use super::*;
+
+pub(in crate::catalog) fn create_table_relation(
     conn: &Connection,
     create_table: &CreateTable,
     sql: &str,
@@ -57,7 +59,7 @@ fn create_table_relation(
     })
 }
 
-fn create_range_partitioned_table(
+pub(in crate::catalog) fn create_range_partitioned_table(
     conn: &Connection,
     partitioned: &ManagedPartitionCreate,
     owner_user_id: i64,
@@ -143,7 +145,7 @@ fn create_range_partitioned_table(
     })
 }
 
-fn insert_partitioned_relation(
+pub(in crate::catalog) fn insert_partitioned_relation(
     conn: &Connection,
     insert: &Insert,
     sql: &str,
@@ -216,9 +218,10 @@ fn insert_partitioned_relation(
     })
 }
 
-type PartitionInsertGroups = Vec<(String, Option<NaiveDateTime>, Vec<Vec<String>>)>;
+pub(in crate::catalog) type PartitionInsertGroups =
+    Vec<(String, Option<NaiveDateTime>, Vec<Vec<String>>)>;
 
-fn create_table_columns_with_metadata(
+pub(in crate::catalog) fn create_table_columns_with_metadata(
     mut columns: Vec<CatalogColumn>,
     create_table: &CreateTable,
 ) -> Vec<CatalogColumn> {

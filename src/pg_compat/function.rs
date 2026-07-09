@@ -1,4 +1,6 @@
-fn catalog_scalar_function_sql(raw_sql: &str, normalized_sql: &str) -> Option<String> {
+use super::*;
+
+pub(super) fn catalog_scalar_function_sql(raw_sql: &str, normalized_sql: &str) -> Option<String> {
     if normalized_sql.contains(" from ") {
         return None;
     }
@@ -72,7 +74,7 @@ fn catalog_scalar_function_sql(raw_sql: &str, normalized_sql: &str) -> Option<St
     None
 }
 
-fn strip_select(sql: &str) -> Option<&str> {
+pub(super) fn strip_select(sql: &str) -> Option<&str> {
     sql.trim()
         .trim_end_matches(';')
         .trim()
@@ -87,7 +89,7 @@ fn strip_select(sql: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn scalar_function_args(
+pub(super) fn scalar_function_args(
     raw_body: &str,
     normalized_body: &str,
     function_name: &str,
@@ -105,7 +107,7 @@ fn scalar_function_args(
     Some(split_function_args(&raw_body[open_idx + 1..close_idx]))
 }
 
-fn find_closing_paren(value: &str, open_idx: usize) -> Option<usize> {
+pub(super) fn find_closing_paren(value: &str, open_idx: usize) -> Option<usize> {
     let bytes = value.as_bytes();
     let mut depth = 0_i32;
     let mut in_single = false;
@@ -139,7 +141,7 @@ fn find_closing_paren(value: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
-fn split_function_args(value: &str) -> Vec<String> {
+pub(super) fn split_function_args(value: &str) -> Vec<String> {
     let bytes = value.as_bytes();
     let mut args = Vec::new();
     let mut start = 0;
@@ -175,17 +177,16 @@ fn split_function_args(value: &str) -> Vec<String> {
     args
 }
 
-fn parse_i64_arg(value: &str) -> Option<i64> {
+pub(super) fn parse_i64_arg(value: &str) -> Option<i64> {
     value.trim().trim_matches('\'').parse().ok()
 }
 
-fn unquote_sql_literal(value: &str) -> Option<String> {
+pub(super) fn unquote_sql_literal(value: &str) -> Option<String> {
     let value = value.trim();
     let inner = value.strip_prefix('\'')?.strip_suffix('\'')?;
     Some(inner.replace("''", "'"))
 }
 
-fn sql_string_literal(value: &str) -> String {
+pub(super) fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
-

@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn guard_external_sql(sql: &str) -> Result<(), String> {
     let normalized = normalize_for_guard(sql);
     for schema in [
@@ -33,7 +35,7 @@ pub fn guard_external_sql_as(username: &str, sql: &str) -> Result<(), String> {
     }
 }
 
-fn is_catalog_projection_read(normalized_sql: &str) -> bool {
+pub(super) fn is_catalog_projection_read(normalized_sql: &str) -> bool {
     normalized_sql.starts_with("select ") || normalized_sql.starts_with("with ")
 }
 
@@ -69,12 +71,12 @@ pub fn looks_like_catalog_management_call(sql: &str) -> bool {
 }
 
 #[derive(Debug)]
-struct CatalogManagementCall {
-    name: String,
-    args: Vec<String>,
+pub(super) struct CatalogManagementCall {
+    pub(super) name: String,
+    pub(super) args: Vec<String>,
 }
 
-fn parse_catalog_management_call(sql: &str) -> Option<CatalogManagementCall> {
+pub(super) fn parse_catalog_management_call(sql: &str) -> Option<CatalogManagementCall> {
     let normalized = normalize_for_guard(sql);
     let body = normalized.strip_prefix("call ")?;
     let open = body.find('(')?;
@@ -93,7 +95,7 @@ fn parse_catalog_management_call(sql: &str) -> Option<CatalogManagementCall> {
     })
 }
 
-fn execute_catalog_management_call(
+pub(super) fn execute_catalog_management_call(
     conn: &Connection,
     principal: &SessionPrincipal,
     call: CatalogManagementCall,
@@ -269,7 +271,6 @@ pub fn authorize_catalog_projection(conn: &Connection, username: &str) -> Result
     principal_for_username(conn, username).map(|_| ())
 }
 
-
 pub fn reject_unhandled_catalog_projection(sql: &str) -> Result<(), String> {
     let normalized = normalize_for_guard(sql);
     if let Some(name) = unsupported_catalog_relation(&normalized, "pg_catalog") {
@@ -287,8 +288,7 @@ pub fn reject_unhandled_catalog_projection(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
-
-fn extract_read_relations(sql: &str) -> Vec<(String, String)> {
+pub(super) fn extract_read_relations(sql: &str) -> Vec<(String, String)> {
     let tokens = sql_tokens(sql);
     let mut relations = Vec::new();
     for (idx, token) in tokens.iter().enumerate() {
@@ -303,7 +303,7 @@ fn extract_read_relations(sql: &str) -> Vec<(String, String)> {
     relations
 }
 
-fn unsupported_catalog_relation(sql: &str, catalog_schema: &str) -> Option<String> {
+pub(super) fn unsupported_catalog_relation(sql: &str, catalog_schema: &str) -> Option<String> {
     for (schema, relation) in extract_read_relations(sql) {
         if schema.eq_ignore_ascii_case(catalog_schema) {
             return Some(relation);
@@ -312,7 +312,7 @@ fn unsupported_catalog_relation(sql: &str, catalog_schema: &str) -> Option<Strin
     None
 }
 
-fn extract_relation_after(sql: &str, keyword: &str) -> Option<(String, String)> {
+pub(super) fn extract_relation_after(sql: &str, keyword: &str) -> Option<(String, String)> {
     let tokens = sql_tokens(sql);
     let keyword = keyword.to_ascii_lowercase();
     tokens
@@ -322,14 +322,14 @@ fn extract_relation_after(sql: &str, keyword: &str) -> Option<(String, String)> 
         .and_then(|token| relation_from_token(token))
 }
 
-fn extract_first_relation_for_ddl(sql: &str) -> Option<(String, String)> {
+pub(super) fn extract_first_relation_for_ddl(sql: &str) -> Option<(String, String)> {
     extract_relation_after(sql, "table")
         .or_else(|| extract_relation_after(sql, "view"))
         .or_else(|| extract_relation_after(sql, "index"))
         .or_else(|| extract_relation_after(sql, "on"))
 }
 
-fn sql_tokens(sql: &str) -> Vec<String> {
+pub(super) fn sql_tokens(sql: &str) -> Vec<String> {
     sql.replace(',', " ")
         .replace('(', " ( ")
         .replace(')', " ) ")
@@ -339,7 +339,7 @@ fn sql_tokens(sql: &str) -> Vec<String> {
         .collect()
 }
 
-fn relation_from_token(token: &str) -> Option<(String, String)> {
+pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
     let token = token
         .trim()
         .trim_matches(';')
@@ -381,7 +381,7 @@ fn relation_from_token(token: &str) -> Option<(String, String)> {
     }
 }
 
-fn quoted_literals(sql: &str) -> Vec<String> {
+pub(super) fn quoted_literals(sql: &str) -> Vec<String> {
     let mut literals = Vec::new();
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.next() {

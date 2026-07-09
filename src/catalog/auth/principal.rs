@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn authenticate_user(conn: &Connection, username: &str, password: &str) -> Result<i64, String> {
     let mut stmt = conn
         .prepare(
@@ -82,7 +84,10 @@ pub fn authenticate_user(conn: &Connection, username: &str, password: &str) -> R
     Ok(user_id)
 }
 
-fn principal_for_username(conn: &Connection, username: &str) -> Result<SessionPrincipal, String> {
+pub(in crate::catalog) fn principal_for_username(
+    conn: &Connection,
+    username: &str,
+) -> Result<SessionPrincipal, String> {
     let (user_id, status): (i64, String) = conn
         .query_row(
             &format!(
@@ -126,4 +131,3 @@ fn principal_for_username(conn: &Connection, username: &str) -> Result<SessionPr
         roles,
     })
 }
-

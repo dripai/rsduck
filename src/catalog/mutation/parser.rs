@@ -1,4 +1,8 @@
-fn parse_managed_partition_create(sql: &str) -> Result<Option<ManagedPartitionCreate>, String> {
+use super::*;
+
+pub(in crate::catalog) fn parse_managed_partition_create(
+    sql: &str,
+) -> Result<Option<ManagedPartitionCreate>, String> {
     if !looks_like_managed_partition_create(sql) {
         return Ok(None);
     }
@@ -41,7 +45,9 @@ fn parse_managed_partition_create(sql: &str) -> Result<Option<ManagedPartitionCr
     }))
 }
 
-fn parse_partition_options(options_text: &str) -> Result<(String, i32), String> {
+pub(in crate::catalog) fn parse_partition_options(
+    options_text: &str,
+) -> Result<(String, i32), String> {
     let mut partition_unit = None;
     let mut retention = None;
     for option in split_top_level_commas(options_text) {
@@ -85,7 +91,7 @@ fn parse_partition_options(options_text: &str) -> Result<(String, i32), String> 
     Ok((partition_unit, retention_count))
 }
 
-fn parse_simple_identifier_text(value: &str) -> Result<String, String> {
+pub(in crate::catalog) fn parse_simple_identifier_text(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
         return Err("empty identifier".into());
@@ -103,7 +109,7 @@ fn parse_simple_identifier_text(value: &str) -> Result<String, String> {
     }
 }
 
-fn parse_option_value(value: &str) -> Result<String, String> {
+pub(in crate::catalog) fn parse_option_value(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
         return Ok(value[1..value.len() - 1].replace("''", "'"));
@@ -111,16 +117,19 @@ fn parse_option_value(value: &str) -> Result<String, String> {
     parse_simple_identifier_text(value)
 }
 
-fn split_top_level_commas(value: &str) -> Vec<String> {
+pub(in crate::catalog) fn split_top_level_commas(value: &str) -> Vec<String> {
     split_top_level(value, ',')
 }
 
-fn split_key_value(value: &str) -> Option<(&str, &str)> {
+pub(in crate::catalog) fn split_key_value(value: &str) -> Option<(&str, &str)> {
     let idx = find_top_level_char(value, '=')?;
     Some((&value[..idx], &value[idx + 1..]))
 }
 
-fn parse_parenthesized_segment(sql: &str, open_idx: usize) -> Result<(String, usize), String> {
+pub(in crate::catalog) fn parse_parenthesized_segment(
+    sql: &str,
+    open_idx: usize,
+) -> Result<(String, usize), String> {
     let bytes = sql.as_bytes();
     if bytes.get(open_idx) != Some(&b'(') {
         return Err("expected '('".into());
@@ -170,7 +179,7 @@ fn parse_parenthesized_segment(sql: &str, open_idx: usize) -> Result<(String, us
     Err("unclosed parenthesized segment".into())
 }
 
-fn split_top_level(value: &str, delimiter: char) -> Vec<String> {
+pub(in crate::catalog) fn split_top_level(value: &str, delimiter: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut depth = 0_i32;
@@ -220,7 +229,7 @@ fn split_top_level(value: &str, delimiter: char) -> Vec<String> {
     parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
-fn find_top_level_char(value: &str, target: char) -> Option<usize> {
+pub(in crate::catalog) fn find_top_level_char(value: &str, target: char) -> Option<usize> {
     let bytes = value.as_bytes();
     let target = target as u8;
     let mut depth = 0_i32;
@@ -264,11 +273,15 @@ fn find_top_level_char(value: &str, target: char) -> Option<usize> {
     None
 }
 
-fn find_keyword_phrase(sql: &str, phrase: &str) -> Option<usize> {
+pub(in crate::catalog) fn find_keyword_phrase(sql: &str, phrase: &str) -> Option<usize> {
     find_keyword_phrase_from(sql, phrase, 0)
 }
 
-fn find_keyword_phrase_from(sql: &str, phrase: &str, start: usize) -> Option<usize> {
+pub(in crate::catalog) fn find_keyword_phrase_from(
+    sql: &str,
+    phrase: &str,
+    start: usize,
+) -> Option<usize> {
     let lower = sql.to_ascii_lowercase();
     let phrase = phrase.to_ascii_lowercase();
     let bytes = sql.as_bytes();
@@ -326,17 +339,17 @@ fn find_keyword_phrase_from(sql: &str, phrase: &str, start: usize) -> Option<usi
     None
 }
 
-fn is_keyword_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+pub(in crate::catalog) fn is_keyword_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
     let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
     let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
     before_ok && after_ok
 }
 
-fn is_ident_byte(byte: u8) -> bool {
+pub(in crate::catalog) fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
+pub(in crate::catalog) fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
     let bytes = sql.as_bytes();
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
@@ -344,7 +357,7 @@ fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
     idx
 }
 
-fn parse_one_statement(sql: &str) -> Result<(Statement, String), String> {
+pub(in crate::catalog) fn parse_one_statement(sql: &str) -> Result<(Statement, String), String> {
     let normalized = sql.trim_start().to_ascii_lowercase();
     let statements = if normalized.starts_with("comment on ") {
         let dialect = PostgreSqlDialect {};
@@ -364,4 +377,3 @@ fn parse_one_statement(sql: &str) -> Result<(Statement, String), String> {
     let normalized_sql = statement.to_string();
     Ok((statement, normalized_sql))
 }
-

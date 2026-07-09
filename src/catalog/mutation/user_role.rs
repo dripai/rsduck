@@ -1,4 +1,6 @@
-fn create_user_account(
+use super::*;
+
+pub(in crate::catalog) fn create_user_account(
     conn: &Connection,
     create_user: &CreateUser,
     sql: &str,
@@ -48,7 +50,7 @@ fn create_user_account(
     })
 }
 
-fn create_role_account(
+pub(in crate::catalog) fn create_role_account(
     conn: &Connection,
     create_role: &CreateRole,
     sql: &str,
@@ -108,7 +110,7 @@ fn create_role_account(
     })
 }
 
-fn alter_user_account(
+pub(in crate::catalog) fn alter_user_account(
     conn: &Connection,
     alter_user: &AlterUser,
     sql: &str,
@@ -167,4 +169,3 @@ fn alter_user_account(
         Ok(1)
     })
 }
-
