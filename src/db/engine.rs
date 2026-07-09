@@ -57,31 +57,52 @@ pub fn init_db(snapshot_dir: Option<&str>, cfg: &DbConfig) {
         .unwrap_or_else(|_| panic!("db initialized twice"));
 }
 
-pub async fn execute_sql_as(username: String, sql: String) -> Result<SqlResult, String> {
+pub async fn execute_typed_sql_as(
+    username: String,
+    sql: String,
+) -> Result<SqlTypedResult, String> {
+    execute_typed_sql_with_params_as(username, sql, Vec::new()).await
+}
+
+pub async fn execute_typed_sql_with_params_as(
+    username: String,
+    sql: String,
+    params: Vec<SqlParam>,
+) -> Result<SqlTypedResult, String> {
     let sql_trimmed = sql.trim().to_string();
     if sql_trimmed.is_empty() {
         return Err("empty sql".into());
     }
 
-    if crate::catalog::looks_like_privilege_function(&sql_trimmed) {
-        return engine()
-            .evaluate_privilege_function(username, sql_trimmed)
-            .await;
-    }
-
-    let decision = route_sql(&sql_trimmed)?;
+    let sql_bound = bind_sql_params(&sql_trimmed, &params)?;
+    let decision = route_sql(&sql_bound)?;
     match decision.route {
         SqlRoute::Read => {
             engine()
-                .query(username, sql_trimmed, decision.route, decision.command)
+                .query_typed(username, sql_bound, decision.route, decision.command)
                 .await
         }
         SqlRoute::Write => {
             engine()
-                .execute(username, sql_trimmed, decision.route, decision.command)
+                .execute_typed(username, sql_bound, decision.route, decision.command)
                 .await
         }
     }
+}
+
+pub async fn describe_sql_with_params_as(
+    username: String,
+    sql: String,
+    params: Vec<SqlParam>,
+) -> Result<Vec<SqlColumn>, String> {
+    let sql_trimmed = sql.trim().to_string();
+    if sql_trimmed.is_empty() {
+        return Err("empty sql".into());
+    }
+
+    let sql_bound = bind_sql_params(&sql_trimmed, &params)?;
+    let decision = route_sql(&sql_bound)?;
+    engine().describe(username, sql_bound, decision.route).await
 }
 
 pub async fn save_snapshot(snapshot_dir: &str, snapshot_prefix: &str) -> Result<String, String> {
@@ -110,13 +131,14 @@ pub async fn authenticate_user(username: String, password: String) -> Result<(),
 
 pub async fn run_partition_maintenance() -> Result<SqlResult, String> {
     engine()
-        .execute(
+        .execute_typed(
             "admin".to_string(),
             "CALL rsduck_run_partition_maintenance()".to_string(),
             SqlRoute::Write,
             "CALL".to_string(),
         )
         .await
+        .map(SqlResult::from)
 }
 
 pub fn shutdown_workers() {
@@ -130,25 +152,25 @@ fn engine() -> &'static DbEngine {
 }
 
 impl DbEngine {
-    async fn query(
+    async fn query_typed(
         &self,
         username: String,
         sql: String,
         route: SqlRoute,
         command: String,
-    ) -> Result<SqlResult, String> {
+    ) -> Result<SqlTypedResult, String> {
         let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
-        send_sql(&self.read_txs[idx], username, sql, route, command, "read").await
+        send_typed_sql(&self.read_txs[idx], username, sql, route, command, "read").await
     }
 
-    async fn execute(
+    async fn execute_typed(
         &self,
         username: String,
         sql: String,
         route: SqlRoute,
         command: String,
-    ) -> Result<SqlResult, String> {
-        send_sql(&self.write_tx, username, sql, route, command, "write").await
+    ) -> Result<SqlTypedResult, String> {
+        send_typed_sql(&self.write_tx, username, sql, route, command, "write").await
     }
 
     async fn save_snapshot(
@@ -187,23 +209,31 @@ impl DbEngine {
         }
     }
 
-    async fn evaluate_privilege_function(
+    async fn describe(
         &self,
         username: String,
         sql: String,
-    ) -> Result<SqlResult, String> {
-        let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
+        route: SqlRoute,
+    ) -> Result<Vec<SqlColumn>, String> {
+        let (tx, queue_name) = match route {
+            SqlRoute::Read => {
+                let idx = self.next_read.fetch_add(1, Ordering::Relaxed) % self.read_txs.len();
+                (&self.read_txs[idx], "read")
+            }
+            SqlRoute::Write => (&self.write_tx, "write"),
+        };
         let (resp_tx, resp_rx) = oneshot::channel();
-        match self.read_txs[idx].try_send(SqlCommand::PrivilegeFunction {
+        match tx.try_send(SqlCommand::Describe {
             username,
             sql,
+            route,
             resp: resp_tx,
         }) {
             Ok(()) => resp_rx
                 .await
-                .unwrap_or_else(|_| Err("read worker stopped".into())),
-            Err(TrySendError::Full(_)) => Err("read queue is full".into()),
-            Err(TrySendError::Disconnected(_)) => Err("read worker stopped".into()),
+                .unwrap_or_else(|_| Err(format!("{queue_name} worker stopped"))),
+            Err(TrySendError::Full(_)) => Err(format!("{queue_name} queue is full")),
+            Err(TrySendError::Disconnected(_)) => Err(format!("{queue_name} worker stopped")),
         }
     }
 
@@ -223,4 +253,3 @@ impl DbEngine {
         }
     }
 }
-

@@ -133,7 +133,7 @@ VALUES
 """)
 
 result = run_sql("SELECT code, close, volume FROM kline_day ORDER BY bar_time DESC LIMIT 10")
-print(result["columns"])
+print([column["name"] for column in result["columns"]])
 print(result["rows"])
 ```
 
@@ -151,12 +151,17 @@ HTTP 返回格式：
 
 ```json
 {
-  "columns": ["code", "close"],
+  "columns": [
+    { "name": "code", "pg_type_oid": 25 },
+    { "name": "close", "pg_type_oid": 701 }
+  ],
   "rows": [["600000", "10.2"]],
   "success": true,
-  "msg": "1 row(s)"
+  "msg": "ok"
 }
 ```
+
+`columns` 使用与 PG wire 共用的列元数据，`pg_type_oid` 为 PostgreSQL 类型 OID。SQL `NULL` 返回为 JSON `null`，空字符串仍返回为 `""`。
 
 ### PostgreSQL wire 协议
 
@@ -350,20 +355,22 @@ SQL 请求流程：
 
 ```text
 client
-  -> server authenticates user
-  -> db::execute_sql_as(username, sql)
+  -> Web API 或 PG wire 入口完成认证和协议编解码
+  -> db::execute_typed_sql_as(username, sql) / db::describe_sql_with_params_as(username, sql, params)
   -> sql_route::route_sql
   -> read worker or write worker
   -> pg_compat rewrite if metadata query
   -> catalog guard and authorization
   -> DuckDB execute/query
-  -> result returned to client
+  -> SqlTypedResult / SqlColumn
+  -> Web API JSON 或 PG RowDescription/DataRow 编码
 ```
 
 核心边界：
 
 - DuckDB 是唯一 SQL 执行引擎。
 - `rsduck_catalog.*` 是元数据事实来源。
+- Web API 和 PG wire 都只是入口适配层；认证之后共用同一条 typed SQL 执行与 Describe 路径。
 - 写入、DDL 和 catalog mutation 必须走 single write worker。
 - `pg_catalog.*` 和 `information_schema.*` 是从 rsduck catalog 派生的只读投影。
 - 不支持的兼容行为返回明确错误或定义好的空结果，不静默 fallback 到 DuckDB 内部 catalog 表。

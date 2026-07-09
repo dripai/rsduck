@@ -20,10 +20,16 @@ pub struct SqlReq {
 
 #[derive(Debug, Serialize)]
 pub struct SqlResp {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub columns: Vec<SqlRespColumn>,
+    pub rows: Vec<Vec<Option<String>>>,
     pub success: bool,
     pub msg: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SqlRespColumn {
+    pub name: String,
+    pub pg_type_oid: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,14 +84,23 @@ async fn sql_handler(
 
     let sql = paged_sql(&sql, req.page, req.page_size);
 
-    match crate::db::execute_sql_as(username, sql).await {
-        Ok(crate::db::SqlResult::Query { columns, rows }) => Json(SqlResp {
-            columns,
-            rows,
-            success: true,
-            msg: "ok".into(),
-        }),
-        Ok(crate::db::SqlResult::Execute {
+    match crate::db::execute_typed_sql_as(username, sql).await {
+        Ok(crate::db::SqlTypedResult::Query { columns, rows }) => {
+            let columns = columns
+                .into_iter()
+                .map(|column| SqlRespColumn {
+                    name: column.name,
+                    pg_type_oid: column.pg_type_oid,
+                })
+                .collect();
+            Json(SqlResp {
+                columns,
+                rows,
+                success: true,
+                msg: "ok".into(),
+            })
+        }
+        Ok(crate::db::SqlTypedResult::Execute {
             command,
             affected_rows,
         }) => Json(SqlResp {
@@ -612,9 +627,9 @@ async function loadTables(showErrors = true) {
     return;
   }
 
-  const schemaIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_schema');
-  const tableIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_name');
-  const typeIdx = data.columns.findIndex(c => c.toLowerCase() === 'table_type');
+  const schemaIdx = data.columns.findIndex(c => c.name.toLowerCase() === 'table_schema');
+  const tableIdx = data.columns.findIndex(c => c.name.toLowerCase() === 'table_name');
+  const typeIdx = data.columns.findIndex(c => c.name.toLowerCase() === 'table_type');
 
   tables = data.rows.map(row => ({
     schema: row[schemaIdx] || 'main',
@@ -700,7 +715,7 @@ async function runSqlText(sql, resetPage = true) {
     tbl.innerHTML = '';
     return;
   }
-  let html = '<thead><tr>' + data.columns.map(c => '<th>' + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
+  let html = '<thead><tr>' + data.columns.map(c => '<th>' + escapeHtml(c.name) + '</th>').join('') + '</tr></thead><tbody>';
   for (const row of data.rows) {
     html += '<tr>' + row.map(v => '<td>' + escapeHtml(v) + '</td>').join('') + '</tr>';
   }

@@ -165,43 +165,6 @@ fn validate_snapshot_manifest(conn: &Connection, snapshot_path: &Path) -> Result
     Ok(())
 }
 
-fn cell_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
-    match row.get_ref(idx) {
-        Ok(value) => value_ref_to_string(value),
-        Err(_) => String::new(),
-    }
-}
-
-fn value_ref_to_string(value: ValueRef<'_>) -> String {
-    match value {
-        ValueRef::Null => String::new(),
-        ValueRef::Boolean(v) => v.to_string(),
-        ValueRef::TinyInt(v) => v.to_string(),
-        ValueRef::SmallInt(v) => v.to_string(),
-        ValueRef::Int(v) => v.to_string(),
-        ValueRef::BigInt(v) => v.to_string(),
-        ValueRef::HugeInt(v) => v.to_string(),
-        ValueRef::UTinyInt(v) => v.to_string(),
-        ValueRef::USmallInt(v) => v.to_string(),
-        ValueRef::UInt(v) => v.to_string(),
-        ValueRef::UBigInt(v) => v.to_string(),
-        ValueRef::Float(v) => v.to_string(),
-        ValueRef::Double(v) => v.to_string(),
-        ValueRef::Decimal(v) => v.to_string(),
-        ValueRef::Timestamp(unit, value) => format!("{value} {unit:?}"),
-        ValueRef::Text(v) => String::from_utf8_lossy(v).into_owned(),
-        ValueRef::Blob(v) => format!("<{} bytes>", v.len()),
-        ValueRef::Date32(v) => v.to_string(),
-        ValueRef::Time64(unit, value) => format!("{value} {unit:?}"),
-        ValueRef::Interval {
-            months,
-            days,
-            nanos,
-        } => format!("{months} months {days} days {nanos} ns"),
-        other => format!("{other:?}"),
-    }
-}
-
 pub fn reset_admin_password_offline(
     snapshot_dir: &str,
     snapshot_prefix: &str,

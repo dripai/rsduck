@@ -133,7 +133,7 @@ VALUES
 """)
 
 result = run_sql("SELECT code, close, volume FROM kline_day ORDER BY bar_time DESC LIMIT 10")
-print(result["columns"])
+print([column["name"] for column in result["columns"]])
 print(result["rows"])
 ```
 
@@ -151,12 +151,17 @@ Response shape:
 
 ```json
 {
-  "columns": ["code", "close"],
+  "columns": [
+    { "name": "code", "pg_type_oid": 25 },
+    { "name": "close", "pg_type_oid": 701 }
+  ],
   "rows": [["600000", "10.2"]],
   "success": true,
-  "msg": "1 row(s)"
+  "msg": "ok"
 }
 ```
+
+`columns` uses the same column metadata as PG wire, and `pg_type_oid` is the PostgreSQL type OID. SQL `NULL` is returned as JSON `null`; an empty string stays `""`.
 
 ### PostgreSQL Wire Protocol
 
@@ -350,20 +355,22 @@ Request flow:
 
 ```text
 client
-  -> server authenticates user
-  -> db::execute_sql_as(username, sql)
+  -> Web API or PG wire entry authenticates user and handles protocol encoding
+  -> db::execute_typed_sql_as(username, sql) / db::describe_sql_with_params_as(username, sql, params)
   -> sql_route::route_sql
   -> read worker or write worker
   -> pg_compat rewrite if metadata query
   -> catalog guard and authorization
   -> DuckDB execute/query
-  -> result returned to client
+  -> SqlTypedResult / SqlColumn
+  -> Web API JSON or PG RowDescription/DataRow encoding
 ```
 
 Core design boundaries:
 
 - DuckDB is the only SQL execution engine.
 - `rsduck_catalog.*` is the metadata source of truth.
+- Web API and PG wire are entry adapters only; after authentication they share the same typed SQL execution and Describe paths.
 - Writes, DDL, and catalog mutations must go through the single write worker.
 - `pg_catalog.*` and `information_schema.*` are read-only projections derived from rsduck catalog metadata.
 - Unsupported compatibility behavior returns a clear error or a defined empty result; rsduck does not silently fall back to DuckDB internal catalog tables.

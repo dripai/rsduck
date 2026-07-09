@@ -1,13 +1,13 @@
-async fn send_sql(
+async fn send_typed_sql(
     tx: &SyncSender<SqlCommand>,
     username: String,
     sql: String,
     route: SqlRoute,
     command: String,
     queue_name: &str,
-) -> Result<SqlResult, String> {
+) -> Result<SqlTypedResult, String> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    match tx.try_send(SqlCommand::Run {
+    match tx.try_send(SqlCommand::RunTyped {
         username,
         sql,
         route,
@@ -39,7 +39,7 @@ where
             info!("DuckDB worker started: {thread_log_name}");
             while let Ok(command) = rx.recv() {
                 match command {
-                    SqlCommand::Run {
+                    SqlCommand::RunTyped {
                         username,
                         sql,
                         route,
@@ -47,7 +47,7 @@ where
                         resp,
                     } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            execute_sql_blocking(
+                            execute_typed_sql_blocking(
                                 &conn,
                                 &username,
                                 &sql,
@@ -71,19 +71,14 @@ where
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result);
                     }
-                    SqlCommand::PrivilegeFunction {
+                    SqlCommand::Describe {
                         username,
                         sql,
+                        route,
                         resp,
                     } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            let (column, allowed) = crate::catalog::evaluate_privilege_function(
-                                &conn, &username, &sql,
-                            )?;
-                            Ok(SqlResult::Query {
-                                columns: vec![column],
-                                rows: vec![vec![if allowed { "t" } else { "f" }.to_string()]],
-                            })
+                            describe_sql_blocking(&conn, &username, &sql, route)
                         }))
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result);
@@ -148,4 +143,3 @@ where
         })
         .unwrap_or_else(|e| panic!("spawn DuckDB snapshot worker {name} failed: {e}"))
 }
-

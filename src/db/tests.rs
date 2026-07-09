@@ -1,8 +1,10 @@
 mod tests {
     use super::{
-        execute_sql_blocking, export_database_sql, find_latest_snapshot_dir, import_database_sql,
+        describe_sql_blocking, execute_sql_blocking, execute_typed_sql_blocking,
+        export_database_sql, find_latest_snapshot_dir, import_database_sql,
         parse_snapshot_dir_timestamp, reset_admin_password_offline, restore_or_initialize,
-        save_snapshot_blocking, SqlResult, SNAPSHOT_MANIFEST_FILE,
+        save_snapshot_blocking, SqlParam, SqlResult, SqlTypedResult, PG_TYPE_DATE, PG_TYPE_FLOAT8,
+        PG_TYPE_INT4, PG_TYPE_TEXT, SNAPSHOT_MANIFEST_FILE,
     };
     use crate::sql_route::route_sql;
     use duckdb::Connection;
@@ -72,6 +74,104 @@ mod tests {
             .position(|column| column == "relname")
             .expect("relname column");
         assert!(rows.iter().any(|row| row[relname_idx] == "quotes"));
+    }
+
+    #[test]
+    fn describe_sql_reports_read_columns_without_executing_writes() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE quotes(code VARCHAR, price DOUBLE)",
+        )
+        .unwrap();
+
+        let sql = "SELECT code, price FROM quotes";
+        let decision = route_sql(sql).unwrap();
+        let columns = describe_sql_blocking(&conn, "admin", sql, decision.route).unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["code", "price"]
+        );
+
+        let write_sql = "CREATE USER bob PASSWORD='pw'";
+        let decision = route_sql(write_sql).unwrap();
+        let columns = describe_sql_blocking(&conn, "admin", write_sql, decision.route).unwrap();
+        assert!(columns.is_empty());
+        assert!(crate::catalog::authenticate_user(&conn, "bob", "pw").is_err());
+    }
+
+    #[test]
+    fn typed_query_preserves_common_pg_types_and_null_cells() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+        let sql = "\
+            SELECT \
+                CAST(1 AS INTEGER) AS id, \
+                CAST(1.5 AS DOUBLE) AS price, \
+                DATE '2026-07-09' AS trade_date, \
+                '' AS empty_text, \
+                CAST(NULL AS VARCHAR) AS missing_text";
+        let decision = route_sql(sql).unwrap();
+        let result = execute_typed_sql_blocking(
+            &conn,
+            "admin",
+            sql,
+            decision.route,
+            &decision.command,
+            100,
+        )
+        .unwrap();
+
+        let SqlTypedResult::Query { columns, rows } = result else {
+            panic!("expected typed query result");
+        };
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.pg_type_oid))
+                .collect::<Vec<_>>(),
+            vec![
+                ("id", PG_TYPE_INT4),
+                ("price", PG_TYPE_FLOAT8),
+                ("trade_date", PG_TYPE_DATE),
+                ("empty_text", PG_TYPE_TEXT),
+                ("missing_text", PG_TYPE_TEXT),
+            ]
+        );
+        assert_eq!(
+            rows,
+            vec![vec![
+                Some("1".to_string()),
+                Some("1.5".to_string()),
+                Some("2026-07-09".to_string()),
+                Some(String::new()),
+                None,
+            ]]
+        );
+    }
+
+    #[test]
+    fn bind_sql_params_rewrites_numbered_params_outside_literals() {
+        let sql = "SELECT $1 AS a, '$2' AS literal, \"$3\" AS ident, -- $4\n$2 AS b, /* $5 */ $1 AS c";
+        let bound = super::bind_sql_params(
+            sql,
+            &[
+                SqlParam::Text("O'Reilly".to_string()),
+                SqlParam::Integer(42),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            bound,
+            "SELECT 'O''Reilly' AS a, '$2' AS literal, \"$3\" AS ident, -- $4\n42 AS b, /* $5 */ 'O''Reilly' AS c"
+        );
+        assert_eq!(super::sql_placeholder_count(sql).unwrap(), 2);
     }
 
     #[test]
