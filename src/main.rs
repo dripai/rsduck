@@ -1,36 +1,13 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rsduck::{config, db, process_lock, server};
+use rsduck::{config, db, logging, process_lock, server};
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
-use tracing_subscriber::filter::LevelFilter;
 
 const PROCESS_LOCK_FILE: &str = ".rsduck.lock";
 const DEFAULT_RESET_ADMIN_PASSWORD_VALUE: &str = "admin";
-
-fn parse_log_level(level: &str) -> LevelFilter {
-    match level.trim().to_ascii_lowercase().as_str() {
-        "trace" => LevelFilter::TRACE,
-        "debug" => LevelFilter::DEBUG,
-        "info" => LevelFilter::INFO,
-        "warn" | "warning" => LevelFilter::WARN,
-        "error" => LevelFilter::ERROR,
-        "off" => LevelFilter::OFF,
-        _ => panic!(
-            "invalid log_level in rsduck.toml: {level}; expected trace, debug, info, warn, error, or off"
-        ),
-    }
-}
-
-fn init_tracing(log_level: &str) {
-    tracing_subscriber::fmt()
-        .with_max_level(parse_log_level(log_level))
-        .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-        .init();
-}
 
 fn process_lock_payload(cfg: &config::RsduckConfig, mode: &str) -> serde_json::Value {
     serde_json::json!({
@@ -78,7 +55,7 @@ fn cleanup_old_snapshots(base_dir: &str, snapshot_prefix: &str, retain_hours: u6
 async fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let cfg = config::load_config();
-    init_tracing(&cfg.log_level);
+    let _log_guard = logging::init_tracing(&cfg.log);
 
     if let Some(command) = args.first() {
         if command != "reset-admin-password" {

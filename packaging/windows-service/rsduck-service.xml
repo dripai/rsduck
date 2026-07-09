@@ -14,7 +14,7 @@
   <logpath>%BASE%\logs</logpath>
   <log mode="roll-by-size">
     <sizeThreshold>10485760</sizeThreshold>
-    <keepFiles>10</keepFiles>
+    <keepFiles>3</keepFiles>
   </log>
 
   <onfailure action="restart" delay="10 sec" />

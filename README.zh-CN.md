@@ -45,7 +45,12 @@ CREATE TABLE IF NOT EXISTS kline_day (
 仓库示例 `rsduck.toml` 已经把 `[db].init_sql` 指向这个文件：
 
 ```toml
-log_level = "info"
+[log]
+level = "info"
+dir = "logs"
+file_name = "rsduck.log"
+retain_files = 3
+console = false
 
 [db]
 init_sql = "init.sql"
@@ -226,7 +231,12 @@ python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query
 默认配置文件为 `rsduck.toml`：
 
 ```toml
-log_level = "info"
+[log]
+level = "info"
+dir = "logs"
+file_name = "rsduck.log"
+retain_files = 3
+console = false
 
 [db]
 init_sql = "init.sql"
@@ -266,7 +276,11 @@ bind = "127.0.0.1:8080"
 
 参数说明，按 `rsduck.toml` 中的顺序排列：
 
-- 【log_level】全局日志级别。允许值为 `trace`、`debug`、`info`、`warn`、`error`、`off`。排查 PostgreSQL 客户端兼容问题时设置为 `debug`，可打印 PG wire 连接事件和 SQL 事件。
+- 【log.level】全局日志级别。允许值为 `trace`、`debug`、`info`、`warn`、`error`、`off`。排查 PostgreSQL 客户端兼容问题时设置为 `debug`，可打印 PG wire 连接事件和 SQL 事件。
+- 【log.dir】rsduck 应用日志目录。相对路径按服务工作目录解析。
+- 【log.file_name】rsduck 应用日志文件名，程序会按天生成 `file_name.yyyy-MM-dd` 格式的日志文件。
+- 【log.retain_files】rsduck 应用日志保留数量，默认保留最近 3 个按天轮转文件。
+- 【log.console】是否同时把应用日志输出到 stdout。Windows 服务模式建议保持 `false`，避免 WinSW wrapper 日志重复记录应用日志。
 - 【db.init_sql】初始化 SQL 文件路径。只在启动时没有恢复快照的情况下执行。用于创建表、索引、视图或初始化数据；设置为 `""` 表示启动空库。
 - 【db.read_workers】专用 DuckDB 读 worker 线程数量。读 SQL 会分发到这些 worker。提高该值可以增强并发读能力，但也会增加 CPU 和内存压力。
 - 【db.write_queue_size】写 SQL 的有界队列大小。写入会通过 single write worker 串行执行；队列满时，新写请求会快速失败，而不是无限等待。
@@ -464,6 +478,8 @@ rsduck-macos-x64.tar.gz
 从 Releases 下载 `rsduck-windows-service-setup-x64.exe`。这是最简单的 Windows 安装包：双击运行，选择安装目录，安装器会自动把 rsduck 注册为开机自启的 Windows 服务。
 
 安装器会把 `rsduck.exe`、`rsduck.toml`、`init.sql`、WinSW 服务文件、`logs`、`snapshot` 放到你选择的安装目录下，并把这个目录作为服务工作目录。
+
+rsduck 应用日志写入 `logs\rsduck.log.yyyy-MM-dd`，默认保留最近 3 个轮转文件。WinSW 自身的 stdout/stderr wrapper 日志也限制为保留 3 个文件，通常只记录启动器输出、panic 或未被应用日志接管的 stderr。
 
 如果只需要便携式控制台程序，不注册服务，使用 `rsduck-windows-x64.zip`。
 

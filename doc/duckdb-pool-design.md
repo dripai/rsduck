@@ -415,7 +415,12 @@ SaveSnapshot
 `init_sql` 是没有快照时的初始化入口。
 
 ```toml
-log_level = "info"
+[log]
+level = "info"
+dir = "logs"
+file_name = "rsduck.log"
+retain_files = 3
+console = false
 
 [db]
 init_sql = "init.sql"

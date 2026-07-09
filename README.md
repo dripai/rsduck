@@ -45,7 +45,12 @@ CREATE TABLE IF NOT EXISTS kline_day (
 The repository sample `rsduck.toml` points `[db].init_sql` to this file:
 
 ```toml
-log_level = "info"
+[log]
+level = "info"
+dir = "logs"
+file_name = "rsduck.log"
+retain_files = 3
+console = false
 
 [db]
 init_sql = "init.sql"
@@ -226,7 +231,12 @@ python scripts\rsduck_load_test.py --write-interval 0.5 --write-batch 10 --query
 The default configuration file is `rsduck.toml`:
 
 ```toml
-log_level = "info"
+[log]
+level = "info"
+dir = "logs"
+file_name = "rsduck.log"
+retain_files = 3
+console = false
 
 [db]
 init_sql = "init.sql"
@@ -266,7 +276,11 @@ Startup restore order:
 
 Parameter reference, in `rsduck.toml` order:
 
-- 【log_level】Global logging level. Valid values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. Use `debug` while diagnosing PostgreSQL client compatibility so PG wire connection and SQL events are printed.
+- 【log.level】Global logging level. Valid values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. Use `debug` while diagnosing PostgreSQL client compatibility so PG wire connection and SQL events are printed.
+- 【log.dir】rsduck application log directory. Relative paths are resolved from the service working directory.
+- 【log.file_name】rsduck application log file name. The process writes daily files named `file_name.yyyy-MM-dd`.
+- 【log.retain_files】Number of rsduck application log files to keep. The default keeps the latest 3 daily files.
+- 【log.console】Whether to also write application logs to stdout. Keep this `false` for Windows service mode to avoid duplicating application logs into the WinSW wrapper logs.
 - 【db.init_sql】Path to the initialization SQL file. It runs only when startup does not restore a snapshot. Use it to create tables, indexes, views, or seed data. Set it to `""` to start empty.
 - 【db.read_workers】Number of dedicated DuckDB read worker threads. Read SQL is distributed across these workers. Increase it for more concurrent reads, while keeping memory and CPU capacity in mind.
 - 【db.write_queue_size】Bounded queue size for write SQL. Writes are serialized through the single write worker; when this queue is full, new write requests fail quickly instead of blocking indefinitely.
@@ -464,6 +478,8 @@ rsduck-macos-x64.tar.gz
 Download `rsduck-windows-service-setup-x64.exe` from Releases. It is the easiest Windows package: double-click it, choose the install directory, and the installer registers rsduck as an automatic Windows service.
 
 The installer places `rsduck.exe`, `rsduck.toml`, `init.sql`, WinSW service files, `logs`, and `snapshot` under the selected directory. That directory is also used as the service working directory.
+
+rsduck application logs are written to `logs\rsduck.log.yyyy-MM-dd` and keep the latest 3 rotated files by default. WinSW stdout/stderr wrapper logs are also limited to 3 files and normally only contain launcher output, panics, or stderr not handled by application logging.
 
 For portable console usage without service registration, use `rsduck-windows-x64.zip`.
 

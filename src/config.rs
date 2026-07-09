@@ -3,9 +3,10 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RsduckConfig {
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
+    #[serde(default)]
+    pub log: LogConfig,
     #[serde(default)]
     pub db: DbConfig,
     #[serde(default)]
@@ -19,6 +20,22 @@ pub struct RsduckConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default = "default_log_dir")]
+    pub dir: String,
+    #[serde(default = "default_log_file_name")]
+    pub file_name: String,
+    #[serde(default = "default_log_retain_files")]
+    pub retain_files: usize,
+    #[serde(default)]
+    pub console: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DbConfig {
     #[serde(default = "default_init_sql")]
     pub init_sql: String,
@@ -35,6 +52,7 @@ pub struct DbConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotConfig {
     #[serde(default = "default_true")]
     pub restore_on_startup: bool,
@@ -49,6 +67,7 @@ pub struct SnapshotConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionConfig {
     #[serde(default = "default_true")]
     pub maintenance_enabled: bool,
@@ -61,12 +80,14 @@ pub struct PartitionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PgConfig {
     #[serde(default = "default_pg_bind")]
     pub bind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -142,6 +163,30 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+fn default_log_dir() -> String {
+    "logs".into()
+}
+
+fn default_log_file_name() -> String {
+    "rsduck.log".into()
+}
+
+fn default_log_retain_files() -> usize {
+    3
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            dir: default_log_dir(),
+            file_name: default_log_file_name(),
+            retain_files: default_log_retain_files(),
+            console: false,
+        }
+    }
+}
+
 impl Default for SnapshotConfig {
     fn default() -> Self {
         Self {
@@ -198,7 +243,7 @@ impl Default for WebConfig {
 impl Default for RsduckConfig {
     fn default() -> Self {
         Self {
-            log_level: default_log_level(),
+            log: LogConfig::default(),
             db: DbConfig::default(),
             snapshot: SnapshotConfig::default(),
             partition: PartitionConfig::default(),
