@@ -30,7 +30,11 @@ pub(super) fn execute_typed_sql_blocking(
         return Ok(result);
     }
     if let Some(rewritten_sql) = crate::mysql_compat::rewrite_sql(sql_trimmed, "main", username) {
-        crate::catalog::authorize_catalog_projection(conn, username)?;
+        if crate::mysql_compat::is_mysql_user_projection(sql_trimmed) {
+            crate::catalog::authorize_user_metadata(conn, username)?;
+        } else {
+            crate::catalog::authorize_catalog_projection(conn, username)?;
+        }
         crate::mysql_compat::validate_metadata_projection(conn, username)?;
         return query_typed_sql_blocking(conn, &rewritten_sql, max_result_rows);
     }
@@ -110,7 +114,11 @@ pub(super) fn describe_sql_blocking(
         });
     }
     if let Some(rewritten_sql) = crate::mysql_compat::rewrite_sql(sql_trimmed, "main", username) {
-        crate::catalog::authorize_catalog_projection(conn, username)?;
+        if crate::mysql_compat::is_mysql_user_projection(sql_trimmed) {
+            crate::catalog::authorize_user_metadata(conn, username)?;
+        } else {
+            crate::catalog::authorize_catalog_projection(conn, username)?;
+        }
         crate::mysql_compat::validate_metadata_projection(conn, username)?;
         return describe_query_sql_blocking(conn, &rewritten_sql);
     }

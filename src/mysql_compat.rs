@@ -15,7 +15,16 @@ pub fn rewrite_sql(sql: &str, current_schema: &str, username: &str) -> Option<St
         .or_else(|| show_columns_sql(sql, current_schema, username))
         .or_else(|| show_index_sql(sql, current_schema, username))
         .or_else(|| show_routine_status_sql(sql, current_schema))
+        .or_else(|| rewrite_mysql_user_sql(sql))
         .or_else(|| rewrite_information_schema_sql(sql, username))
+}
+
+pub fn is_mysql_user_projection(sql: &str) -> bool {
+    sql.chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '`' && *ch != '"')
+        .collect::<String>()
+        .to_ascii_lowercase()
+        .contains("mysql.user")
 }
 
 pub fn validate_metadata_projection(conn: &Connection, username: &str) -> Result<(), String> {
@@ -113,25 +122,49 @@ fn rewrite_information_schema_sql(sql: &str, username: &str) -> Option<String> {
     changed.then_some(rewritten)
 }
 
+fn rewrite_mysql_user_sql(sql: &str) -> Option<String> {
+    let rewritten = replace_schema_relation(sql, "mysql", "user", &mysql_user_sql());
+    (rewritten != sql).then_some(rewritten)
+}
+
 fn replace_information_schema_relation(sql: &str, relation: &str, projection: &str) -> String {
+    replace_schema_relation(sql, "information_schema", relation, projection)
+}
+
+fn replace_schema_relation(sql: &str, schema: &str, relation: &str, projection: &str) -> String {
     let replacement = format!("({projection})");
-    let mut out =
-        replace_ignore_ascii_case(sql, &format!("information_schema.{relation}"), &replacement);
-    out = replace_ignore_ascii_case(
-        &out,
-        &format!("information_schema.`{relation}`"),
-        &replacement,
-    );
-    out = replace_ignore_ascii_case(
-        &out,
-        &format!("`information_schema`.{relation}"),
-        &replacement,
-    );
-    replace_ignore_ascii_case(
-        &out,
-        &format!("`information_schema`.`{relation}`"),
-        &replacement,
-    )
+    let mut out = replace_ignore_ascii_case(sql, &format!("{schema}.{relation}"), &replacement);
+    out = replace_ignore_ascii_case(&out, &format!("{schema}.`{relation}`"), &replacement);
+    out = replace_ignore_ascii_case(&out, &format!("`{schema}`.{relation}"), &replacement);
+    replace_ignore_ascii_case(&out, &format!("`{schema}`.`{relation}`"), &replacement)
+}
+
+fn mysql_user_sql() -> String {
+    "
+    SELECT
+        u.username AS user,
+        '%' AS host,
+        '' AS ssl_type,
+        '' AS ssl_cipher,
+        '' AS x509_issuer,
+        '' AS x509_subject,
+        0 AS max_questions,
+        0 AS max_updates,
+        0 AS max_connections,
+        CASE WHEN EXISTS (
+            SELECT 1
+            FROM rsduck_catalog.rs_user_role ur
+            JOIN rsduck_catalog.rs_role role ON role.role_id = ur.role_id
+            WHERE ur.user_id = u.user_id AND role.role_name = 'admin'
+        ) THEN 'Y' ELSE 'N' END AS super_priv,
+        0 AS max_user_connections,
+        u.mysql_auth_plugin AS plugin,
+        'N' AS password_expired,
+        CAST(NULL AS BIGINT) AS password_lifetime
+    FROM rsduck_catalog.rs_user u
+    WHERE u.status = 'active'
+    "
+    .to_string()
 }
 
 #[derive(Debug, PartialEq, Eq)]

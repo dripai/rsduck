@@ -121,6 +121,20 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
     assert!(rows.is_empty());
 
     let mut query = vec![0x03];
+    query.extend_from_slice(
+        b"SELECT user, host, ssl_type, ssl_cipher, x509_issuer, x509_subject, max_questions, max_updates, max_connections, super_priv, max_user_connections, plugin, password_expired, password_lifetime FROM mysql.user ORDER BY user",
+    );
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 14).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "admin");
+    assert_eq!(rows[0][1], "%");
+    assert_eq!(rows[0][9], "Y");
+    assert_eq!(rows[0][11], "caching_sha2_password");
+    assert_eq!(rows[0][12], "N");
+
+    let mut query = vec![0x03];
     query.extend_from_slice(b"SHOW FUNCTION STATUS WHERE Db = 'main'");
     let mut seq = 0_u8;
     write_packet(&mut stream, &mut seq, &query).await.unwrap();

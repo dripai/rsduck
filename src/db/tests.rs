@@ -160,6 +160,27 @@ fn information_schema_reports_catalog_and_duckdb_mismatch() {
 }
 
 #[test]
+fn mysql_user_projection_requires_user_management_privilege() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER plain_reader PASSWORD='pw'")
+        .unwrap();
+
+    let sql = "SELECT user, host FROM mysql.user";
+    let decision = route_sql(sql).unwrap();
+    let err = execute_typed_sql_blocking(
+        &conn,
+        "plain_reader",
+        sql,
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap_err();
+    assert!(err.contains("manage_user"));
+}
+
+#[test]
 fn typed_query_preserves_common_pg_types_and_null_cells() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();

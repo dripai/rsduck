@@ -382,6 +382,11 @@ pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
     }
 }
 
+pub fn authorize_user_metadata(conn: &Connection, username: &str) -> Result<(), String> {
+    let principal = principal_for_username(conn, username)?;
+    require_system_action(conn, &principal, "manage_user")
+}
+
 fn normalize_relation_identifier(part: &str) -> String {
     let part = part.trim().trim_matches(|ch| matches!(ch, '"' | '`'));
     part.replace("``", "`").replace("\"\"", "\"")
