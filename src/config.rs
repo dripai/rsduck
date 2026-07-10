@@ -93,6 +93,8 @@ pub struct WebConfig {
     pub enabled: bool,
     #[serde(default = "default_web_bind")]
     pub bind: String,
+    #[serde(default = "default_migration_root")]
+    pub migration_root: String,
 }
 
 fn default_true() -> bool {
@@ -105,6 +107,10 @@ fn default_snapshot_dir() -> String {
 
 fn default_snapshot_prefix() -> String {
     "rsduck".into()
+}
+
+fn default_migration_root() -> String {
+    ".".into()
 }
 
 fn default_init_sql() -> String {
@@ -228,6 +234,7 @@ impl Default for WebConfig {
         Self {
             enabled: default_true(),
             bind: default_web_bind(),
+            migration_root: default_migration_root(),
         }
     }
 }

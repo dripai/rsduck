@@ -690,7 +690,7 @@ fn restore_partition_indexes(
     Ok(())
 }
 
-pub(super) fn prepare_snapshot_parquet_extension(
+pub(crate) fn prepare_snapshot_parquet_extension(
     conn: &Connection,
     base_dir: Option<&Path>,
 ) -> Result<(), String> {

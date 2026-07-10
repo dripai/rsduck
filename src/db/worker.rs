@@ -94,6 +94,26 @@ where
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result.map_err(DbError::execution));
                     }
+                    SqlCommand::ImportParquet {
+                        username,
+                        schema,
+                        sources,
+                        resp,
+                    } => {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let _write_guard = write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate")
+                                .lock()
+                                .map_err(|_| "snapshot gate is poisoned".to_string())?;
+                            prepare_snapshot_parquet_extension(&conn, None)?;
+                            crate::catalog::import_parquet_tables_as(
+                                &conn, &username, &schema, &sources,
+                            )
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
                     SqlCommand::Shutdown => break,
                 }
             }

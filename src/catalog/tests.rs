@@ -1,9 +1,11 @@
 use super::{
     allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, execute_catalog_aware_write,
-    execute_catalog_aware_write_as, hash_password, namespace_oid, relation_oid, sql_string,
-    validate_after_start, verify_password, CatalogAuthenticator, OBJECT_RELATION_KIND,
+    execute_catalog_aware_write_as, hash_password, import_parquet_tables_as, namespace_oid,
+    relation_oid, sql_string, validate_after_start, verify_password, CatalogAuthenticator,
+    OBJECT_RELATION_KIND,
 };
 use crate::auth::{AuthCredential, AuthProtocol, AuthRequest, BlockingAuthenticator};
+use crate::db::{prepare_snapshot_parquet_extension, ParquetImportSource};
 use duckdb::Connection;
 
 #[test]
@@ -54,6 +56,92 @@ fn bootstrap_creates_default_admin_and_roles() {
         )
         .unwrap();
     assert!(checksum.starts_with("fnv1a64:"));
+}
+
+#[test]
+fn parquet_batch_import_registers_catalog_and_rolls_back_as_one_unit() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    prepare_snapshot_parquet_extension(&conn, None).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_catalog_parquet_import_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let alpha = dir.join("alpha.parquet");
+    let beta = dir.join("beta.parquet");
+    let blob = dir.join("blob.parquet");
+    conn.execute_batch(&format!(
+        "COPY (SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)) TO '{}' (FORMAT PARQUET);\
+         COPY (SELECT 3::BIGINT AS id) TO '{}' (FORMAT PARQUET);\
+         COPY (SELECT 'abc'::BLOB AS payload) TO '{}' (FORMAT PARQUET);",
+        sql_string(&alpha.display().to_string()),
+        sql_string(&beta.display().to_string()),
+        sql_string(&blob.display().to_string())
+    ))
+    .unwrap();
+
+    let imported_rows = import_parquet_tables_as(
+        &conn,
+        "admin",
+        "main",
+        &[
+            ParquetImportSource {
+                table: "alpha".into(),
+                path: alpha.display().to_string(),
+            },
+            ParquetImportSource {
+                table: "beta".into(),
+                path: beta.display().to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(imported_rows, 3);
+    assert!(relation_oid(&conn, "main", "alpha").is_ok());
+    assert!(relation_oid(&conn, "main", "beta").is_ok());
+    let managed_kind: String = conn
+        .query_row(
+            "SELECT ext.managed_kind FROM rsduck_catalog.rs_relation_ext ext \
+             JOIN rsduck_catalog.rs_relation rel ON rel.oid = ext.relid \
+             WHERE rel.relname = 'alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(managed_kind, "ordinary");
+
+    let error = import_parquet_tables_as(
+        &conn,
+        "admin",
+        "main",
+        &[
+            ParquetImportSource {
+                table: "rollback_good".into(),
+                path: beta.display().to_string(),
+            },
+            ParquetImportSource {
+                table: "rollback_blob".into(),
+                path: blob.display().to_string(),
+            },
+        ],
+    )
+    .unwrap_err();
+    assert!(error.contains("unsupported DuckDB type"));
+    let rolled_back: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM duckdb_tables() \
+             WHERE schema_name = 'main' AND table_name IN ('rollback_good', 'rollback_blob')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rolled_back, 0);
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

@@ -34,7 +34,7 @@ pub(in crate::catalog) use self::relation::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::schema::*;
 #[allow(unused_imports)]
-pub(in crate::catalog) use self::table::*;
+pub(crate) use self::table::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::user_role::*;
 #[allow(unused_imports)]

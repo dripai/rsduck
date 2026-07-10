@@ -143,6 +143,27 @@ impl DbHandle {
             .await
     }
 
+    pub async fn import_parquet_tables_as(
+        &self,
+        username: String,
+        schema: String,
+        sources: Vec<ParquetImportSource>,
+    ) -> DbResult<usize> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self.engine.write_tx.try_send(SqlCommand::ImportParquet {
+            username,
+            schema,
+            sources,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("write")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("write")),
+        }
+    }
+
     pub async fn authenticate(&self, request: AuthRequest) -> DbResult<AuthenticatedPrincipal> {
         self.engine.authenticate(request).await
     }

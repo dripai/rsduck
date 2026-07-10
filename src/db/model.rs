@@ -176,6 +176,12 @@ pub struct DbHandle {
     pub(super) engine: Arc<DbEngine>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParquetImportSource {
+    pub table: String,
+    pub path: String,
+}
+
 impl From<SqlTypedResult> for SqlResult {
     fn from(result: SqlTypedResult) -> Self {
         match result {
@@ -218,6 +224,12 @@ pub(super) enum SqlCommand {
         sql: String,
         route: SqlRoute,
         resp: oneshot::Sender<DbResult<Vec<SqlColumn>>>,
+    },
+    ImportParquet {
+        username: String,
+        schema: String,
+        sources: Vec<ParquetImportSource>,
+        resp: oneshot::Sender<DbResult<usize>>,
     },
     Shutdown,
 }

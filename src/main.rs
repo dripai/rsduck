@@ -156,6 +156,7 @@ async fn main() {
             db.clone(),
             cfg.snapshot.dir.clone(),
             cfg.snapshot.prefix.clone(),
+            cfg.web.migration_root.clone(),
         );
         let shutdown_snapshot_dir = cfg.snapshot.dir.clone();
         let shutdown_snapshot_prefix = cfg.snapshot.prefix.clone();

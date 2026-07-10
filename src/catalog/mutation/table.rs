@@ -1,5 +1,127 @@
 use super::*;
 
+pub(crate) fn import_parquet_tables_as(
+    conn: &Connection,
+    username: &str,
+    schema: &str,
+    sources: &[crate::db::ParquetImportSource],
+) -> Result<usize, String> {
+    if sources.is_empty() {
+        return Err("Parquet import requires at least one source file".into());
+    }
+    if sources.len() > 256 {
+        return Err("Parquet import supports at most 256 tables per batch".into());
+    }
+    validate_import_identifier("schema", schema)?;
+    reject_reserved_schema(schema)?;
+    ensure_user_schema_exists(conn, schema)?;
+
+    let principal = principal_for_username(conn, username)?;
+    require_schema_action(conn, &principal, schema, "ddl")?;
+
+    for (index, source) in sources.iter().enumerate() {
+        validate_import_identifier("table", &source.table)?;
+        if source.path.trim().is_empty() {
+            return Err(format!(
+                "Parquet source path is empty for table {}",
+                source.table
+            ));
+        }
+        if sources[..index]
+            .iter()
+            .any(|existing| existing.table.eq_ignore_ascii_case(&source.table))
+        {
+            return Err(format!(
+                "duplicate target table in Parquet import: {}",
+                source.table
+            ));
+        }
+    }
+
+    run_catalog_tx(conn, || {
+        for source in sources {
+            if relation_exists(conn, schema, &source.table)? {
+                return Err(format!(
+                    "relation already exists: {schema}.{}",
+                    source.table
+                ));
+            }
+        }
+
+        let mut total_rows = 0usize;
+        for source in sources {
+            let rel_oid = allocate_oid(conn)?;
+            let type_oid = allocate_oid(conn)?;
+            let request = serde_json::json!({
+                "source": source.path,
+                "target": format!("{schema}.{}", source.table),
+            })
+            .to_string();
+            let journal_id = insert_journal(conn, "import_parquet_table", rel_oid, &request)?;
+            let qualified = quote_qualified(schema, &source.table);
+            let create_sql = format!(
+                "CREATE TABLE {qualified} AS SELECT * FROM read_parquet('{}')",
+                sql_string(&source.path)
+            );
+
+            conn.execute_batch(&create_sql).map_err(|e| {
+                format!("import Parquet into {schema}.{} failed: {e}", source.table)
+            })?;
+            let columns = load_duckdb_columns(conn, schema, &source.table)?;
+            let row_count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {qualified}"), [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| {
+                    format!("count imported table {schema}.{} failed: {e}", source.table)
+                })?;
+            let row_count = usize::try_from(row_count)
+                .map_err(|_| format!("invalid imported row count for {schema}.{}", source.table))?;
+
+            insert_relation_rows(
+                conn,
+                rel_oid,
+                type_oid,
+                schema,
+                &source.table,
+                "r",
+                "ordinary",
+                "user",
+                "",
+                &columns,
+                principal.user_id,
+            )?;
+            conn.execute(
+                &format!(
+                    "UPDATE rsduck_catalog.rs_relation SET reltuples = {row_count} WHERE oid = {rel_oid}"
+                ),
+                [],
+            )
+            .map_err(|e| format!("update imported table row count failed: {e}"))?;
+            finish_journal(conn, journal_id)?;
+            total_rows = total_rows
+                .checked_add(row_count)
+                .ok_or_else(|| "Parquet import row count overflow".to_string())?;
+        }
+        Ok(total_rows)
+    })
+}
+
+fn validate_import_identifier(kind: &str, value: &str) -> Result<(), String> {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(format!("Parquet import {kind} cannot be empty"));
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(format!(
+            "Parquet import {kind} contains unsupported characters: {value}"
+        ));
+    }
+    Ok(())
+}
+
 pub(in crate::catalog) fn create_table_relation(
     conn: &Connection,
     create_table: &CreateTable,

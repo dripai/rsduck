@@ -28,6 +28,10 @@ button, input, textarea { font: inherit; }
 .schema-tools input { min-width: 0; flex: 1; height: 28px; padding: 4px 8px; border: 1px solid #c8d0dc; border-radius: 4px; background: #fff; font-size: 12px; }
 .icon-button { height: 28px; padding: 0 9px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; color: #334155; cursor: pointer; font-size: 12px; }
 .icon-button:hover { background: #edf4ff; border-color: #7daeea; }
+.schema-actions { display: flex; margin-top: 7px; }
+.migration-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; height: 29px; padding: 0 10px; border: 1px solid #93a4b8; border-radius: 4px; color: #263445; background: #fff; cursor: pointer; font-size: 12px; }
+.migration-button:hover { color: #0b61c9; border-color: #6f9fd8; background: #edf4ff; }
+.migration-button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
 .tree { overflow: auto; padding: 6px 0 12px; flex: 1; }
 .schema-group { margin: 2px 0 8px; }
 .schema-name { padding: 5px 12px; color: #526172; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
@@ -41,9 +45,18 @@ button, input, textarea { font: inherit; }
 .main { --editor-height: 38vh; min-width: 0; display: grid; grid-template-rows: 44px minmax(150px, var(--editor-height)) 8px auto minmax(0, 1fr); height: 100vh; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 44px; padding: 0 14px; border-bottom: 1px solid #d8dde6; background: #f9fafb; }
 .title { font-weight: 700; }
-.top-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.top-actions { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.session-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .summary { color: #66758a; font-size: 12px; white-space: nowrap; }
-.user-pill { color: #334155; font-size: 12px; white-space: nowrap; }
+.user-pill { max-width: 120px; overflow: hidden; padding: 3px 7px; border: 1px solid #d8dde6; border-radius: 4px; color: #334155; background: #eef2f6; font-size: 12px; line-height: 18px; white-space: nowrap; text-overflow: ellipsis; }
+.action-toolbar { display: inline-flex; align-items: stretch; overflow: hidden; flex: none; height: 32px; border: 1px solid #b9c4d3; border-radius: 6px; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+.toolbar-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: 30px; padding: 0 10px; border: 0; border-left: 1px solid #d8dde6; color: #263445; background: #fff; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
+.toolbar-button:first-child { border-left: 0; }
+.toolbar-button:hover { color: #0b61c9; background: #edf4ff; }
+.toolbar-button.logout-button:hover { color: #b42318; background: #fff1f0; }
+.toolbar-button:focus-visible { position: relative; z-index: 1; outline: 2px solid #1a73e8; outline-offset: -2px; }
+.toolbar-button:disabled { color: #8995a5; background: #f4f6f8; cursor: wait; }
+.toolbar-icon { width: 14px; color: currentColor; font-size: 15px; line-height: 1; text-align: center; }
 .editor { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid #d8dde6; }
 .editor-surface { flex: 1; min-height: 130px; background: #fff; overflow: hidden; }
 .editor-surface .cm-editor { height: 100%; }
@@ -69,18 +82,41 @@ body.resizing { cursor: row-resize; user-select: none; }
 .secondary-button:hover { background: #edf4ff; border-color: #7daeea; }
 .pager { display: flex; gap: 8px; align-items: center; padding: 7px 12px; border-bottom: 1px solid #d8dde6; background: #fff; color: #475569; font-size: 13px; }
 .pager input { width: 96px; height: 28px; padding: 4px 7px; border: 1px solid #c8d0dc; border-radius: 4px; }
-.status { margin-left: auto; color: #66758a; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.status { min-width: 0; margin-left: auto; color: #66758a; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .result { min-width: 0; min-height: 0; overflow: auto; background: #fff; }
 table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-right: 1px solid #e1e5eb; border-bottom: 1px solid #e1e5eb; padding: 6px 9px; text-align: left; white-space: nowrap; }
 th { position: sticky; top: 0; background: #f3f5f7; color: #111827; z-index: 1; }
 td { color: #253244; }
 tbody tr:nth-child(even) { background: #fafbfc; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 18px; background: rgba(15, 23, 42, .38); }
+.modal-backdrop[hidden] { display: none; }
+.dialog { width: min(480px, 100%); border: 1px solid #c5ceda; border-radius: 8px; background: #fff; box-shadow: 0 18px 50px rgba(15, 23, 42, .22); }
+.dialog-header { display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 14px 0 16px; border-bottom: 1px solid #e1e5eb; }
+.dialog-title { font-size: 15px; font-weight: 700; }
+.dialog-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; color: #526172; background: transparent; cursor: pointer; font-size: 19px; line-height: 1; }
+.dialog-close:hover { color: #b42318; background: #fff1f0; }
+.dialog-body { padding: 15px 16px 4px; }
+.dialog-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; color: #334155; font-size: 12px; }
+.dialog-field input { width: 100%; height: 32px; padding: 5px 8px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; }
+.dialog-field input:focus { outline: 2px solid #8fc2ff; border-color: #1a73e8; }
+.dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.migration-root { overflow-wrap: anywhere; margin-bottom: 12px; padding: 7px 8px; border: 1px solid #d8dde6; border-radius: 4px; color: #526172; background: #f4f6f8; font: 12px Consolas, monospace; }
+.dialog-error { min-height: 18px; color: #b42318; font-size: 12px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px 15px; }
+.primary-button:disabled, .secondary-button:disabled { color: #8995a5; border-color: #c8d0dc; background: #eef1f4; cursor: wait; }
 @media (max-width: 760px) {
   body { overflow: auto; }
   .app { grid-template-columns: 1fr; grid-template-rows: 240px 1fr; height: auto; min-height: 100vh; }
   .sidebar { border-right: 0; border-bottom: 1px solid #d8dde6; }
   .main { height: calc(100vh - 240px); min-height: 520px; }
+  .summary { display: none; }
+}
+@media (max-width: 520px) {
+  .topbar { gap: 8px; padding: 0 8px; }
+  .session-meta { display: none; }
+  .toolbar-button { padding: 0 8px; }
+  .dialog-grid { grid-template-columns: 1fr; gap: 0; }
 }
 </style>
 </head>
@@ -111,6 +147,12 @@ tbody tr:nth-child(even) { background: #fafbfc; }
         <input id="tableFilter" placeholder="Filter tables" oninput="renderTables()">
         <button class="icon-button" onclick="loadTables()" title="Refresh tables">Refresh</button>
       </div>
+      <div class="schema-actions">
+        <button class="migration-button" type="button" onclick="openMigrationDialog()" title="Import Parquet tables">
+          <span aria-hidden="true">&#8681;</span>
+          <span>Import Parquet</span>
+        </button>
+      </div>
     </div>
     <div id="tableList" class="tree"><div class="empty">Loading tables...</div></div>
   </aside>
@@ -118,10 +160,20 @@ tbody tr:nth-child(even) { background: #fafbfc; }
     <div class="topbar">
       <div class="title">SQL Console</div>
       <div class="top-actions">
-        <div id="schemaSummary" class="summary">0 tables</div>
-        <span id="currentUser" class="user-pill"></span>
-        <button class="secondary-button" onclick="saveSnapshot()">Save Snapshot</button>
-        <button class="secondary-button" onclick="logout()">Logout</button>
+        <div class="session-meta">
+          <div id="schemaSummary" class="summary">0 tables</div>
+          <span id="currentUser" class="user-pill"></span>
+        </div>
+        <div class="action-toolbar" role="toolbar" aria-label="Session actions">
+          <button id="snapshotButton" class="toolbar-button" type="button" onclick="saveSnapshot()" title="Save snapshot">
+            <span class="toolbar-icon" aria-hidden="true">&#8595;</span>
+            <span>Save Snapshot</span>
+          </button>
+          <button class="toolbar-button logout-button" type="button" onclick="logout()" title="Log out">
+            <span class="toolbar-icon" aria-hidden="true">&#8677;</span>
+            <span>Logout</span>
+          </button>
+        </div>
       </div>
     </div>
     <section class="editor">
@@ -143,6 +195,39 @@ tbody tr:nth-child(even) { background: #fafbfc; }
       <table id="tbl"></table>
     </section>
   </main>
+</div>
+<div id="migrationDialog" class="modal-backdrop" hidden onclick="closeMigrationFromBackdrop(event)">
+  <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="migrationTitle" onsubmit="submitMigration(event)">
+    <div class="dialog-header">
+      <div id="migrationTitle" class="dialog-title">Import Parquet Tables</div>
+      <button class="dialog-close" type="button" onclick="closeMigrationDialog()" title="Close" aria-label="Close">&#215;</button>
+    </div>
+    <div class="dialog-body">
+      <label class="dialog-field">
+        <span>Migration root</span>
+        <span id="migrationRoot" class="migration-root">Loading...</span>
+      </label>
+      <label class="dialog-field">
+        <span>Source path</span>
+        <input id="migrationSource" value="." required autocomplete="off">
+      </label>
+      <div class="dialog-grid">
+        <label class="dialog-field">
+          <span>Target schema</span>
+          <input id="migrationSchema" value="main" required autocomplete="off">
+        </label>
+        <label class="dialog-field">
+          <span>Target table (single file)</span>
+          <input id="migrationTable" autocomplete="off">
+        </label>
+      </div>
+      <div id="migrationMsg" class="dialog-error" role="alert"></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="secondary-button" type="button" onclick="closeMigrationDialog()">Cancel</button>
+      <button id="migrationSubmit" class="primary-button" type="submit">Import</button>
+    </div>
+  </form>
 </div>
 <div id="sqlContextMenu" class="context-menu" hidden>
   <button type="button" onclick="executeContextSql()">Execute Selection</button>
@@ -439,12 +524,81 @@ function prevPage() {
 }
 
 async function saveSnapshot() {
+  const button = document.getElementById('snapshotButton');
   const t0 = performance.now();
-  const resp = await fetch('/snapshot', { method: 'POST' });
-  const data = await resp.json();
-  const ms = (performance.now() - t0).toFixed(1);
-  const msg = document.getElementById('msg');
-  msg.innerText = (data.success ? data.msg : 'Error: ' + data.msg) + ' in ' + ms + 'ms';
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    const resp = await fetch('/snapshot', { method: 'POST' });
+    const data = await resp.json();
+    const ms = (performance.now() - t0).toFixed(1);
+    const msg = document.getElementById('msg');
+    msg.innerText = (data.success ? data.msg : 'Error: ' + data.msg) + ' in ' + ms + 'ms';
+  } finally {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+  }
+}
+
+async function openMigrationDialog() {
+  const dialog = document.getElementById('migrationDialog');
+  const root = document.getElementById('migrationRoot');
+  document.getElementById('migrationMsg').innerText = '';
+  document.getElementById('migrationSource').value = '.';
+  document.getElementById('migrationSchema').value = 'main';
+  document.getElementById('migrationTable').value = '';
+  root.innerText = 'Loading...';
+  dialog.hidden = false;
+  try {
+    const resp = await fetch('/migration');
+    const data = await resp.json();
+    root.innerText = data.success ? data.root : data.msg;
+  } catch (error) {
+    root.innerText = 'Failed to load migration root';
+  }
+  document.getElementById('migrationSource').focus();
+}
+
+function closeMigrationDialog() {
+  if (document.getElementById('migrationSubmit').disabled) return;
+  document.getElementById('migrationDialog').hidden = true;
+}
+
+function closeMigrationFromBackdrop(event) {
+  if (event.target === event.currentTarget) closeMigrationDialog();
+}
+
+async function submitMigration(event) {
+  event.preventDefault();
+  const submit = document.getElementById('migrationSubmit');
+  const message = document.getElementById('migrationMsg');
+  const table = document.getElementById('migrationTable').value.trim();
+  const payload = {
+    source: document.getElementById('migrationSource').value.trim(),
+    schema: document.getElementById('migrationSchema').value.trim(),
+    table: table || null
+  };
+  submit.disabled = true;
+  message.innerText = '';
+  try {
+    const resp = await fetch('/migration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      message.innerText = data.msg || 'Parquet import failed';
+      return;
+    }
+    document.getElementById('msg').innerText = data.msg;
+    document.getElementById('migrationDialog').hidden = true;
+    await loadTables();
+  } catch (error) {
+    message.innerText = 'Parquet import request failed';
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 function setEditorHeight(height) {
@@ -500,6 +654,11 @@ function setupEditorSplitter() {
     setEditorHeight(currentHeight);
   });
 }
+
+window.addEventListener('keydown', event => {
+  const dialog = document.getElementById('migrationDialog');
+  if (event.key === 'Escape' && !dialog.hidden) closeMigrationDialog();
+});
 
 initSession();
 </script>
