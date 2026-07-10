@@ -29,6 +29,13 @@ pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
         });
     }
 
+    if crate::catalog::looks_like_show_partitions(sql) {
+        return Ok(SqlRouteDecision {
+            route: SqlRoute::Read,
+            command: "SHOW".to_string(),
+        });
+    }
+
     let dialect = DuckDbDialect {};
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| format!("sql parse failed: {e}"))?;
@@ -253,6 +260,10 @@ mod tests {
             SqlRoute::Read
         );
         assert_eq!(route_sql("SHOW TABLES").unwrap().route, SqlRoute::Read);
+        assert_eq!(
+            route_sql("SHOW PARTITIONS FROM kline_day").unwrap().route,
+            SqlRoute::Read
+        );
         assert_eq!(route_sql("SHOW ALL TABLES").unwrap().route, SqlRoute::Read);
         assert_eq!(
             route_sql("DESCRIBE kline_day").unwrap().route,

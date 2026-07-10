@@ -29,6 +29,9 @@ pub(super) fn execute_typed_sql_blocking(
     if let Some(result) = crate::mysql_compat::compat_result(sql_trimmed) {
         return Ok(result);
     }
+    if let Some(result) = crate::catalog::show_partitions_result(conn, username, sql_trimmed)? {
+        return Ok(result);
+    }
     if let Some(rewritten_sql) = crate::mysql_compat::rewrite_sql(sql_trimmed, "main", username) {
         if crate::mysql_compat::is_mysql_system_projection(sql_trimmed) {
             crate::catalog::authorize_user_metadata(conn, username)?;
@@ -108,6 +111,12 @@ pub(super) fn describe_sql_blocking(
     }
 
     if let Some(result) = crate::mysql_compat::compat_result(sql_trimmed) {
+        return Ok(match result {
+            SqlTypedResult::Query { columns, .. } => columns,
+            SqlTypedResult::Execute { .. } => Vec::new(),
+        });
+    }
+    if let Some(result) = crate::catalog::show_partitions_result(conn, username, sql_trimmed)? {
         return Ok(match result {
             SqlTypedResult::Query { columns, .. } => columns,
             SqlTypedResult::Execute { .. } => Vec::new(),

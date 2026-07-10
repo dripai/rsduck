@@ -19,7 +19,7 @@
 
 - 批量同步板块和成分股
 - 导入 Parquet 文件
-- 生成分区数据集
+- 管理分区表
 - 聚合行情指标
 - 执行数据质量检查
 - 保存和恢复 snapshot
@@ -172,52 +172,98 @@ FROM sector_snapshot;
 - 查询“某股票属于哪些板块”：用 `sector_constituents`。
 - 关联 K 线、统计涨跌幅、做板块聚合：用 `sector_constituents`。
 
-## 5. 分区数据集
+## 5. 分区表
 
-DuckDB 常用 Parquet + Hive 目录实现分区数据集，不是 MySQL 风格的物理分区表。
+RSDuck 的分区表使用范围分区语法，不直接暴露 DuckDB 的 Hive 目录分区数据集。业务侧只操作逻辑表，物理分区由 RSDuck 在 `rsduck_internal` 下创建和维护。
 
-把日线表导出为按年月分区的 Parquet：
+创建按日分区、保留 30 个分区的分钟线表：
 
 ```sql
-COPY (
-  SELECT
-    symbol,
-    trade_date,
-    open,
-    high,
-    low,
-    close,
-    volume,
-    amount,
-    year(trade_date) AS trade_year,
-    month(trade_date) AS trade_month
-  FROM kline_1d
+CREATE TABLE kline_1m (
+  stock_code VARCHAR NOT NULL,
+  trade_time TIMESTAMP NOT NULL,
+  open DOUBLE,
+  high DOUBLE,
+  low DOUBLE,
+  close DOUBLE,
+  volume BIGINT,
+  amount DOUBLE,
+  ingest_batch_id VARCHAR,
+  ingest_at TIMESTAMP,
+  PRIMARY KEY (stock_code, trade_time)
 )
-TO 'snapshot/kline_1d_partitioned'
-(
-  FORMAT PARQUET,
-  PARTITION_BY (trade_year, trade_month)
+PARTITION BY RANGE (trade_time)
+WITH (
+  partition_unit = 'day',
+  retention = '30'
 );
 ```
 
-按分区条件查询：
+写入时只写逻辑表：
 
 ```sql
-SELECT *
-FROM read_parquet(
-  'snapshot/kline_1d_partitioned/**/*.parquet',
-  hive_partitioning = true
+INSERT INTO kline_1m (
+  stock_code,
+  trade_time,
+  open,
+  high,
+  low,
+  close,
+  volume,
+  amount,
+  ingest_batch_id,
+  ingest_at
 )
-WHERE trade_year = 2026
-  AND trade_month = 7
-  AND symbol = '688981.SH';
+VALUES
+  ('688981.SH', TIMESTAMP '2026-07-10 09:31:00', 50.1, 50.4, 50.0, 50.2, 120000, 6024000, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now());
 ```
 
-Web 控制项：
+查询仍然查询逻辑表：
 
-- 路径由系统生成，不让用户任意输入。
-- `trade_year`、`trade_month`、`symbol` 做成筛选项。
-- 查询前提示扫描范围，避免误扫全量目录。
+```sql
+SELECT
+  stock_code,
+  trade_time,
+  close,
+  volume
+FROM kline_1m
+WHERE stock_code = '688981.SH'
+  AND trade_time >= TIMESTAMP '2026-07-10 09:30:00'
+  AND trade_time < TIMESTAMP '2026-07-10 15:00:00'
+ORDER BY trade_time;
+```
+
+查看分区状态：
+
+```sql
+SHOW PARTITIONS FROM kline_1m;
+```
+
+维护命令：
+
+```sql
+CALL rsduck_run_partition_maintenance();
+```
+
+如果某个物理分区异常，可以先标记再修复：
+
+```sql
+CALL rsduck_mark_partition_unavailable(
+  'kline_1m',
+  '20260710',
+  'manual check'
+);
+
+CALL rsduck_repair_partition('kline_1m', '20260710');
+```
+
+使用规则：
+
+- 分区键必须是 `DATE` 或 `TIMESTAMP`，且必须 `NOT NULL`。
+- `partition_unit` 支持 `hour`、`day`、`month`、`year`。
+- 外部不要直接操作 `rsduck_internal` 下的物理分区。
+- 需要导入外部 Parquet 文件时，使用 Web 的 Parquet 导入入口，不把它和分区表混在一个示例里。
 
 ## 6. 视图
 
@@ -734,7 +780,7 @@ SQL 样例库：
 
 - 板块同步。
 - Parquet 导入。
-- 分区数据集生成。
+- 分区表维护。
 - 数据质量检查。
 - snapshot 保存和恢复。
 
@@ -749,4 +795,3 @@ SQL 样例库：
 - DuckDB `INSERT`: https://duckdb.org/docs/current/sql/statements/insert
 - DuckDB `UPDATE`: https://duckdb.org/docs/current/sql/statements/update
 - DuckDB `DELETE`: https://duckdb.org/docs/current/sql/statements/delete
-- DuckDB Partitioned Writes: https://duckdb.org/docs/current/data/partitioning/partitioned_writes

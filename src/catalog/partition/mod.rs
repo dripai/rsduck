@@ -6,6 +6,7 @@ mod maintenance;
 mod repair;
 mod retention;
 mod routing;
+mod show;
 mod validation;
 
 #[allow(unused_imports)]
@@ -20,5 +21,7 @@ pub(in crate::catalog) use self::repair::*;
 pub(in crate::catalog) use self::retention::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::routing::*;
+#[allow(unused_imports)]
+pub(crate) use self::show::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::validation::*;

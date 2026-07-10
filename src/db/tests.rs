@@ -391,6 +391,80 @@ fn assert_sector_snapshot_complex_json(conn: &Connection) {
 }
 
 #[test]
+fn show_partitions_reports_partition_table_status() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE kline_1m(
+            stock_code VARCHAR NOT NULL,
+            trade_time TIMESTAMP NOT NULL,
+            close DOUBLE,
+            PRIMARY KEY(stock_code, trade_time)
+        )
+        PARTITION BY RANGE (trade_time)
+        WITH (partition_unit = 'day', retention = '30')",
+    )
+    .unwrap();
+
+    let insert_sql = "\
+        INSERT INTO kline_1m(stock_code, trade_time, close)
+        VALUES ('688981.SH', TIMESTAMP '2026-07-10 09:31:00', 50.2)";
+    let insert_decision = route_sql(insert_sql).unwrap();
+    execute_sql_blocking(
+        &conn,
+        "admin",
+        insert_sql,
+        insert_decision.route,
+        &insert_decision.command,
+        100,
+    )
+    .unwrap();
+
+    let show_sql = "SHOW PARTITIONS FROM kline_1m";
+    let show_decision = route_sql(show_sql).unwrap();
+    let result = execute_typed_sql_blocking(
+        &conn,
+        "admin",
+        show_sql,
+        show_decision.route,
+        &show_decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlTypedResult::Query { columns, rows } = result else {
+        panic!("expected SHOW PARTITIONS query result");
+    };
+    assert_eq!(
+        columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "schema_name",
+            "table_name",
+            "partition_value",
+            "physical_schema",
+            "physical_table",
+            "status",
+            "row_count",
+            "is_null_partition",
+            "created_at",
+            "activated_at",
+            "dropped_at",
+            "error_message",
+        ]
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], SqlValue::Text("main".to_string()));
+    assert_eq!(rows[0][1], SqlValue::Text("kline_1m".to_string()));
+    assert_eq!(rows[0][2], SqlValue::Text("20260710".to_string()));
+    assert_eq!(rows[0][3], SqlValue::Text("rsduck_internal".to_string()));
+    assert_eq!(rows[0][5], SqlValue::Text("active".to_string()));
+    assert_eq!(rows[0][6], SqlValue::Int64(1));
+}
+
+#[test]
 fn bind_sql_params_rewrites_numbered_params_outside_literals() {
     let sql = "SELECT $1 AS a, '$2' AS literal, \"$3\" AS ident, -- $4\n$2 AS b, /* $5 */ $1 AS c";
     let bound = super::bind_sql_params(
