@@ -65,7 +65,7 @@ pub(in crate::catalog) fn partition_entrypoint_sql_from_catalog(
         .map(|column| {
             Ok(format!(
                 "CAST(NULL AS {}) AS {}",
-                duckdb_type_for_pg_type_oid(conn, column.pg_type_oid)?,
+                duckdb_type_for_type_id(conn, column.type_id)?,
                 quote_ident(&column.name)
             ))
         })
@@ -98,9 +98,9 @@ pub(in crate::catalog) fn sync_partition_dependencies(
 ) -> Result<(), String> {
     conn.execute(
         &format!(
-            "DELETE FROM rsduck_catalog.pg_depend \
-             WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
-               AND refclassid = {PG_CLASS_CLASSOID}"
+            "DELETE FROM rsduck_catalog.rs_dependency \
+             WHERE classid = {OBJECT_RELATION_KIND} AND objid = {parent_oid} \
+               AND refclassid = {OBJECT_RELATION_KIND}"
         ),
         [],
     )
@@ -108,8 +108,8 @@ pub(in crate::catalog) fn sync_partition_dependencies(
     for partition in partitions {
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
-                 VALUES ({PG_CLASS_CLASSOID}, {parent_oid}, 0, {PG_CLASS_CLASSOID}, {}, 0, 'n')",
+                "INSERT INTO rsduck_catalog.rs_dependency(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+                 VALUES ({OBJECT_RELATION_KIND}, {parent_oid}, 0, {OBJECT_RELATION_KIND}, {}, 0, 'n')",
                 partition.child_oid
             ),
             [],

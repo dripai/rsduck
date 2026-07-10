@@ -18,7 +18,7 @@ pub(super) fn validate_catalog_checksum(conn: &Connection) -> Result<(), String>
     }
 }
 
-pub(super) fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
+pub(crate) fn refresh_catalog_checksum(conn: &Connection) -> Result<(), String> {
     let checksum = calculate_catalog_checksum(conn)?;
     conn.execute(
         &format!(
@@ -46,7 +46,7 @@ pub(super) fn catalog_checksum_queries() -> &'static [(&'static str, &'static st
     &[
         (
             "rs_catalog_version",
-            "SELECT id, schema_version, catalog_epoch, status \
+            "SELECT id, schema_version, snapshot_format_version, catalog_epoch, status \
              FROM rsduck_catalog.rs_catalog_version ORDER BY id",
         ),
         (
@@ -59,49 +59,49 @@ pub(super) fn catalog_checksum_queries() -> &'static [(&'static str, &'static st
              FROM rsduck_catalog.rs_catalog_journal ORDER BY journal_id",
         ),
         (
-            "pg_namespace",
+            "rs_schema",
             "SELECT oid, nspname, nspowner, nspacl \
-             FROM rsduck_catalog.pg_namespace ORDER BY oid",
+             FROM rsduck_catalog.rs_schema ORDER BY oid",
         ),
         (
-            "pg_type",
+            "rs_type",
             "SELECT oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typisdefined, typrelid, typelem, typarray, rsduck_physical_type \
-             FROM rsduck_catalog.pg_type ORDER BY oid",
+             FROM rsduck_catalog.rs_type ORDER BY oid",
         ),
         (
-            "pg_class",
+            "rs_relation",
             "SELECT oid, relname, relnamespace, reltype, relowner, relkind, relpersistence, relnatts, reltuples, relhasindex, relispartition, relpartbound, reloptions, status, error_message \
-             FROM rsduck_catalog.pg_class ORDER BY oid",
+             FROM rsduck_catalog.rs_relation ORDER BY oid",
         ),
         (
-            "pg_attribute",
+            "rs_column",
             "SELECT attrelid, attname, atttypid, attnum, atttypmod, attnotnull, atthasdef, attisdropped, attidentity, attgenerated, attoptions \
-             FROM rsduck_catalog.pg_attribute ORDER BY attrelid, attnum",
+             FROM rsduck_catalog.rs_column ORDER BY attrelid, attnum",
         ),
         (
-            "pg_attrdef",
+            "rs_column_default",
             "SELECT oid, adrelid, adnum, adbin \
-             FROM rsduck_catalog.pg_attrdef ORDER BY oid",
+             FROM rsduck_catalog.rs_column_default ORDER BY oid",
         ),
         (
-            "pg_constraint",
+            "rs_constraint",
             "SELECT oid, conname, connamespace, contype, conrelid, conindid, conkey, confrelid, confkey, convalidated, conbin \
-             FROM rsduck_catalog.pg_constraint ORDER BY oid",
+             FROM rsduck_catalog.rs_constraint ORDER BY oid",
         ),
         (
-            "pg_index",
+            "rs_index",
             "SELECT indexrelid, indrelid, indnatts, indnkeyatts, indisunique, indisprimary, indisvalid, indkey, indexprs, indpred \
-             FROM rsduck_catalog.pg_index ORDER BY indexrelid",
+             FROM rsduck_catalog.rs_index ORDER BY indexrelid",
         ),
         (
-            "pg_depend",
+            "rs_dependency",
             "SELECT classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype \
-             FROM rsduck_catalog.pg_depend ORDER BY classid, objid, objsubid, refclassid, refobjid, refobjsubid",
+             FROM rsduck_catalog.rs_dependency ORDER BY classid, objid, objsubid, refclassid, refobjid, refobjsubid",
         ),
         (
-            "pg_description",
+            "rs_comment",
             "SELECT objoid, classoid, objsubid, description \
-             FROM rsduck_catalog.pg_description ORDER BY objoid, classoid, objsubid",
+             FROM rsduck_catalog.rs_comment ORDER BY objoid, classoid, objsubid",
         ),
         (
             "rs_relation_ext",

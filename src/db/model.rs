@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use super::error::DbResult;
 
-pub(super) const SNAPSHOT_MANIFEST_FILE: &str = "rsduck_snapshot_manifest.json";
+pub(super) const SNAPSHOT_MANIFEST_FILE: &str = "manifest.json";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SqlType {
@@ -31,23 +31,42 @@ pub enum SqlType {
 }
 
 impl SqlType {
-    pub fn pg_type_oid(self) -> u32 {
+    pub fn sql_type_name(self) -> &'static str {
         match self {
-            SqlType::Bool => 16,
-            SqlType::Bytea => 17,
-            SqlType::Int8 => 20,
-            SqlType::Int2 => 21,
-            SqlType::Int4 => 23,
-            SqlType::Text => 25,
-            SqlType::Float4 => 700,
-            SqlType::Float8 => 701,
-            SqlType::Numeric => 1700,
-            SqlType::Date => 1082,
-            SqlType::Time => 1083,
-            SqlType::Timestamp => 1114,
-            SqlType::TimestampTz => 1184,
-            SqlType::Uuid => 2950,
-            SqlType::Json => 25,
+            SqlType::Bool => "boolean",
+            SqlType::Bytea => "binary",
+            SqlType::Int8 => "bigint",
+            SqlType::Int2 => "smallint",
+            SqlType::Int4 => "integer",
+            SqlType::Text => "text",
+            SqlType::Float4 => "real",
+            SqlType::Float8 => "double",
+            SqlType::Numeric => "decimal",
+            SqlType::Date => "date",
+            SqlType::Time => "time",
+            SqlType::Timestamp => "timestamp",
+            SqlType::TimestampTz => "timestamp with time zone",
+            SqlType::Uuid => "uuid",
+            SqlType::Json => "json",
+        }
+    }
+
+    pub fn mysql_type_name(self) -> &'static str {
+        match self {
+            SqlType::Bool => "tinyint",
+            SqlType::Bytea => "blob",
+            SqlType::Int8 => "bigint",
+            SqlType::Int2 => "smallint",
+            SqlType::Int4 => "int",
+            SqlType::Text => "varchar",
+            SqlType::Float4 => "float",
+            SqlType::Float8 => "double",
+            SqlType::Numeric => "decimal",
+            SqlType::Date => "date",
+            SqlType::Time => "time",
+            SqlType::Timestamp | SqlType::TimestampTz => "datetime",
+            SqlType::Uuid => "char",
+            SqlType::Json => "json",
         }
     }
 }
@@ -64,10 +83,6 @@ impl SqlColumn {
             name: name.into(),
             data_type,
         }
-    }
-
-    pub(super) fn text(name: impl Into<String>) -> Self {
-        Self::new(name, SqlType::Text)
     }
 }
 

@@ -119,7 +119,7 @@ async fn handle_stmt_prepare(
         .trim()
         .to_string();
     let (bound_sql, param_count) = rewrite_mysql_placeholders(&original_sql)?;
-    let bound_sql = rewrite_mysql_limit_offset_comma(&bound_sql).unwrap_or(bound_sql);
+    let bound_sql = mysql_execution_sql(&bound_sql, session);
     let describe_params = dummy_params_for_describe(&bound_sql, param_count);
     let columns = db
         .describe_sql_with_params_as(session.username.clone(), bound_sql.clone(), describe_params)
@@ -400,210 +400,82 @@ fn mysql_compat_result(sql: &str, session: &MySqlSession) -> Option<SqlTypedResu
 }
 
 fn mysql_catalog_query_sql(sql: &str, session: &MySqlSession) -> Option<String> {
-    table_status_sql(sql, session).or_else(|| show_tables_sql(sql, session))
+    crate::mysql_compat::rewrite_sql(sql, current_mysql_schema(session), &session.username)
 }
 
 fn mysql_execution_sql(sql: &str, session: &MySqlSession) -> String {
-    mysql_catalog_query_sql(sql, session)
+    let sql = mysql_catalog_query_sql(sql, session)
         .or_else(|| rewrite_mysql_limit_offset_comma(sql))
-        .unwrap_or_else(|| sql.to_string())
+        .unwrap_or_else(|| sql.to_string());
+    rewrite_mysql_quoted_identifiers(&sql)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ShowTablesQuery {
-    full: bool,
-    schema: Option<String>,
-    filter: ShowTablesFilter,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ShowTablesFilter {
-    None,
-    Like(String),
-    Where(String),
-}
-
-fn show_tables_sql(sql: &str, session: &MySqlSession) -> Option<String> {
-    let parsed = parse_show_tables_query(sql)?;
-    let schema = parsed
-        .schema
-        .as_deref()
-        .unwrap_or_else(|| current_mysql_schema(session));
-    let table_name_column = format!("Tables_in_{schema}");
-    let table_name_ident = sql_ident(&table_name_column);
-    let columns = if parsed.full {
-        format!("table_name AS {table_name_ident}, table_type AS \"Table_type\"")
-    } else {
-        format!("table_name AS {table_name_ident}")
-    };
-    let mut out = format!(
-        "SELECT * FROM (
-            SELECT {columns}
-            FROM information_schema.tables
-            WHERE table_catalog = current_database()
-              AND table_schema = {}
-        ) rsduck_mysql_show_tables",
-        sql_literal(schema)
-    );
-
-    match parsed.filter {
-        ShowTablesFilter::None => {}
-        ShowTablesFilter::Like(pattern) => {
-            out.push_str(&format!(
-                " WHERE {table_name_ident} LIKE {}",
-                sql_literal(&pattern)
-            ));
-        }
-        ShowTablesFilter::Where(expr) => {
-            out.push_str(" WHERE ");
-            out.push_str(&expr);
-        }
-    }
-    out.push_str(&format!(" ORDER BY {table_name_ident}"));
-    Some(out)
-}
-
-fn table_status_sql(sql: &str, session: &MySqlSession) -> Option<String> {
-    let parsed = parse_show_table_status_query(sql)?;
-    let schema = parsed
-        .schema
-        .as_deref()
-        .unwrap_or_else(|| current_mysql_schema(session));
-    let mut out = format!(
-        "SELECT * FROM (
-            SELECT
-                table_name AS \"Name\",
-                engine AS \"Engine\",
-                version AS \"Version\",
-                row_format AS \"Row_format\",
-                table_rows AS \"Rows\",
-                avg_row_length AS \"Avg_row_length\",
-                data_length AS \"Data_length\",
-                max_data_length AS \"Max_data_length\",
-                index_length AS \"Index_length\",
-                data_free AS \"Data_free\",
-                auto_increment AS \"Auto_increment\",
-                create_time AS \"Create_time\",
-                update_time AS \"Update_time\",
-                check_time AS \"Check_time\",
-                table_collation AS \"Collation\",
-                checksum AS \"Checksum\",
-                create_options AS \"Create_options\",
-                table_comment AS \"Comment\"
-            FROM information_schema.tables
-            WHERE table_catalog = current_database()
-              AND table_schema = {}
-        ) rsduck_mysql_table_status",
-        sql_literal(schema)
-    );
-
-    match parsed.filter {
-        ShowTablesFilter::None => {}
-        ShowTablesFilter::Like(pattern) => {
-            out.push_str(&format!(" WHERE \"Name\" LIKE {}", sql_literal(&pattern)));
-        }
-        ShowTablesFilter::Where(expr) => {
-            out.push_str(" WHERE ");
-            out.push_str(&expr);
-        }
-    }
-    out.push_str(" ORDER BY \"Name\"");
-    Some(out)
-}
-
-fn parse_show_tables_query(sql: &str) -> Option<ShowTablesQuery> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
+fn rewrite_mysql_quoted_identifiers(sql: &str) -> String {
+    let mut output = String::with_capacity(sql.len());
     let mut idx = 0;
-    idx = consume_keyword(trimmed, idx, "show")?;
-    idx = skip_mysql_space(trimmed, idx);
-    let full = if let Some(next_idx) = consume_keyword(trimmed, idx, "full") {
-        idx = skip_mysql_space(trimmed, next_idx);
-        true
-    } else {
-        false
-    };
-    idx = consume_keyword(trimmed, idx, "tables")?;
-    idx = skip_mysql_space(trimmed, idx);
+    let mut changed = false;
 
-    let schema = if let Some(next_idx) =
-        consume_keyword(trimmed, idx, "from").or_else(|| consume_keyword(trimmed, idx, "in"))
-    {
-        idx = skip_mysql_space(trimmed, next_idx);
-        let (schema, next_idx) = parse_mysql_identifier(trimmed, idx)?;
-        idx = skip_mysql_space(trimmed, next_idx);
-        Some(schema)
-    } else {
-        None
-    };
-
-    let filter = if idx >= trimmed.len() {
-        ShowTablesFilter::None
-    } else if let Some(next_idx) = consume_keyword(trimmed, idx, "like") {
-        idx = skip_mysql_space(trimmed, next_idx);
-        let pattern = parse_single_quoted_literal(&trimmed[idx..])?;
-        ShowTablesFilter::Like(pattern)
-    } else if let Some(next_idx) = consume_keyword(trimmed, idx, "where") {
-        let expr = trimmed[next_idx..].trim();
-        if expr.is_empty() {
-            return None;
+    while idx < sql.len() {
+        let byte = sql.as_bytes()[idx];
+        match byte {
+            b'`' => {
+                idx += 1;
+                output.push('"');
+                let mut closed = false;
+                while idx < sql.len() {
+                    match sql.as_bytes()[idx] {
+                        b'`' if sql.as_bytes().get(idx + 1) == Some(&b'`') => {
+                            output.push('`');
+                            idx += 2;
+                        }
+                        b'`' => {
+                            output.push('"');
+                            idx += 1;
+                            closed = true;
+                            break;
+                        }
+                        _ => {
+                            let next = next_sql_char_index(sql, idx);
+                            output.push_str(&sql[idx..next]);
+                            idx = next;
+                        }
+                    }
+                }
+                if !closed {
+                    return sql.to_string();
+                }
+                changed = true;
+            }
+            b'\'' | b'"' => {
+                let quote = byte;
+                let start = idx;
+                idx += 1;
+                while idx < sql.len() {
+                    if sql.as_bytes()[idx] == quote {
+                        idx += 1;
+                        if sql.as_bytes().get(idx) == Some(&quote) {
+                            idx += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    idx = next_sql_char_index(sql, idx);
+                }
+                output.push_str(&sql[start..idx]);
+            }
+            _ => {
+                let next = next_sql_char_index(sql, idx);
+                output.push_str(&sql[idx..next]);
+                idx = next;
+            }
         }
-        ShowTablesFilter::Where(expr.to_string())
-    } else {
-        return None;
-    };
-
-    Some(ShowTablesQuery {
-        full,
-        schema,
-        filter,
-    })
-}
-
-fn parse_show_table_status_query(sql: &str) -> Option<ShowTablesQuery> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let mut idx = 0;
-    idx = consume_keyword(trimmed, idx, "show")?;
-    idx = skip_mysql_space(trimmed, idx);
-    if let Some(next_idx) = consume_keyword(trimmed, idx, "extended") {
-        idx = skip_mysql_space(trimmed, next_idx);
     }
-    idx = consume_keyword(trimmed, idx, "table")?;
-    idx = skip_mysql_space(trimmed, idx);
-    idx = consume_keyword(trimmed, idx, "status")?;
-    idx = skip_mysql_space(trimmed, idx);
 
-    let schema = if let Some(next_idx) =
-        consume_keyword(trimmed, idx, "from").or_else(|| consume_keyword(trimmed, idx, "in"))
-    {
-        idx = skip_mysql_space(trimmed, next_idx);
-        let (schema, next_idx) = parse_mysql_identifier(trimmed, idx)?;
-        idx = skip_mysql_space(trimmed, next_idx);
-        Some(schema)
+    if changed {
+        output
     } else {
-        None
-    };
-
-    let filter = if idx >= trimmed.len() {
-        ShowTablesFilter::None
-    } else if let Some(next_idx) = consume_keyword(trimmed, idx, "like") {
-        idx = skip_mysql_space(trimmed, next_idx);
-        let pattern = parse_single_quoted_literal(&trimmed[idx..])?;
-        ShowTablesFilter::Like(pattern)
-    } else if let Some(next_idx) = consume_keyword(trimmed, idx, "where") {
-        let expr = trimmed[next_idx..].trim();
-        if expr.is_empty() {
-            return None;
-        }
-        ShowTablesFilter::Where(expr.to_string())
-    } else {
-        return None;
-    };
-
-    Some(ShowTablesQuery {
-        full: false,
-        schema,
-        filter,
-    })
+        sql.to_string()
+    }
 }
 
 fn rewrite_mysql_limit_offset_comma(sql: &str) -> Option<String> {
@@ -829,33 +701,6 @@ fn consume_keyword(sql: &str, idx: usize, keyword: &str) -> Option<usize> {
     }
 }
 
-fn parse_mysql_identifier(sql: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = sql.as_bytes();
-    if bytes.get(start) == Some(&b'`') {
-        let mut idx = start + 1;
-        let mut out = String::new();
-        while idx < bytes.len() {
-            if bytes[idx] == b'`' {
-                if bytes.get(idx + 1) == Some(&b'`') {
-                    out.push('`');
-                    idx += 2;
-                    continue;
-                }
-                return Some((out, idx + 1));
-            }
-            out.push(bytes[idx] as char);
-            idx += 1;
-        }
-        return None;
-    }
-
-    let mut idx = start;
-    while idx < bytes.len() && is_mysql_ident_byte(bytes[idx]) {
-        idx += 1;
-    }
-    (idx > start).then(|| (sql[start..idx].to_string(), idx))
-}
-
 fn skip_mysql_space(sql: &str, mut idx: usize) -> usize {
     while sql
         .as_bytes()
@@ -869,14 +714,6 @@ fn skip_mysql_space(sql: &str, mut idx: usize) -> usize {
 
 fn is_mysql_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
-}
-
-fn sql_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-fn sql_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn references_information_schema_engines(sql: &str) -> bool {

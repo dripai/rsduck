@@ -38,10 +38,7 @@ pub(in crate::catalog) fn validate_partition_key(
             "partition key must be DATE or TIMESTAMP, got {type_text}"
         ));
     };
-    Ok((
-        key_type.to_string(),
-        pg_type_oid_for_duckdb_type(&type_text)?,
-    ))
+    Ok((key_type.to_string(), type_id_for_duckdb_type(&type_text)?))
 }
 
 pub(in crate::catalog) fn validate_create_table_column_types(
@@ -49,7 +46,7 @@ pub(in crate::catalog) fn validate_create_table_column_types(
 ) -> Result<(), String> {
     for column in &create_table.columns {
         let type_text = column.data_type.to_string();
-        pg_type_oid_for_duckdb_type(&type_text)?;
+        type_id_for_duckdb_type(&type_text)?;
     }
     Ok(())
 }

@@ -14,7 +14,7 @@ pub(in crate::catalog) fn comment_object(
                 let schema = single_name_part(object_name)?;
                 reject_reserved_schema(&schema)?;
                 match namespace_oid(conn, &schema) {
-                    Ok(oid) => (oid, PG_NAMESPACE_CLASSOID, 0),
+                    Ok(oid) => (oid, OBJECT_SCHEMA_KIND, 0),
                     Err(_) if if_exists => return Ok(0),
                     Err(err) => return Err(err),
                 }
@@ -23,7 +23,7 @@ pub(in crate::catalog) fn comment_object(
                 let (schema, relname) = relation_name(object_name)?;
                 reject_reserved_schema(&schema)?;
                 match find_relation_meta(conn, &schema, &relname)? {
-                    Some(meta) => (meta.oid, PG_CLASS_CLASSOID, 0),
+                    Some(meta) => (meta.oid, OBJECT_RELATION_KIND, 0),
                     None if if_exists => return Ok(0),
                     None => return Err(format!("relation does not exist: {schema}.{relname}")),
                 }
@@ -45,7 +45,7 @@ pub(in crate::catalog) fn comment_object(
                         "column does not exist: {schema}.{relname}.{column}"
                     ));
                 };
-                (meta.oid, PG_CLASS_CLASSOID, attnum)
+                (meta.oid, OBJECT_RELATION_KIND, attnum)
             }
             _ => return Err(format!("COMMENT ON {object_type} is not supported")),
         };
@@ -53,7 +53,7 @@ pub(in crate::catalog) fn comment_object(
         let journal_id = insert_journal(conn, "comment_object", objoid, sql)?;
         conn.execute(
             &format!(
-                "DELETE FROM rsduck_catalog.pg_description \
+                "DELETE FROM rsduck_catalog.rs_comment \
                  WHERE objoid = {objoid} AND classoid = {classoid} AND objsubid = {objsubid}"
             ),
             [],
@@ -62,7 +62,7 @@ pub(in crate::catalog) fn comment_object(
         if let Some(comment) = comment {
             conn.execute(
                 &format!(
-                    "INSERT INTO rsduck_catalog.pg_description(objoid, classoid, objsubid, description) \
+                    "INSERT INTO rsduck_catalog.rs_comment(objoid, classoid, objsubid, description) \
                      VALUES ({objoid}, {classoid}, {objsubid}, '{}')",
                     sql_string(comment)
                 ),

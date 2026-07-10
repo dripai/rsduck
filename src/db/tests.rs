@@ -1,8 +1,8 @@
 use super::{
     describe_sql_blocking, execute_sql_blocking, execute_typed_sql_blocking, export_database_sql,
     find_latest_snapshot_dir, import_database_sql, parse_snapshot_dir_timestamp,
-    reset_admin_password_offline, restore_or_initialize, save_snapshot_blocking, SqlParam,
-    SqlResult, SqlType, SqlTypedResult, SqlValue, SNAPSHOT_MANIFEST_FILE,
+    reset_admin_password_offline, restore_or_initialize, save_snapshot_blocking, SqlParam, SqlType,
+    SqlTypedResult, SqlValue, SNAPSHOT_MANIFEST_FILE,
 };
 use crate::sql_route::route_sql;
 use duckdb::Connection;
@@ -36,6 +36,25 @@ fn find_latest_snapshot_dir_uses_newest_final_snapshot_dir() {
     ];
     for dir_name in dirs {
         std::fs::create_dir_all(dir.join(dir_name)).unwrap();
+        if !dir_name.ends_with(".tmp") {
+            let manifest = serde_json::json!({
+                "snapshot_format_version": 2,
+                "snapshot_name": dir_name,
+                "created_at": "2026-07-10T00:00:00+08:00",
+                "catalog_epoch": 0,
+                "catalog_checksum": "",
+                "rsduck_version": "test",
+                "tables": [],
+                "partitions": [],
+                "views": [],
+                "macros": []
+            });
+            std::fs::write(
+                dir.join(dir_name).join(SNAPSHOT_MANIFEST_FILE),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        }
     }
     std::fs::write(dir.join("rsduck_20260702_101800.parquet"), b"").unwrap();
     std::fs::write(dir.join("rsduck_20260702_101900.parquet.tmp"), b"").unwrap();
@@ -47,29 +66,6 @@ fn find_latest_snapshot_dir_uses_newest_final_snapshot_dir() {
     );
 
     let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn catalog_projection_rewrite_executes_through_db_auth_path() {
-    let conn = Connection::open_in_memory().unwrap();
-    crate::catalog::bootstrap_fresh(&conn).unwrap();
-    crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
-        .unwrap();
-    crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER alice PASSWORD='pw'").unwrap();
-
-    let sql = "SELECT relname FROM pg_catalog.pg_class WHERE relname = 'quotes'";
-    let decision = route_sql(sql).unwrap();
-    let result =
-        execute_sql_blocking(&conn, "alice", sql, decision.route, &decision.command, 100).unwrap();
-
-    let SqlResult::Query { columns, rows } = result else {
-        panic!("expected catalog projection query result");
-    };
-    let relname_idx = columns
-        .iter()
-        .position(|column| column == "relname")
-        .expect("relname column");
-    assert!(rows.iter().any(|row| row[relname_idx] == "quotes"));
 }
 
 #[test]
@@ -98,6 +94,69 @@ fn describe_sql_reports_read_columns_without_executing_writes() {
     let columns = describe_sql_blocking(&conn, "admin", write_sql, decision.route).unwrap();
     assert!(columns.is_empty());
     assert!(crate::catalog::authenticate_user(&conn, "bob", "pw").is_err());
+}
+
+#[test]
+fn information_schema_hides_relations_without_read_privilege() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
+        .unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE USER metadata_reader PASSWORD='pw'")
+        .unwrap();
+
+    let sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'";
+    let decision = route_sql(sql).unwrap();
+    let hidden = execute_typed_sql_blocking(
+        &conn,
+        "metadata_reader",
+        sql,
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlTypedResult::Query { rows, .. } = hidden else {
+        panic!("expected metadata query result");
+    };
+    assert!(rows.is_empty());
+
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "GRANT SELECT ON TABLE quotes TO metadata_reader",
+    )
+    .unwrap();
+    let visible = execute_typed_sql_blocking(
+        &conn,
+        "metadata_reader",
+        sql,
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlTypedResult::Query { rows, .. } = visible else {
+        panic!("expected metadata query result");
+    };
+    assert_eq!(rows, vec![vec![SqlValue::Text("quotes".to_string())]]);
+}
+
+#[test]
+fn information_schema_reports_catalog_and_duckdb_mismatch() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    conn.execute("CREATE TABLE untracked_physical_table(id INTEGER)", [])
+        .unwrap();
+
+    let sql = "SELECT table_name FROM information_schema.tables";
+    let decision = route_sql(sql).unwrap();
+    let err =
+        execute_typed_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap_err();
+    assert_eq!(
+        err,
+        "metadata projection inconsistent: DuckDB relation is missing from catalog: main.untracked_physical_table"
+    );
 }
 
 #[test]
@@ -220,7 +279,7 @@ fn internal_catalog_query_requires_catalog_diagnostic_privilege() {
     crate::catalog::execute_catalog_aware_write(&conn, "GRANT ROLE operator TO operator_user")
         .unwrap();
 
-    let sql = "SELECT * FROM rsduck_catalog.pg_class";
+    let sql = "SELECT * FROM rsduck_catalog.rs_relation";
     let decision = route_sql(sql).unwrap();
     execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100).unwrap();
     execute_sql_blocking(
@@ -245,7 +304,7 @@ fn internal_catalog_query_requires_catalog_diagnostic_privilege() {
 }
 
 #[test]
-fn reserved_pg_catalog_write_is_rejected_through_db_path() {
+fn postgres_catalog_queries_are_rejected_through_db_path() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
 
@@ -253,10 +312,7 @@ fn reserved_pg_catalog_write_is_rejected_through_db_path() {
     let decision = route_sql(sql).unwrap();
     let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
         .unwrap_err();
-    assert_eq!(
-        err,
-        "reserved schema is managed by rsduck catalog: pg_catalog"
-    );
+    assert_eq!(err, "reserved schema is managed by rsduck: pg_catalog");
 }
 
 #[test]
@@ -308,10 +364,11 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let manifest_path = PathBuf::from(&snapshot).join("rsduck_snapshot_manifest.json");
+    let snapshot_path = PathBuf::from(&snapshot);
+    let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST_FILE);
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest["manifest_version"], 1);
+    assert_eq!(manifest["snapshot_format_version"], 2);
     assert_eq!(manifest["catalog_epoch"], catalog_epoch);
     assert_eq!(manifest["catalog_checksum"], catalog_checksum);
     assert_eq!(
@@ -322,6 +379,14 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
             .to_string_lossy()
             .as_ref()
     );
+    assert!(snapshot_path.join("catalog.duckdb").is_file());
+    let table_files = manifest["tables"].as_array().unwrap();
+    assert_eq!(table_files.len(), 2);
+    for table in table_files {
+        assert!(snapshot_path
+            .join(table["file"].as_str().unwrap())
+            .is_file());
+    }
 
     let restored = Connection::open_in_memory().unwrap();
     restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
@@ -334,6 +399,106 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
         .unwrap();
     assert_eq!(table_a_count, 2);
     assert_eq!(table_b_count, 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_round_trip_restores_views_and_macros_from_duckdb_metadata() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_metadata_round_trip_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE quotes(code VARCHAR, price DOUBLE)",
+    )
+    .unwrap();
+    conn.execute_batch("INSERT INTO quotes VALUES ('AAPL', 10.0);")
+        .unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW quote_codes AS SELECT code FROM quotes",
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE MACRO add_one(value) AS value + 1;
+         CREATE MACRO quote_prices() AS TABLE SELECT code, price FROM quotes;",
+    )
+    .unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(PathBuf::from(&snapshot).join(SNAPSHOT_MANIFEST_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["views"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["macros"].as_array().unwrap().len(), 2);
+    assert!(manifest["views"][0]["ddl"]
+        .as_str()
+        .unwrap()
+        .starts_with("CREATE VIEW"));
+
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+    let view_value: String = restored
+        .query_row("SELECT code FROM quote_codes", [], |row| row.get(0))
+        .unwrap();
+    let scalar_macro_value: i64 = restored
+        .query_row("SELECT add_one(4)", [], |row| row.get(0))
+        .unwrap();
+    let table_macro_value: String = restored
+        .query_row("SELECT code FROM quote_prices()", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(view_value, "AAPL");
+    assert_eq!(scalar_macro_value, 5);
+    assert_eq!(table_macro_value, "AAPL");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_restore_rejects_tampered_view_ddl() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_view_checksum_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
+        .unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW quote_codes AS SELECT code FROM quotes",
+    )
+    .unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let manifest_path = PathBuf::from(&snapshot).join(SNAPSHOT_MANIFEST_FILE);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["views"][0]["ddl"] =
+        serde_json::Value::String("CREATE VIEW broken AS SELECT".to_string());
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let restored = Connection::open_in_memory().unwrap();
+    let err = restore_or_initialize(&restored, Some(&snapshot), "").unwrap_err();
+    assert_eq!(
+        err,
+        "snapshot view DDL checksum mismatch for main.quote_codes"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -365,7 +530,45 @@ fn snapshot_restore_rejects_manifest_checksum_mismatch() {
 
     let restored = Connection::open_in_memory().unwrap();
     let err = restore_or_initialize(&restored, Some(&snapshot), "").unwrap_err();
-    assert!(err.contains("snapshot manifest catalog_checksum mismatch"));
+    assert!(err.contains("snapshot manifest catalog metadata does not match catalog.duckdb"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_restore_marks_missing_business_data_unavailable() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_missing_data_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
+        .unwrap();
+    conn.execute("INSERT INTO quotes VALUES ('A')", []).unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let manifest_path = PathBuf::from(&snapshot).join(SNAPSHOT_MANIFEST_FILE);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let data_file = manifest["tables"].as_array().unwrap().first().unwrap()["file"]
+        .as_str()
+        .unwrap();
+    std::fs::remove_file(PathBuf::from(&snapshot).join(data_file)).unwrap();
+
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+    let status: String = restored
+        .query_row(
+            "SELECT status FROM rsduck_catalog.rs_relation WHERE relname = 'quotes'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "unavailable");
 
     let _ = std::fs::remove_dir_all(dir);
 }

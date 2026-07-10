@@ -114,6 +114,20 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
     ]));
 
     let mut query = vec![0x03];
+    query.extend_from_slice(b"SHOW PROCEDURE STATUS WHERE Db = 'main'");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 11).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SHOW FUNCTION STATUS WHERE Db = 'main'");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 11).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
     query.extend_from_slice(b"CREATE TABLE mysql_quotes(code VARCHAR, price DOUBLE)");
     let mut seq = 0_u8;
     write_packet(&mut stream, &mut seq, &query).await.unwrap();
@@ -133,6 +147,39 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
     write_packet(&mut stream, &mut seq, &query).await.unwrap();
     let ok = read_packet(&mut stream).await.unwrap();
     assert_eq!(ok.payload.first(), Some(&0x00));
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(
+        b"SELECT table_schema, table_name, view_definition FROM information_schema.views WHERE table_name = 'mysql_quote_view'",
+    );
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 3).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "main");
+    assert_eq!(rows[0][1], "mysql_quote_view");
+    assert_eq!(
+        rows[0][2],
+        "CREATE VIEW mysql_quote_view AS SELECT code FROM mysql_quotes;"
+    );
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(
+        b"SELECT routine_schema, routine_name, routine_type FROM information_schema.routines",
+    );
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 3).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(
+        b"SELECT specific_schema, specific_name, parameter_name FROM information_schema.parameters",
+    );
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 3).await;
+    assert!(rows.is_empty());
 
     let mut query = vec![0x03];
     query.extend_from_slice(b"SHOW FULL TABLES WHERE Table_type != 'VIEW'");
@@ -160,6 +207,67 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
         .expect("created view status row");
     assert_eq!(view_status[1], "NULL");
     assert_eq!(view_status[17], "VIEW");
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SHOW COLUMNS FROM mysql_quotes");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 6).await;
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                "code".to_string(),
+                "varchar".to_string(),
+                "YES".to_string(),
+                "".to_string(),
+                "NULL".to_string(),
+                "".to_string(),
+            ],
+            vec![
+                "price".to_string(),
+                "double".to_string(),
+                "YES".to_string(),
+                "".to_string(),
+                "NULL".to_string(),
+                "".to_string(),
+            ],
+        ]
+    );
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"DESCRIBE mysql_quotes");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 6).await;
+    assert_eq!(rows[0][0], "code");
+    assert_eq!(rows[1][0], "price");
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"CREATE INDEX idx_mysql_quotes_code ON mysql_quotes(code)");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let ok = read_packet(&mut stream).await.unwrap();
+    assert_eq!(ok.payload.first(), Some(&0x00));
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SHOW INDEX FROM mysql_quotes");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 15).await;
+    assert!(rows.iter().any(|row| {
+        row[0] == "mysql_quotes"
+            && row[2] == "idx_mysql_quotes_code"
+            && row[4] == "code"
+            && row[10] == "BTREE"
+    }));
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT code FROM `main`.`mysql_quotes` ORDER BY code LIMIT 1");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 1).await;
+    assert_eq!(rows, vec![vec!["AAPL".to_string()]]);
 
     let mut query = vec![0x03];
     query.extend_from_slice(b"SELECT code, price FROM mysql_quotes ORDER BY code LIMIT 0, 1");

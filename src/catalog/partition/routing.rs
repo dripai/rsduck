@@ -432,8 +432,8 @@ pub(in crate::catalog) fn active_partition_by_value(
         .prepare(&format!(
             "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
-             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE p.parent_relid = {parent_oid} \
                AND p.partition_value = '{}' \
                AND p.status = 'active'",
@@ -474,8 +474,8 @@ pub(in crate::catalog) fn partition_child_by_value(
         .prepare(&format!(
             "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
-             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE p.parent_relid = {parent_oid} \
                AND p.partition_value = '{}'",
             sql_string(partition_value)

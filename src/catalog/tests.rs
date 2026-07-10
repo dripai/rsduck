@@ -1,8 +1,7 @@
 use super::{
-    allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, evaluate_privilege_function,
-    execute_catalog_aware_write, execute_catalog_aware_write_as, hash_password, namespace_oid,
-    relation_oid, sql_string, validate_after_start, verify_password, CatalogAuthenticator,
-    PG_CLASS_CLASSOID,
+    allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, execute_catalog_aware_write,
+    execute_catalog_aware_write_as, hash_password, namespace_oid, relation_oid, sql_string,
+    validate_after_start, verify_password, CatalogAuthenticator, OBJECT_RELATION_KIND,
 };
 use crate::auth::{AuthCredential, AuthProtocol, AuthRequest, BlockingAuthenticator};
 use duckdb::Connection;
@@ -55,6 +54,36 @@ fn bootstrap_creates_default_admin_and_roles() {
         )
         .unwrap();
     assert!(checksum.starts_with("fnv1a64:"));
+}
+
+#[test]
+fn bootstrap_uses_rs_prefixed_catalog_tables() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    let pg_prefixed_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM duckdb_tables() \
+             WHERE schema_name = 'rsduck_catalog' AND table_name LIKE 'pg_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pg_prefixed_count, 0);
+
+    let rs_catalog_table_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM duckdb_tables() \
+             WHERE schema_name = 'rsduck_catalog' AND table_name IN (\
+                'rs_schema', 'rs_type', 'rs_relation', 'rs_column', \
+                'rs_column_default', 'rs_constraint', 'rs_index', \
+                'rs_dependency', 'rs_comment'\
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rs_catalog_table_count, 9);
 }
 
 #[test]
@@ -174,71 +203,6 @@ fn relation_permissions_are_enforced_for_non_admin_users() {
     let quotes_oid = relation_oid(&conn, "main", "quotes").unwrap();
     insert_test_privilege(&conn, 101, "relation", quotes_oid, "write").unwrap();
     authorize_sql(&conn, "reader", "INSERT INTO quotes VALUES ('A', 1.0)").unwrap();
-
-    let (column, allowed) = evaluate_privilege_function(
-        &conn,
-        "reader",
-        "SELECT has_table_privilege('quotes', 'SELECT')",
-    )
-    .unwrap();
-    assert_eq!(column, "has_table_privilege");
-    assert!(allowed);
-}
-
-#[test]
-fn database_privilege_function_uses_system_privileges() {
-    let conn = Connection::open_in_memory().unwrap();
-    bootstrap_fresh(&conn).unwrap();
-    insert_test_user(&conn, 106, "plain_db").unwrap();
-    insert_test_user(&conn, 107, "catalog_db").unwrap();
-    insert_test_user(&conn, 108, "operator_db").unwrap();
-
-    let (_, plain_create) = evaluate_privilege_function(
-        &conn,
-        "plain_db",
-        "SELECT has_database_privilege('postgres', 'CREATE')",
-    )
-    .unwrap();
-    assert!(!plain_create);
-
-    let (_, connect) = evaluate_privilege_function(
-        &conn,
-        "plain_db",
-        "SELECT has_database_privilege('postgres', 'CONNECT')",
-    )
-    .unwrap();
-    assert!(connect);
-
-    insert_test_privilege(&conn, 107, "system", 0, "manage_catalog").unwrap();
-    let (_, catalog_create) = evaluate_privilege_function(
-        &conn,
-        "catalog_db",
-        "SELECT has_database_privilege('catalog_db', 'postgres', 'CREATE')",
-    )
-    .unwrap();
-    assert!(catalog_create);
-
-    conn.execute(
-        "INSERT INTO rsduck_catalog.rs_user_role(user_id, role_id, granted_by, created_at) \
-         VALUES (108, 21, 10, CURRENT_TIMESTAMP)",
-        [],
-    )
-    .unwrap();
-    let (_, operator_create) = evaluate_privilege_function(
-        &conn,
-        "operator_db",
-        "SELECT has_database_privilege('operator_db', 'postgres', 'CREATE')",
-    )
-    .unwrap();
-    assert!(operator_create);
-
-    let (_, unknown_db) = evaluate_privilege_function(
-        &conn,
-        "catalog_db",
-        "SELECT has_database_privilege('other_db', 'CREATE')",
-    )
-    .unwrap();
-    assert!(!unknown_db);
 }
 
 #[test]
@@ -255,7 +219,7 @@ fn ddl_permission_sets_created_relation_owner() {
 
     let owner: i64 = conn
         .query_row(
-            "SELECT relowner FROM rsduck_catalog.pg_class WHERE relname = 'owned_table'",
+            "SELECT relowner FROM rsduck_catalog.rs_relation WHERE relname = 'owned_table'",
             [],
             |row| row.get(0),
         )
@@ -400,18 +364,15 @@ fn grant_on_reserved_schema_is_rejected_without_privilege_rows() {
         "GRANT CREATE ON SCHEMA rsduck_catalog TO reader_user",
     )
     .unwrap_err();
-    assert_eq!(
-        err,
-        "reserved schema is managed by rsduck catalog: rsduck_catalog"
-    );
+    assert_eq!(err, "reserved schema is managed by rsduck: rsduck_catalog");
 
     let reserved_privilege_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
              FROM rsduck_catalog.rs_privilege p \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = p.object_id \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = p.object_id \
              WHERE p.object_type = 'schema' \
-               AND n.nspname IN ('pg_catalog', 'information_schema', 'rsduck_catalog', 'rsduck_internal')",
+               AND n.nspname IN ('information_schema', 'rsduck_catalog', 'rsduck_internal')",
             [],
             |row| row.get(0),
         )
@@ -447,7 +408,7 @@ fn create_table_writes_pg_class_and_attributes() {
 
     let relkind: String = conn
         .query_row(
-            "SELECT relkind FROM rsduck_catalog.pg_class WHERE relname = 'kline_day'",
+            "SELECT relkind FROM rsduck_catalog.rs_relation WHERE relname = 'kline_day'",
             [],
             |row| row.get(0),
         )
@@ -456,7 +417,7 @@ fn create_table_writes_pg_class_and_attributes() {
 
     let attr_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_attribute a JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid WHERE c.relname = 'kline_day'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_column a JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid WHERE c.relname = 'kline_day'",
             [],
             |row| row.get(0),
         )
@@ -465,7 +426,7 @@ fn create_table_writes_pg_class_and_attributes() {
 
     let pkey_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_constraint WHERE contype = 'p'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_constraint WHERE contype = 'p'",
             [],
             |row| row.get(0),
         )
@@ -485,7 +446,7 @@ fn create_table_rejects_unsupported_duckdb_type_without_leftovers() {
 
     let catalog_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'bad_metric'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'bad_metric'",
             [],
             |row| row.get(0),
         )
@@ -519,7 +480,7 @@ fn create_partitioned_table_rejects_unsupported_type_without_leftovers() {
 
     let catalog_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname LIKE 'bad_metric%'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname LIKE 'bad_metric%'",
             [],
             |row| row.get(0),
         )
@@ -564,7 +525,7 @@ fn create_table_foreign_key_writes_constraint_and_dependencies() {
     let (contype, conkey, confrelid, confkey): (String, String, i64, String) = conn
         .query_row(
             "SELECT contype, conkey, confrelid, confkey \
-             FROM rsduck_catalog.pg_constraint \
+             FROM rsduck_catalog.rs_constraint \
              WHERE conname = 'fk_quotes_instruments'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -578,9 +539,9 @@ fn create_table_foreign_key_writes_constraint_and_dependencies() {
     let referenced_column_dependency_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
-             JOIN rsduck_catalog.pg_class c ON c.oid = d.refobjid \
+             FROM rsduck_catalog.rs_dependency d \
+             JOIN rsduck_catalog.rs_constraint con ON con.oid = d.objid \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = d.refobjid \
              WHERE con.conname = 'fk_quotes_instruments' \
                AND c.relname = 'instruments' \
                AND d.refobjsubid = 1",
@@ -610,7 +571,7 @@ fn create_view_and_index_write_catalog_metadata() {
 
     let view_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'quote_view' AND relkind = 'v'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'quote_view' AND relkind = 'v'",
             [],
             |row| row.get(0),
         )
@@ -620,9 +581,9 @@ fn create_view_and_index_write_catalog_metadata() {
     let view_dependency_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             JOIN rsduck_catalog.pg_class view_rel ON view_rel.oid = d.objid \
-             JOIN rsduck_catalog.pg_class table_rel ON table_rel.oid = d.refobjid \
+             FROM rsduck_catalog.rs_dependency d \
+             JOIN rsduck_catalog.rs_relation view_rel ON view_rel.oid = d.objid \
+             JOIN rsduck_catalog.rs_relation table_rel ON table_rel.oid = d.refobjid \
              WHERE view_rel.relname = 'quote_view' \
                AND table_rel.relname = 'quotes' \
                AND d.classid = 1259 \
@@ -638,7 +599,7 @@ fn create_view_and_index_write_catalog_metadata() {
 
     let index_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_index i JOIN rsduck_catalog.pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_quotes_code'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_index i JOIN rsduck_catalog.rs_relation c ON c.oid = i.indexrelid WHERE c.relname = 'idx_quotes_code'",
             [],
             |row| row.get(0),
         )
@@ -661,8 +622,8 @@ fn alter_table_add_column_updates_catalog_and_duckdb() {
     let (attnum, has_default): (i32, bool) = conn
         .query_row(
             "SELECT a.attnum, a.atthasdef \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'quotes' AND a.attname = 'volume'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -697,8 +658,8 @@ fn alter_table_drop_column_marks_catalog_column_dropped() {
     let dropped: bool = conn
         .query_row(
             "SELECT a.attisdropped \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'quotes' AND a.attname = 'close'",
             [],
             |row| row.get(0),
@@ -708,8 +669,8 @@ fn alter_table_drop_column_marks_catalog_column_dropped() {
     let active_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'quotes' AND a.attisdropped = FALSE",
             [],
             |row| row.get(0),
@@ -723,8 +684,8 @@ fn alter_table_drop_column_marks_catalog_column_dropped() {
             "SELECT \
                MAX(CASE WHEN a.attname = 'close' THEN a.attnum ELSE NULL END), \
                MAX(CASE WHEN a.attname = 'venue' THEN a.attnum ELSE NULL END) \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'quotes'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -745,8 +706,8 @@ fn comment_on_table_and_column_writes_pg_description() {
     let table_comment: String = conn
         .query_row(
             "SELECT d.description \
-             FROM rsduck_catalog.pg_description d \
-             JOIN rsduck_catalog.pg_class c ON c.oid = d.objoid \
+             FROM rsduck_catalog.rs_comment d \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = d.objoid \
              WHERE c.relname = 'quotes' AND d.objsubid = 0",
             [],
             |row| row.get(0),
@@ -757,9 +718,9 @@ fn comment_on_table_and_column_writes_pg_description() {
     let column_comment: String = conn
         .query_row(
             "SELECT d.description \
-             FROM rsduck_catalog.pg_description d \
-             JOIN rsduck_catalog.pg_class c ON c.oid = d.objoid \
-             JOIN rsduck_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid \
+             FROM rsduck_catalog.rs_comment d \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = d.objoid \
+             JOIN rsduck_catalog.rs_column a ON a.attrelid = c.oid AND a.attnum = d.objsubid \
              WHERE c.relname = 'quotes' AND a.attname = 'close'",
             [],
             |row| row.get(0),
@@ -778,16 +739,13 @@ fn comment_on_reserved_schema_is_rejected() {
         "COMMENT ON SCHEMA rsduck_catalog IS 'internal catalog'",
     )
     .unwrap_err();
-    assert_eq!(
-        err,
-        "reserved schema is managed by rsduck catalog: rsduck_catalog"
-    );
+    assert_eq!(err, "reserved schema is managed by rsduck: rsduck_catalog");
 
     let comment_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_description d \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = d.objoid \
+             FROM rsduck_catalog.rs_comment d \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = d.objoid \
              WHERE n.nspname = 'rsduck_catalog'",
             [],
             |row| row.get(0),
@@ -806,7 +764,7 @@ fn drop_index_and_table_updates_catalog() {
     execute_catalog_aware_write(&conn, "DROP INDEX idx_quotes_code").unwrap();
     let remaining_index_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'idx_quotes_code'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'idx_quotes_code'",
             [],
             |row| row.get(0),
         )
@@ -814,7 +772,7 @@ fn drop_index_and_table_updates_catalog() {
     assert_eq!(remaining_index_count, 0);
     let relhasindex: bool = conn
         .query_row(
-            "SELECT relhasindex FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+            "SELECT relhasindex FROM rsduck_catalog.rs_relation WHERE relname = 'quotes'",
             [],
             |row| row.get(0),
         )
@@ -824,7 +782,7 @@ fn drop_index_and_table_updates_catalog() {
     execute_catalog_aware_write(&conn, "DROP TABLE quotes").unwrap();
     let remaining_table_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'quotes'",
             [],
             |row| row.get(0),
         )
@@ -854,7 +812,7 @@ fn drop_table_with_dependent_index_requires_cascade() {
     execute_catalog_aware_write(&conn, "DROP TABLE quotes CASCADE").unwrap();
     let remaining_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname IN ('quotes', 'idx_quotes_code')",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname IN ('quotes', 'idx_quotes_code')",
             [],
             |row| row.get(0),
     )
@@ -892,7 +850,7 @@ fn create_managed_partitioned_table_creates_empty_entrypoint_without_partitions(
     ) = conn
         .query_row(
             "SELECT c.relkind, ext.managed_kind, ext.partition_key, ext.partition_unit, ext.retention_count \
-             FROM rsduck_catalog.pg_class c \
+             FROM rsduck_catalog.rs_relation c \
              JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid \
              WHERE c.relname = 'ods_access_log'",
             [],
@@ -958,7 +916,7 @@ fn insert_into_partitioned_table_creates_partitions_and_rejects_dirty_rows() {
         .query_row(
             "SELECT COUNT(*) FROM rsduck_catalog.rs_partition \
              WHERE parent_relid = (
-                SELECT oid FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'
+                SELECT oid FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log'
              ) AND status = 'active'",
             [],
             |row| row.get(0),
@@ -968,7 +926,7 @@ fn insert_into_partitioned_table_creates_partitions_and_rejects_dirty_rows() {
 
     let ordinary_partition_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class \
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation \
              WHERE relname IN ('ods_access_log_20260701', 'ods_access_log_20260702') \
                AND relispartition = TRUE",
             [],
@@ -1069,7 +1027,7 @@ fn partition_retention_expires_old_ordinary_partitions() {
 
     let pg_class_old_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log_20260701'",
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log_20260701'",
             [],
             |row| row.get(0),
         )
@@ -1155,7 +1113,7 @@ fn partitioned_table_accepts_table_constraints_in_catalog() {
     let constraint_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM rsduck_catalog.pg_constraint WHERE conrelid = {parent_oid}"
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_constraint WHERE conrelid = {parent_oid}"
             ),
             [],
             |row| row.get(0),
@@ -1207,8 +1165,8 @@ fn partitioned_index_creates_indexes_for_existing_and_future_partitions() {
 
     let parent_index_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_index i
-             JOIN rsduck_catalog.pg_class c ON c.oid = i.indexrelid
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_index i
+             JOIN rsduck_catalog.rs_relation c ON c.oid = i.indexrelid
              WHERE c.relname = 'idx_ods_access_log_time'",
             [],
             |row| row.get(0),
@@ -1332,9 +1290,9 @@ fn new_partition_preserves_parent_column_defaults() {
     let physical_default_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_attrdef d \
-             JOIN rsduck_catalog.pg_class c ON c.oid = d.adrelid \
-             JOIN rsduck_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.adnum \
+             FROM rsduck_catalog.rs_column_default d \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = d.adrelid \
+             JOIN rsduck_catalog.rs_column a ON a.attrelid = c.oid AND a.attnum = d.adnum \
              WHERE c.relname = 'ods_access_log_20260701' \
                AND a.attname = 'source' \
                AND d.adbin = '''web'''",
@@ -1376,8 +1334,8 @@ fn alter_partitioned_table_add_column_updates_parent_and_partitions() {
     let parent_attr_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'ods_access_log' AND a.attname = 'source'",
             [],
             |row| row.get(0),
@@ -1388,8 +1346,8 @@ fn alter_partitioned_table_add_column_updates_parent_and_partitions() {
     let child_attr_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname = 'ods_access_log_20260701' \
                AND a.attname = 'source'",
             [],
@@ -1455,8 +1413,8 @@ fn alter_partitioned_table_drop_column_updates_parent_partitions_and_entrypoint(
     let dropped_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_attribute a \
-             JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
              WHERE c.relname IN ('ods_access_log', 'ods_access_log_20260701') \
                AND a.attname = 'content' \
                AND a.attisdropped = TRUE",
@@ -1494,7 +1452,7 @@ fn drop_partitioned_table_removes_entrypoint_partitions_and_catalog() {
 
     let class_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_class \
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation \
              WHERE relname IN ('ods_access_log', 'ods_access_log_20260701')",
             [],
             |row| row.get(0),
@@ -1578,7 +1536,7 @@ fn startup_validation_rebuilds_partition_entrypoint_from_catalog() {
     assert_eq!(view_count, 1);
     let status: String = conn
         .query_row(
-            "SELECT status FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+            "SELECT status FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log'",
             [],
             |row| row.get(0),
         )
@@ -1599,7 +1557,7 @@ fn startup_validation_rebuilds_partition_dependencies_from_catalog() {
     .unwrap();
     let parent_oid: i64 = conn
         .query_row(
-            "SELECT oid FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+            "SELECT oid FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log'",
             [],
             |row| row.get(0),
         )
@@ -1616,9 +1574,9 @@ fn startup_validation_rebuilds_partition_dependencies_from_catalog() {
         .unwrap();
     conn.execute(
         &format!(
-            "DELETE FROM rsduck_catalog.pg_depend \
-             WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
-               AND refclassid = {PG_CLASS_CLASSOID}"
+            "DELETE FROM rsduck_catalog.rs_dependency \
+             WHERE classid = {OBJECT_RELATION_KIND} AND objid = {parent_oid} \
+               AND refclassid = {OBJECT_RELATION_KIND}"
         ),
         [],
     )
@@ -1630,9 +1588,9 @@ fn startup_validation_rebuilds_partition_dependencies_from_catalog() {
     let dependency_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
-                 WHERE classid = {PG_CLASS_CLASSOID} AND objid = {parent_oid} \
-                   AND refclassid = {PG_CLASS_CLASSOID}"
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_dependency \
+                 WHERE classid = {OBJECT_RELATION_KIND} AND objid = {parent_oid} \
+                   AND refclassid = {OBJECT_RELATION_KIND}"
             ),
             [],
             |row| row.get(0),
@@ -1666,7 +1624,7 @@ fn startup_validation_marks_partition_parent_unavailable_when_child_missing() {
 
     let parent_status: String = conn
         .query_row(
-            "SELECT status FROM rsduck_catalog.pg_class WHERE relname = 'ods_access_log'",
+            "SELECT status FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log'",
             [],
             |row| row.get(0),
         )
@@ -1694,7 +1652,7 @@ fn startup_validation_marks_missing_physical_table_unavailable() {
 
     let status: String = conn
         .query_row(
-            "SELECT status FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+            "SELECT status FROM rsduck_catalog.rs_relation WHERE relname = 'quotes'",
             [],
             |row| row.get(0),
         )
@@ -1705,23 +1663,6 @@ fn startup_validation_marks_missing_physical_table_unavailable() {
     assert!(err.contains("relation is unavailable"));
     assert!(err.contains("RS-CATALOG-"));
     assert!(err.contains("missing DuckDB physical table"));
-
-    let projection_sql =
-        crate::pg_compat::rewrite_sql("SELECT relname, rsduck_status, rsduck_error_message FROM pg_catalog.pg_class WHERE relname = 'quotes'")
-            .expect("rewrite pg_class projection");
-    let (relname, projected_status, projected_error): (String, String, String) = conn
-        .query_row(&projection_sql, [], |row| {
-            Ok((
-                row.get("relname")?,
-                row.get("rsduck_status")?,
-                row.get("rsduck_error_message")?,
-            ))
-        })
-        .unwrap();
-    assert_eq!(relname, "quotes");
-    assert_eq!(projected_status, "unavailable");
-    assert!(projected_error.contains("RS-CATALOG-"));
-    assert!(projected_error.contains("missing DuckDB physical table"));
 }
 
 #[test]
@@ -1737,7 +1678,7 @@ fn startup_validation_marks_column_order_mismatch_unavailable() {
 
     let (status, error_message): (String, String) = conn
         .query_row(
-            "SELECT status, error_message FROM rsduck_catalog.pg_class WHERE relname = 'quotes'",
+            "SELECT status, error_message FROM rsduck_catalog.rs_relation WHERE relname = 'quotes'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1787,7 +1728,7 @@ fn startup_validation_rejects_broken_catalog_references() {
     bootstrap_fresh(&conn).unwrap();
     execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)").unwrap();
     conn.execute(
-        "UPDATE rsduck_catalog.pg_attribute \
+        "UPDATE rsduck_catalog.rs_column \
          SET atttypid = 999999 \
          WHERE attname = 'code'",
         [],
@@ -1803,7 +1744,7 @@ fn startup_validation_rejects_catalog_checksum_mismatch() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
     conn.execute(
-        "UPDATE rsduck_catalog.pg_namespace \
+        "UPDATE rsduck_catalog.rs_schema \
          SET nspacl = 'tampered' \
          WHERE nspname = 'main'",
         [],
@@ -1826,10 +1767,7 @@ fn reserved_schema_write_is_rejected() {
 
     let err = super::guard_external_sql_as("admin", "SELECT * FROM rsduck_internal.bad_table")
         .unwrap_err();
-    assert_eq!(
-        err,
-        "reserved schema is managed by rsduck catalog: rsduck_internal"
-    );
+    assert_eq!(err, "reserved schema is managed by rsduck: rsduck_internal");
 }
 
 fn insert_test_user(conn: &Connection, user_id: i64, username: &str) -> Result<(), String> {

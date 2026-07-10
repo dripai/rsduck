@@ -16,7 +16,7 @@ pub(in crate::catalog) fn insert_relation_rows(
     let namespace_oid = namespace_oid(conn, schema)?;
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_type(oid, typname, typnamespace, typowner, typlen, \
+            "INSERT INTO rsduck_catalog.rs_type(oid, typname, typnamespace, typowner, typlen, \
              typbyval, typtype, typcategory, typisdefined, typrelid, typelem, typarray, rsduck_physical_type) \
              VALUES ({type_oid}, '{}', {namespace_oid}, {owner_user_id}, -1, FALSE, 'c', 'C', TRUE, {rel_oid}, 0, 0, 'STRUCT')",
             sql_string(relation)
@@ -27,7 +27,7 @@ pub(in crate::catalog) fn insert_relation_rows(
 
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_class(oid, relname, relnamespace, reltype, relowner, \
+            "INSERT INTO rsduck_catalog.rs_relation(oid, relname, relnamespace, reltype, relowner, \
              relkind, relpersistence, relnatts, reltuples, relhasindex, relispartition, relpartbound, reloptions, status, error_message) \
              VALUES ({rel_oid}, '{}', {namespace_oid}, {type_oid}, {owner_user_id}, '{}', 'p', {}, 0, FALSE, FALSE, '', '', 'active', '')",
             sql_string(relation),
@@ -65,11 +65,11 @@ pub(in crate::catalog) fn insert_attribute_row(
 ) -> Result<(), String> {
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_attribute(attrelid, attname, atttypid, attnum, atttypmod, \
+            "INSERT INTO rsduck_catalog.rs_column(attrelid, attname, atttypid, attnum, atttypmod, \
              attnotnull, atthasdef, attisdropped, attidentity, attgenerated, attoptions) \
              VALUES ({rel_oid}, '{}', {}, {}, -1, {}, {}, FALSE, '', '', '')",
             sql_string(&column.name),
-            column.pg_type_oid,
+            column.type_id,
             column.attnum,
             sql_bool(column.not_null),
             sql_bool(column.default_expr.is_some())
@@ -82,7 +82,7 @@ pub(in crate::catalog) fn insert_attribute_row(
         let default_oid = allocate_oid(conn)?;
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_attrdef(oid, adrelid, adnum, adbin) \
+                "INSERT INTO rsduck_catalog.rs_column_default(oid, adrelid, adnum, adbin) \
                  VALUES ({default_oid}, {rel_oid}, {}, '{}')",
                 column.attnum,
                 sql_string(default_expr)

@@ -292,7 +292,7 @@ pub(in crate::catalog) fn ensure_column_can_drop(
 ) -> Result<(), String> {
     if column_attnum_list_contains(
         conn,
-        "rsduck_catalog.pg_constraint",
+        "rsduck_catalog.rs_constraint",
         "conrelid",
         "conkey",
         rel_oid,
@@ -304,7 +304,7 @@ pub(in crate::catalog) fn ensure_column_can_drop(
     }
     if column_attnum_list_contains(
         conn,
-        "rsduck_catalog.pg_constraint",
+        "rsduck_catalog.rs_constraint",
         "confrelid",
         "confkey",
         rel_oid,
@@ -316,7 +316,7 @@ pub(in crate::catalog) fn ensure_column_can_drop(
     }
     if column_attnum_list_contains(
         conn,
-        "rsduck_catalog.pg_index",
+        "rsduck_catalog.rs_index",
         "indrelid",
         "indkey",
         rel_oid,
@@ -371,7 +371,7 @@ pub(in crate::catalog) fn mark_column_dropped(
 ) -> Result<(), String> {
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_attribute \
+            "UPDATE rsduck_catalog.rs_column \
              SET attisdropped = TRUE, atthasdef = FALSE \
              WHERE attrelid = {rel_oid} AND attnum = {attnum}"
         ),
@@ -380,7 +380,7 @@ pub(in crate::catalog) fn mark_column_dropped(
     .map_err(|e| format!("mark column dropped failed: {e}"))?;
     conn.execute(
         &format!(
-            "DELETE FROM rsduck_catalog.pg_attrdef WHERE adrelid = {rel_oid} AND adnum = {attnum}"
+            "DELETE FROM rsduck_catalog.rs_column_default WHERE adrelid = {rel_oid} AND adnum = {attnum}"
         ),
         [],
     )
@@ -394,9 +394,7 @@ pub(in crate::catalog) fn next_attribute_num(
 ) -> Result<i32, String> {
     let max_attnum: Option<i32> = conn
         .query_row(
-            &format!(
-                "SELECT MAX(attnum) FROM rsduck_catalog.pg_attribute WHERE attrelid = {rel_oid}"
-            ),
+            &format!("SELECT MAX(attnum) FROM rsduck_catalog.rs_column WHERE attrelid = {rel_oid}"),
             [],
             |row| row.get(0),
         )
@@ -411,7 +409,7 @@ pub(in crate::catalog) fn set_relnatts_to_active_attribute_count(
     let active_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM rsduck_catalog.pg_attribute \
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_column \
                  WHERE attrelid = {rel_oid} AND attisdropped = FALSE"
             ),
             [],
@@ -420,7 +418,7 @@ pub(in crate::catalog) fn set_relnatts_to_active_attribute_count(
         .map_err(|e| format!("count active attributes failed: {e}"))?;
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_class SET relnatts = {active_count} WHERE oid = {rel_oid}"
+            "UPDATE rsduck_catalog.rs_relation SET relnatts = {active_count} WHERE oid = {rel_oid}"
         ),
         [],
     )

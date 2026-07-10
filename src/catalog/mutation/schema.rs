@@ -21,7 +21,7 @@ pub(in crate::catalog) fn create_schema(
         let journal_id = insert_journal(conn, "create_schema", ns_oid, &schema)?;
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_namespace(oid, nspname, nspowner, nspacl) \
+                "INSERT INTO rsduck_catalog.rs_schema(oid, nspname, nspowner, nspacl) \
                  VALUES ({ns_oid}, '{}', {owner_user_id}, '')",
                 sql_string(&schema)
             ),

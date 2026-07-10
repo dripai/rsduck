@@ -4,7 +4,7 @@ pub(super) fn namespace_exists(conn: &Connection, schema: &str) -> Result<bool, 
     let count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM rsduck_catalog.pg_namespace WHERE lower(nspname) = lower('{}')",
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_schema WHERE lower(nspname) = lower('{}')",
                 sql_string(schema)
             ),
             [],
@@ -139,7 +139,7 @@ pub(super) fn role_has_dependents(conn: &Connection, role_id: i64) -> Result<boo
 pub(super) fn namespace_oid(conn: &Connection, schema: &str) -> Result<i64, String> {
     conn.query_row(
         &format!(
-            "SELECT oid FROM rsduck_catalog.pg_namespace WHERE lower(nspname) = lower('{}')",
+            "SELECT oid FROM rsduck_catalog.rs_schema WHERE lower(nspname) = lower('{}')",
             sql_string(schema)
         ),
         [],
@@ -157,8 +157,8 @@ pub(super) fn relation_exists(
         .query_row(
             &format!(
                 "SELECT COUNT(*) \
-                 FROM rsduck_catalog.pg_class c \
-                 JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 FROM rsduck_catalog.rs_relation c \
+                 JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
                  WHERE lower(n.nspname) = lower('{}') AND lower(c.relname) = lower('{}')",
                 sql_string(schema),
                 sql_string(relation)
@@ -178,8 +178,8 @@ pub(super) fn find_relation_meta(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT c.oid, c.reltype, c.relkind, c.relispartition \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE lower(n.nspname) = lower('{}') AND lower(c.relname) = lower('{}') \
                AND c.status = 'active'",
             sql_string(schema),
@@ -215,8 +215,8 @@ pub(super) fn relation_oid(conn: &Connection, schema: &str, relation: &str) -> R
     conn.query_row(
         &format!(
             "SELECT c.oid \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE lower(n.nspname) = lower('{}') AND lower(c.relname) = lower('{}') \
                AND c.status = 'active'",
             sql_string(schema),
@@ -255,8 +255,8 @@ pub(super) fn find_relation_access_meta(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT c.oid, c.status, c.error_message \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE lower(n.nspname) = lower('{}') AND lower(c.relname) = lower('{}')",
             sql_string(schema),
             sql_string(relation)
@@ -299,7 +299,7 @@ pub(super) fn column_attnum(
 ) -> Result<Option<i32>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT attnum FROM rsduck_catalog.pg_attribute \
+            "SELECT attnum FROM rsduck_catalog.rs_column \
              WHERE attrelid = {rel_oid} AND lower(attname) = lower('{}') AND attisdropped = FALSE",
             sql_string(column_name)
         ))
@@ -325,7 +325,7 @@ pub(super) fn column_name_by_attnum(
 ) -> Result<String, String> {
     conn.query_row(
         &format!(
-            "SELECT attname FROM rsduck_catalog.pg_attribute \
+            "SELECT attname FROM rsduck_catalog.rs_column \
              WHERE attrelid = {rel_oid} AND attnum = {attnum} AND attisdropped = FALSE"
         ),
         [],
@@ -338,7 +338,7 @@ pub(super) fn column_name_by_attnum(
 
 pub(super) fn relation_kind(conn: &Connection, rel_oid: i64) -> Result<String, String> {
     conn.query_row(
-        &format!("SELECT relkind FROM rsduck_catalog.pg_class WHERE oid = {rel_oid}"),
+        &format!("SELECT relkind FROM rsduck_catalog.rs_relation WHERE oid = {rel_oid}"),
         [],
         |row| row.get(0),
     )
@@ -352,8 +352,8 @@ pub(super) fn relation_name_by_oid(
     conn.query_row(
         &format!(
             "SELECT n.nspname, c.relname \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE c.oid = {rel_oid}"
         ),
         [],
@@ -369,8 +369,8 @@ pub(super) fn catalog_columns(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT a.attname, a.atttypid, a.attnum, a.attnotnull, d.adbin \
-             FROM rsduck_catalog.pg_attribute a \
-             LEFT JOIN rsduck_catalog.pg_attrdef d \
+             FROM rsduck_catalog.rs_column a \
+             LEFT JOIN rsduck_catalog.rs_column_default d \
                ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE a.attrelid = {rel_oid} AND a.attisdropped = FALSE \
              ORDER BY a.attnum"
@@ -388,7 +388,7 @@ pub(super) fn catalog_columns(
             name: row
                 .get(0)
                 .map_err(|e| format!("read catalog attname failed: {e}"))?,
-            pg_type_oid: row
+            type_id: row
                 .get(1)
                 .map_err(|e| format!("read catalog atttypid failed: {e}"))?,
             attnum: row
@@ -446,9 +446,9 @@ pub(super) fn drop_relation_dependencies(
 pub(super) fn dependent_relation_oids(conn: &Connection, rel_oid: i64) -> Result<Vec<i64>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT objid FROM rsduck_catalog.pg_depend \
-             WHERE refclassid = {PG_CLASS_CLASSOID} AND refobjid = {rel_oid} \
-               AND classid = {PG_CLASS_CLASSOID}"
+            "SELECT objid FROM rsduck_catalog.rs_dependency \
+             WHERE refclassid = {OBJECT_RELATION_KIND} AND refobjid = {rel_oid} \
+               AND classid = {OBJECT_RELATION_KIND}"
         ))
         .map_err(|e| format!("prepare dependent lookup failed: {e}"))?;
     let mut rows = stmt
@@ -474,11 +474,11 @@ pub(super) fn dependent_constraint_oids(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT DISTINCT d.objid \
-             FROM rsduck_catalog.pg_depend d \
-             JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
-             WHERE d.refclassid = {PG_CLASS_CLASSOID} \
+             FROM rsduck_catalog.rs_dependency d \
+             JOIN rsduck_catalog.rs_constraint con ON con.oid = d.objid \
+             WHERE d.refclassid = {OBJECT_RELATION_KIND} \
                AND d.refobjid = {rel_oid} \
-               AND d.classid = {PG_CONSTRAINT_CLASSOID} \
+               AND d.classid = {OBJECT_CONSTRAINT_KIND} \
                AND con.conrelid <> {rel_oid}"
         ))
         .map_err(|e| format!("prepare dependent constraint lookup failed: {e}"))?;
@@ -505,7 +505,7 @@ pub(super) fn relation_meta_by_oid(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT oid, reltype, relkind, relispartition \
-             FROM rsduck_catalog.pg_class WHERE oid = {rel_oid}"
+             FROM rsduck_catalog.rs_relation WHERE oid = {rel_oid}"
         ))
         .map_err(|e| format!("prepare relation-by-oid lookup failed: {e}"))?;
     let mut rows = stmt
@@ -564,12 +564,12 @@ pub(super) fn delete_constraint_catalog(
 ) -> Result<(), String> {
     for sql in [
         format!(
-            "DELETE FROM rsduck_catalog.pg_depend \
-             WHERE (classid = {PG_CONSTRAINT_CLASSOID} AND objid = {constraint_oid}) \
-                OR (refclassid = {PG_CONSTRAINT_CLASSOID} AND refobjid = {constraint_oid})"
+            "DELETE FROM rsduck_catalog.rs_dependency \
+             WHERE (classid = {OBJECT_CONSTRAINT_KIND} AND objid = {constraint_oid}) \
+                OR (refclassid = {OBJECT_CONSTRAINT_KIND} AND refobjid = {constraint_oid})"
         ),
-        format!("DELETE FROM rsduck_catalog.pg_description WHERE objoid = {constraint_oid}"),
-        format!("DELETE FROM rsduck_catalog.pg_constraint WHERE oid = {constraint_oid}"),
+        format!("DELETE FROM rsduck_catalog.rs_comment WHERE objoid = {constraint_oid}"),
+        format!("DELETE FROM rsduck_catalog.rs_constraint WHERE oid = {constraint_oid}"),
     ] {
         conn.execute(&sql, [])
             .map_err(|e| format!("delete constraint catalog rows failed: {e}"))?;
@@ -584,7 +584,7 @@ pub(super) fn delete_relation_catalog(
     let table_oid: Option<i64> = if meta.relkind == "i" {
         conn.query_row(
             &format!(
-                "SELECT indrelid FROM rsduck_catalog.pg_index WHERE indexrelid = {}",
+                "SELECT indrelid FROM rsduck_catalog.rs_index WHERE indexrelid = {}",
                 meta.oid
             ),
             [],
@@ -597,27 +597,27 @@ pub(super) fn delete_relation_catalog(
 
     for sql in [
         format!(
-            "DELETE FROM rsduck_catalog.pg_depend WHERE objid = {} OR refobjid = {}",
+            "DELETE FROM rsduck_catalog.rs_dependency WHERE objid = {} OR refobjid = {}",
             meta.oid, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_description WHERE objoid = {}",
+            "DELETE FROM rsduck_catalog.rs_comment WHERE objoid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_attrdef WHERE adrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_column_default WHERE adrelid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_attribute WHERE attrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_column WHERE attrelid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_constraint WHERE conrelid = {} OR conindid = {}",
+            "DELETE FROM rsduck_catalog.rs_constraint WHERE conrelid = {} OR conindid = {}",
             meta.oid, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_index WHERE indexrelid = {} OR indrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_index WHERE indexrelid = {} OR indrelid = {}",
             meta.oid, meta.oid
         ),
         format!(
@@ -629,11 +629,11 @@ pub(super) fn delete_relation_catalog(
             meta.oid, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_type WHERE oid = {} OR typrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_type WHERE oid = {} OR typrelid = {}",
             meta.reltype, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_class WHERE oid = {}",
+            "DELETE FROM rsduck_catalog.rs_relation WHERE oid = {}",
             meta.oid
         ),
     ] {
@@ -645,7 +645,7 @@ pub(super) fn delete_relation_catalog(
         let index_count: i64 = conn
             .query_row(
                 &format!(
-                    "SELECT COUNT(*) FROM rsduck_catalog.pg_index WHERE indrelid = {table_oid}"
+                    "SELECT COUNT(*) FROM rsduck_catalog.rs_index WHERE indrelid = {table_oid}"
                 ),
                 [],
                 |row| row.get(0),
@@ -653,7 +653,7 @@ pub(super) fn delete_relation_catalog(
             .map_err(|e| format!("count remaining indexes failed: {e}"))?;
         conn.execute(
             &format!(
-                "UPDATE rsduck_catalog.pg_class SET relhasindex = {} WHERE oid = {table_oid}",
+                "UPDATE rsduck_catalog.rs_relation SET relhasindex = {} WHERE oid = {table_oid}",
                 sql_bool(index_count > 0)
             ),
             [],

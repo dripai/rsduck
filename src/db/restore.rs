@@ -9,11 +9,8 @@ pub(super) fn restore_or_initialize(
         let t0 = Instant::now();
         info!("Restoring from snapshot dir: {}", path);
         prepare_snapshot_parquet_extension(conn, Path::new(path).parent())?;
-        conn.execute_batch(&import_database_sql(path))
-            .map_err(|e| format!("import snapshot failed: {e}"))?;
+        restore_snapshot_v2(conn, Path::new(path))?;
         info!("Snapshot restored in {:.2?}", t0.elapsed());
-        validate_snapshot_manifest(conn, Path::new(path))?;
-        crate::catalog::validate_after_start(conn)?;
         info!(
             target: "rsduck_audit",
             event = "snapshot_restore",

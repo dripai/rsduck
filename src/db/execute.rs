@@ -26,20 +26,12 @@ pub(super) fn execute_typed_sql_blocking(
         return Err("empty sql".into());
     }
 
-    if crate::catalog::looks_like_privilege_function(sql_trimmed) {
-        let (column, allowed) =
-            crate::catalog::evaluate_privilege_function(conn, username, sql_trimmed)?;
-        return Ok(SqlTypedResult::Query {
-            columns: vec![SqlColumn::new(column, SqlType::Bool)],
-            rows: vec![vec![SqlValue::Bool(allowed)]],
-        });
+    if let Some(result) = crate::mysql_compat::compat_result(sql_trimmed) {
+        return Ok(result);
     }
-
-    if let Some(result) = crate::pg_compat::compat_result(sql_trimmed, username) {
-        return Ok(typed_result_from_sql_result(result));
-    }
-    if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(sql_trimmed) {
+    if let Some(rewritten_sql) = crate::mysql_compat::rewrite_sql(sql_trimmed, "main", username) {
         crate::catalog::authorize_catalog_projection(conn, username)?;
+        crate::mysql_compat::validate_metadata_projection(conn, username)?;
         return query_typed_sql_blocking(conn, &rewritten_sql, max_result_rows);
     }
     if crate::catalog::is_reserved_diagnostic_read(sql_trimmed) {
@@ -111,19 +103,15 @@ pub(super) fn describe_sql_blocking(
         return Err("empty sql".into());
     }
 
-    if crate::catalog::looks_like_privilege_function(sql_trimmed) {
-        let (column, _) = crate::catalog::evaluate_privilege_function(conn, username, sql_trimmed)?;
-        return Ok(vec![SqlColumn::new(column, SqlType::Bool)]);
-    }
-
-    if let Some(result) = crate::pg_compat::compat_result(sql_trimmed, username) {
+    if let Some(result) = crate::mysql_compat::compat_result(sql_trimmed) {
         return Ok(match result {
-            SqlResult::Query { columns, .. } => columns.into_iter().map(SqlColumn::text).collect(),
-            SqlResult::Execute { .. } => Vec::new(),
+            SqlTypedResult::Query { columns, .. } => columns,
+            SqlTypedResult::Execute { .. } => Vec::new(),
         });
     }
-    if let Some(rewritten_sql) = crate::pg_compat::rewrite_sql(sql_trimmed) {
+    if let Some(rewritten_sql) = crate::mysql_compat::rewrite_sql(sql_trimmed, "main", username) {
         crate::catalog::authorize_catalog_projection(conn, username)?;
+        crate::mysql_compat::validate_metadata_projection(conn, username)?;
         return describe_query_sql_blocking(conn, &rewritten_sql);
     }
     if crate::catalog::is_reserved_diagnostic_read(sql_trimmed) {
@@ -151,25 +139,6 @@ pub(super) fn describe_query_sql_blocking(
         .ok_or_else(|| "query did not expose statement metadata".to_string())?;
     let col_count = stmt_ref.column_count();
     Ok(statement_columns(stmt_ref, col_count))
-}
-
-pub(super) fn typed_result_from_sql_result(result: SqlResult) -> SqlTypedResult {
-    match result {
-        SqlResult::Query { columns, rows } => SqlTypedResult::Query {
-            columns: columns.into_iter().map(SqlColumn::text).collect(),
-            rows: rows
-                .into_iter()
-                .map(|row| row.into_iter().map(SqlValue::Text).collect())
-                .collect(),
-        },
-        SqlResult::Execute {
-            command,
-            affected_rows,
-        } => SqlTypedResult::Execute {
-            command,
-            affected_rows,
-        },
-    }
 }
 
 pub(super) fn statement_columns(stmt: &duckdb::Statement<'_>, col_count: usize) -> Vec<SqlColumn> {

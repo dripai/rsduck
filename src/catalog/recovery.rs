@@ -23,6 +23,19 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
         ));
     }
 
+    let snapshot_format_version: i64 = conn
+        .query_row(
+            "SELECT snapshot_format_version FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read catalog snapshot format version failed: {e}"))?;
+    if snapshot_format_version != 2 {
+        return Err(format!(
+            "unsupported rsduck catalog snapshot format version: {snapshot_format_version}"
+        ));
+    }
+
     let status: String = conn
         .query_row(
             "SELECT status FROM rsduck_catalog.rs_catalog_version WHERE id = 1",
@@ -110,24 +123,24 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
     ensure_catalog_count_zero(
         conn,
         "SELECT COUNT(*) \
-         FROM rsduck_catalog.pg_class c \
-         LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         FROM rsduck_catalog.rs_relation c \
+         LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
          WHERE n.oid IS NULL",
         "pg_class.relnamespace must reference pg_namespace",
     )?;
     ensure_catalog_count_zero(
         conn,
         "SELECT COUNT(*) \
-         FROM rsduck_catalog.pg_attribute a \
-         LEFT JOIN rsduck_catalog.pg_class c ON c.oid = a.attrelid \
+         FROM rsduck_catalog.rs_column a \
+         LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
          WHERE c.oid IS NULL",
         "pg_attribute.attrelid must reference pg_class",
     )?;
     ensure_catalog_count_zero(
         conn,
         "SELECT COUNT(*) \
-         FROM rsduck_catalog.pg_attribute a \
-         LEFT JOIN rsduck_catalog.pg_type t ON t.oid = a.atttypid \
+         FROM rsduck_catalog.rs_column a \
+         LEFT JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid \
          WHERE t.oid IS NULL",
         "pg_attribute.atttypid must reference pg_type",
     )?;
@@ -135,7 +148,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         "SELECT COUNT(*) FROM ( \
              SELECT c.relnamespace, lower(c.relname) AS relname \
-             FROM rsduck_catalog.pg_class c \
+             FROM rsduck_catalog.rs_relation c \
              WHERE c.status = 'active' \
              GROUP BY c.relnamespace, lower(c.relname) \
              HAVING COUNT(*) > 1 \
@@ -145,9 +158,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
     ensure_catalog_count_zero(
         conn,
         &format!(
-            "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
-             WHERE classid NOT IN ({PG_CLASS_CLASSOID}, {PG_CONSTRAINT_CLASSOID}, {PG_NAMESPACE_CLASSOID}) \
-                OR refclassid NOT IN ({PG_CLASS_CLASSOID}, {PG_CONSTRAINT_CLASSOID}, {PG_NAMESPACE_CLASSOID})"
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_dependency \
+             WHERE classid NOT IN ({OBJECT_RELATION_KIND}, {OBJECT_CONSTRAINT_KIND}, {OBJECT_SCHEMA_KIND}) \
+                OR refclassid NOT IN ({OBJECT_RELATION_KIND}, {OBJECT_CONSTRAINT_KIND}, {OBJECT_SCHEMA_KIND})"
         ),
         "pg_depend classid/refclassid must reference supported catalog classes",
     )?;
@@ -155,9 +168,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_class c ON c.oid = d.objid \
-             WHERE d.classid = {PG_CLASS_CLASSOID} AND c.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = d.objid \
+             WHERE d.classid = {OBJECT_RELATION_KIND} AND c.oid IS NULL"
         ),
         "pg_depend class object must reference pg_class",
     )?;
@@ -165,9 +178,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_class c ON c.oid = d.refobjid \
-             WHERE d.refclassid = {PG_CLASS_CLASSOID} AND c.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = d.refobjid \
+             WHERE d.refclassid = {OBJECT_RELATION_KIND} AND c.oid IS NULL"
         ),
         "pg_depend referenced class object must reference pg_class",
     )?;
@@ -175,9 +188,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_constraint con ON con.oid = d.objid \
-             WHERE d.classid = {PG_CONSTRAINT_CLASSOID} AND con.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_constraint con ON con.oid = d.objid \
+             WHERE d.classid = {OBJECT_CONSTRAINT_KIND} AND con.oid IS NULL"
         ),
         "pg_depend constraint object must reference pg_constraint",
     )?;
@@ -185,9 +198,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_constraint con ON con.oid = d.refobjid \
-             WHERE d.refclassid = {PG_CONSTRAINT_CLASSOID} AND con.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_constraint con ON con.oid = d.refobjid \
+             WHERE d.refclassid = {OBJECT_CONSTRAINT_KIND} AND con.oid IS NULL"
         ),
         "pg_depend referenced constraint object must reference pg_constraint",
     )?;
@@ -195,9 +208,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = d.objid \
-             WHERE d.classid = {PG_NAMESPACE_CLASSOID} AND n.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = d.objid \
+             WHERE d.classid = {OBJECT_SCHEMA_KIND} AND n.oid IS NULL"
         ),
         "pg_depend namespace object must reference pg_namespace",
     )?;
@@ -205,9 +218,9 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
         conn,
         &format!(
             "SELECT COUNT(*) \
-             FROM rsduck_catalog.pg_depend d \
-             LEFT JOIN rsduck_catalog.pg_namespace n ON n.oid = d.refobjid \
-             WHERE d.refclassid = {PG_NAMESPACE_CLASSOID} AND n.oid IS NULL"
+             FROM rsduck_catalog.rs_dependency d \
+             LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = d.refobjid \
+             WHERE d.refclassid = {OBJECT_SCHEMA_KIND} AND n.oid IS NULL"
         ),
         "pg_depend referenced namespace object must reference pg_namespace",
     )?;
@@ -235,8 +248,8 @@ pub(super) fn validate_physical_relations(conn: &Connection) -> Result<(), Strin
     let mut stmt = conn
         .prepare(
             "SELECT c.oid, n.nspname, c.relname, c.relkind \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE c.status = 'active' AND c.relkind IN ('r', 'v', 'i') \
              ORDER BY c.oid",
         )
@@ -285,8 +298,8 @@ pub(super) fn validate_partitioned_relations(conn: &Connection) -> Result<(), St
     let mut stmt = conn
         .prepare(
             "SELECT c.oid, n.nspname, c.relname \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE c.status = 'active' AND c.relkind = 'p' \
              ORDER BY c.oid",
         )
@@ -396,8 +409,8 @@ pub(super) fn active_partition_children(
         .prepare(&format!(
             "SELECT p.child_relid, n.nspname, c.relname, c.status \
              FROM rsduck_catalog.rs_partition p \
-             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE p.parent_relid = {parent_oid} AND p.status = 'active' \
              ORDER BY p.is_null_partition, p.partition_value"
         ))
@@ -555,7 +568,7 @@ pub(super) fn validate_catalog_columns_match_duckdb(
         if !catalog_column
             .name
             .eq_ignore_ascii_case(&physical_column.name)
-            || catalog_column.pg_type_oid != physical_column.pg_type_oid
+            || catalog_column.type_id != physical_column.type_id
         {
             return Err(format!(
                 "column mismatch at catalog attnum {}: catalog={} duckdb={}",
@@ -586,7 +599,7 @@ pub(super) fn count_duckdb_relation(
     .map_err(|e| format!("query DuckDB physical relation failed: {e}"))
 }
 
-pub(super) fn mark_relation_unavailable(
+pub(crate) fn mark_relation_unavailable(
     conn: &Connection,
     rel_oid: i64,
     reason: &str,
@@ -594,7 +607,7 @@ pub(super) fn mark_relation_unavailable(
     let error_message = relation_unavailable_message(rel_oid, reason);
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_class \
+            "UPDATE rsduck_catalog.rs_relation \
              SET status = 'unavailable', error_message = '{}' \
              WHERE oid = {rel_oid}",
             sql_string(&error_message)

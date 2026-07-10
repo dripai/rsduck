@@ -8,8 +8,8 @@ pub(in crate::catalog) fn retention_partitions(
         .prepare(&format!(
             "SELECT p.partition_value, n.nspname, c.relname, c.oid, c.reltype, c.relkind, c.relispartition \
              FROM rsduck_catalog.rs_partition p \
-             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE p.parent_relid = {parent_oid} \
                AND p.status = 'active' \
                AND p.is_null_partition = FALSE \
@@ -105,27 +105,27 @@ pub(in crate::catalog) fn delete_partition_child_catalog(
 ) -> Result<(), String> {
     for sql in [
         format!(
-            "DELETE FROM rsduck_catalog.pg_depend WHERE objid = {} OR refobjid = {}",
+            "DELETE FROM rsduck_catalog.rs_dependency WHERE objid = {} OR refobjid = {}",
             meta.oid, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_description WHERE objoid = {}",
+            "DELETE FROM rsduck_catalog.rs_comment WHERE objoid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_attrdef WHERE adrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_column_default WHERE adrelid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_attribute WHERE attrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_column WHERE attrelid = {}",
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_constraint WHERE conrelid = {} OR conindid = {}",
+            "DELETE FROM rsduck_catalog.rs_constraint WHERE conrelid = {} OR conindid = {}",
             meta.oid, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_index WHERE indexrelid = {} OR indrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_index WHERE indexrelid = {} OR indrelid = {}",
             meta.oid, meta.oid
         ),
         format!(
@@ -133,11 +133,11 @@ pub(in crate::catalog) fn delete_partition_child_catalog(
             meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_type WHERE oid = {} OR typrelid = {}",
+            "DELETE FROM rsduck_catalog.rs_type WHERE oid = {} OR typrelid = {}",
             meta.reltype, meta.oid
         ),
         format!(
-            "DELETE FROM rsduck_catalog.pg_class WHERE oid = {}",
+            "DELETE FROM rsduck_catalog.rs_relation WHERE oid = {}",
             meta.oid
         ),
     ] {

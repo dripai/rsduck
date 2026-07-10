@@ -20,11 +20,7 @@ prefix = "rsduck"
 interval_secs = 900
 retain_hours = 2
 
-[pg]
-bind = "127.0.0.1:15432"
-
 [mysql]
-enabled = true
 bind = "127.0.0.1:13306"
 
 [web]

@@ -84,54 +84,6 @@ pub(in crate::catalog) fn audit_permission_denied(
     );
 }
 
-pub(in crate::catalog) fn has_relation_action(
-    conn: &Connection,
-    username: &str,
-    relation: &(String, String),
-    action: &str,
-) -> Result<bool, String> {
-    let principal = principal_for_username(conn, username)?;
-    let (schema, relname) = relation;
-    let rel_oid = relation_oid(conn, schema, relname)?;
-    let namespace_oid = namespace_oid(conn, schema)?;
-    Ok(principal.is_admin()
-        || has_explicit_privilege(conn, &principal, "relation", rel_oid, action)?
-        || (action == "read"
-            && has_explicit_privilege(conn, &principal, "schema", namespace_oid, "read")?))
-}
-
-pub(in crate::catalog) fn has_schema_action(
-    conn: &Connection,
-    username: &str,
-    schema: &str,
-    action: &str,
-) -> Result<bool, String> {
-    let principal = principal_for_username(conn, username)?;
-    let namespace_oid = namespace_oid(conn, schema)?;
-    Ok(principal.is_admin()
-        || has_explicit_privilege(conn, &principal, "schema", namespace_oid, action)?)
-}
-
-pub(in crate::catalog) fn has_database_privilege(
-    conn: &Connection,
-    username: &str,
-    database: &str,
-    privilege: &str,
-) -> Result<bool, String> {
-    if !database.eq_ignore_ascii_case("postgres") {
-        return Ok(false);
-    }
-    let principal = principal_for_username(conn, username)?;
-    if principal.is_admin() {
-        return Ok(true);
-    }
-    if privilege.contains("connect") {
-        return Ok(true);
-    }
-    let action = database_privilege_action(privilege);
-    has_explicit_privilege(conn, &principal, "system", 0, action)
-}
-
 pub(in crate::catalog) fn has_explicit_privilege(
     conn: &Connection,
     principal: &SessionPrincipal,

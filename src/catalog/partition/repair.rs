@@ -123,7 +123,7 @@ pub(in crate::catalog) fn repair_non_active_partition(
         let bounds = partition_bounds(partition_value, &relation.partition_unit)?;
         conn.execute(
             &format!(
-                "UPDATE rsduck_catalog.pg_class \
+                "UPDATE rsduck_catalog.rs_relation \
                  SET relispartition = TRUE, relpartbound = '{}' \
                  WHERE oid = {child_oid}",
                 sql_string(&format!("[{}, {})", bounds.lower_bound, bounds.upper_bound))
@@ -162,7 +162,7 @@ pub(in crate::catalog) fn repair_non_active_partition(
     .map_err(|e| format!("repair partition metadata failed: {e}"))?;
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_class SET status = 'active', error_message = '' WHERE oid = {child_oid}"
+            "UPDATE rsduck_catalog.rs_relation SET status = 'active', error_message = '' WHERE oid = {child_oid}"
         ),
         [],
     )

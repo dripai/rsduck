@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
+pub(crate) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE SCHEMA IF NOT EXISTS rsduck_catalog;
@@ -9,6 +9,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_catalog_version (
             id BIGINT PRIMARY KEY,
             schema_version BIGINT NOT NULL,
+            snapshot_format_version BIGINT NOT NULL,
             catalog_epoch BIGINT NOT NULL,
             catalog_checksum VARCHAR NOT NULL,
             status VARCHAR NOT NULL,
@@ -34,14 +35,14 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             applied_at TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_namespace (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_schema (
             oid BIGINT PRIMARY KEY,
             nspname VARCHAR NOT NULL UNIQUE,
             nspowner BIGINT NOT NULL,
             nspacl VARCHAR NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_type (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_type (
             oid BIGINT PRIMARY KEY,
             typname VARCHAR NOT NULL,
             typnamespace BIGINT NOT NULL,
@@ -58,7 +59,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             UNIQUE(typnamespace, typname)
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_class (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_relation (
             oid BIGINT PRIMARY KEY,
             relname VARCHAR NOT NULL,
             relnamespace BIGINT NOT NULL,
@@ -77,7 +78,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             UNIQUE(relnamespace, relname)
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_attribute (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_column (
             attrelid BIGINT NOT NULL,
             attname VARCHAR NOT NULL,
             atttypid BIGINT NOT NULL,
@@ -92,7 +93,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             PRIMARY KEY(attrelid, attnum)
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_attrdef (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_column_default (
             oid BIGINT PRIMARY KEY,
             adrelid BIGINT NOT NULL,
             adnum INT NOT NULL,
@@ -100,7 +101,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             UNIQUE(adrelid, adnum)
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_constraint (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_constraint (
             oid BIGINT PRIMARY KEY,
             conname VARCHAR NOT NULL,
             connamespace BIGINT NOT NULL,
@@ -114,7 +115,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             conbin VARCHAR NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_index (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_index (
             indexrelid BIGINT PRIMARY KEY,
             indrelid BIGINT NOT NULL,
             indnatts INT NOT NULL,
@@ -127,7 +128,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             indpred VARCHAR NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_depend (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_dependency (
             classid BIGINT NOT NULL,
             objid BIGINT NOT NULL,
             objsubid INT NOT NULL,
@@ -138,7 +139,7 @@ pub(super) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             PRIMARY KEY(classid, objid, objsubid, refclassid, refobjid, refobjsubid)
         );
 
-        CREATE TABLE IF NOT EXISTS rsduck_catalog.pg_description (
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_comment (
             objoid BIGINT NOT NULL,
             classoid BIGINT NOT NULL,
             objsubid INT NOT NULL,

@@ -17,7 +17,7 @@ pub(in crate::catalog) fn physical_partition_create_from_catalog_sql(
         let mut definition = format!(
             "{} {}",
             quote_ident(&column.name),
-            duckdb_type_for_pg_type_oid(conn, column.pg_type_oid)?
+            duckdb_type_for_type_id(conn, column.type_id)?
         );
         if column.not_null {
             definition.push_str(" NOT NULL");
@@ -45,7 +45,7 @@ pub(in crate::catalog) fn physical_partition_constraints_from_catalog(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT conname, contype, conkey, confrelid, confkey, conbin \
-             FROM rsduck_catalog.pg_constraint \
+             FROM rsduck_catalog.rs_constraint \
              WHERE conrelid = {parent_oid} \
              ORDER BY oid"
         ))
@@ -169,7 +169,7 @@ pub(in crate::catalog) fn create_range_partition(
     )?;
     conn.execute(
         &format!(
-            "UPDATE rsduck_catalog.pg_class \
+            "UPDATE rsduck_catalog.rs_relation \
              SET relispartition = TRUE, relpartbound = '{}' \
              WHERE oid = {child_oid}",
             sql_string(&format!("[{}, {})", bounds.lower_bound, bounds.upper_bound))
@@ -204,8 +204,8 @@ pub(in crate::catalog) fn create_range_partition(
     .map_err(|e| format!("write range partition metadata failed: {e}"))?;
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
-             VALUES ({PG_CLASS_CLASSOID}, {}, 0, {PG_CLASS_CLASSOID}, {child_oid}, 0, 'n')",
+            "INSERT INTO rsduck_catalog.rs_dependency(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+             VALUES ({OBJECT_RELATION_KIND}, {}, 0, {OBJECT_RELATION_KIND}, {child_oid}, 0, 'n')",
             relation.oid
         ),
         [],

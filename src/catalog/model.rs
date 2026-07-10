@@ -3,11 +3,23 @@ use chrono::NaiveDateTime;
 pub(super) const CATALOG_VERSION: i64 = 1;
 
 pub(super) const ADMIN_USER_ID: i64 = 10;
-pub(super) const PG_CATALOG_NS: i64 = 11;
 pub(super) const INFORMATION_SCHEMA_NS: i64 = 12;
 pub(super) const RSDUCK_CATALOG_NS: i64 = 13;
 pub(super) const RSDUCK_INTERNAL_NS: i64 = 14;
 pub(super) const MAIN_NS: i64 = 15;
+
+pub(super) const TYPE_BOOL: i64 = 1001;
+pub(super) const TYPE_INT8: i64 = 1002;
+pub(super) const TYPE_INT2: i64 = 1003;
+pub(super) const TYPE_INT4: i64 = 1004;
+pub(super) const TYPE_TEXT: i64 = 1005;
+pub(super) const TYPE_FLOAT4: i64 = 1006;
+pub(super) const TYPE_FLOAT8: i64 = 1007;
+pub(super) const TYPE_VARCHAR: i64 = 1008;
+pub(super) const TYPE_DATE: i64 = 1009;
+pub(super) const TYPE_TIME: i64 = 1010;
+pub(super) const TYPE_TIMESTAMP: i64 = 1011;
+pub(super) const TYPE_NUMERIC: i64 = 1012;
 
 pub(super) const ROLE_ADMIN_ID: i64 = 20;
 pub(super) const ROLE_OPERATOR_ID: i64 = 21;
@@ -16,9 +28,9 @@ pub(super) const ROLE_WRITER_ID: i64 = 23;
 pub(super) const ROLE_READER_ID: i64 = 24;
 
 pub(super) const FIRST_USER_OID: i64 = 10_000;
-pub(super) const PG_CLASS_CLASSOID: i64 = 1259;
-pub(super) const PG_CONSTRAINT_CLASSOID: i64 = 2606;
-pub(super) const PG_NAMESPACE_CLASSOID: i64 = 2615;
+pub(super) const OBJECT_RELATION_KIND: i64 = 1259;
+pub(super) const OBJECT_CONSTRAINT_KIND: i64 = 2606;
+pub(super) const OBJECT_SCHEMA_KIND: i64 = 2615;
 pub(super) const FNV64_OFFSET: u64 = 0xcbf29ce484222325;
 pub(super) const FNV64_PRIME: u64 = 0x00000100000001b3;
 pub(super) const AUTH_FAILED: &str = "invalid username or password";
@@ -26,7 +38,7 @@ pub(super) const AUTH_FAILED: &str = "invalid username or password";
 #[derive(Debug, Clone)]
 pub(super) struct CatalogColumn {
     pub(super) name: String,
-    pub(super) pg_type_oid: i64,
+    pub(super) type_id: i64,
     pub(super) attnum: i32,
     pub(super) not_null: bool,
     pub(super) default_expr: Option<String>,

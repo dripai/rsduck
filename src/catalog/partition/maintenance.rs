@@ -42,8 +42,8 @@ pub(in crate::catalog) fn partitioned_relations(
     let mut stmt = conn
         .prepare(
             "SELECT n.nspname, c.relname \
-             FROM rsduck_catalog.pg_class c \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             FROM rsduck_catalog.rs_relation c \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid \
              WHERE c.status = 'active' \
                AND c.relkind = 'p' \

@@ -74,7 +74,7 @@ pub(in crate::catalog) fn create_index_relation(
         let namespace_oid = namespace_oid(conn, &index_schema)?;
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_class(oid, relname, relnamespace, reltype, relowner, \
+                "INSERT INTO rsduck_catalog.rs_relation(oid, relname, relnamespace, reltype, relowner, \
                  relkind, relpersistence, relnatts, reltuples, relhasindex, relispartition, relpartbound, reloptions, status, error_message) \
                  VALUES ({index_oid}, '{}', {namespace_oid}, 0, {owner_user_id}, 'i', 'p', {}, 0, FALSE, FALSE, '', '', 'active', '')",
                 sql_string(&index_relname),
@@ -86,7 +86,7 @@ pub(in crate::catalog) fn create_index_relation(
 
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_index(indexrelid, indrelid, indnatts, indnkeyatts, \
+                "INSERT INTO rsduck_catalog.rs_index(indexrelid, indrelid, indnatts, indnkeyatts, \
                  indisunique, indisprimary, indisvalid, indkey, indexprs, indpred) \
                  VALUES ({index_oid}, {table_oid}, {}, {}, {}, FALSE, TRUE, '{}', '', '')",
                 index_column_names.len(),
@@ -100,7 +100,7 @@ pub(in crate::catalog) fn create_index_relation(
 
         conn.execute(
             &format!(
-                "UPDATE rsduck_catalog.pg_class SET relhasindex = TRUE WHERE oid = {table_oid}"
+                "UPDATE rsduck_catalog.rs_relation SET relhasindex = TRUE WHERE oid = {table_oid}"
             ),
             [],
         )
@@ -108,8 +108,8 @@ pub(in crate::catalog) fn create_index_relation(
 
         conn.execute(
             &format!(
-                "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
-                 VALUES (1259, {index_oid}, 0, 1259, {table_oid}, 0, 'n')"
+                "INSERT INTO rsduck_catalog.rs_dependency(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+                 VALUES ({OBJECT_RELATION_KIND}, {index_oid}, 0, {OBJECT_RELATION_KIND}, {table_oid}, 0, 'n')"
             ),
             [],
         )
@@ -195,8 +195,8 @@ pub(in crate::catalog) fn partition_index_specs(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT i.indexrelid, c.relname, i.indisunique, i.indkey \
-             FROM rsduck_catalog.pg_index i \
-             JOIN rsduck_catalog.pg_class c ON c.oid = i.indexrelid \
+             FROM rsduck_catalog.rs_index i \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = i.indexrelid \
              WHERE i.indrelid = {parent_oid} AND c.status = 'active' \
              ORDER BY i.indexrelid"
         ))
@@ -242,8 +242,8 @@ pub(in crate::catalog) fn partitioned_index_parent(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT i.indrelid \
-             FROM rsduck_catalog.pg_index i \
-             JOIN rsduck_catalog.pg_class c ON c.oid = i.indrelid \
+             FROM rsduck_catalog.rs_index i \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = i.indrelid \
              WHERE i.indexrelid = {index_oid} AND c.relkind = 'p'"
         ))
         .map_err(|e| format!("prepare partitioned index parent lookup failed: {e}"))?;

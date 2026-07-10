@@ -17,7 +17,6 @@ fn process_lock_payload(cfg: &config::RsduckConfig, mode: &str) -> serde_json::V
         "workdir": std::env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string()),
-        "pg_bind": cfg.pg.bind.as_str(),
         "mysql_bind": cfg.mysql.bind.as_str(),
         "web_bind": cfg.web.bind.as_str(),
     })
@@ -59,9 +58,23 @@ async fn main() {
     let _log_guard = logging::init_tracing(&cfg.log);
 
     if let Some(command) = args.first() {
-        if command != "reset-admin-password" {
-            eprintln!("usage: rsduck reset-admin-password [--password <password>]");
+        if command != "reset-admin-password" && command != "migrate-snapshot" {
+            eprintln!("usage: rsduck reset-admin-password [--password <password>] | rsduck migrate-snapshot --from <snapshot_dir> --to <snapshot_dir>");
             std::process::exit(2);
+        }
+        if command == "migrate-snapshot" {
+            let (from, to) = match parse_migrate_snapshot_args(&args[1..]) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("{e}");
+                    eprintln!(
+                        "usage: rsduck migrate-snapshot --from <snapshot_dir> --to <snapshot_dir>"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            run_migrate_snapshot(&cfg, &from, &to);
+            return;
         }
         let password = match parse_reset_admin_password_args(&args[1..]) {
             Ok(password) => password,
@@ -113,22 +126,11 @@ async fn main() {
         None
     };
 
-    let pg_bind = cfg.pg.bind.clone();
-    let pg_db = db.clone();
-    let pg_task = tokio::spawn(async move {
-        server::start_pg_server(&pg_bind, pg_db).await;
+    let mysql_bind = cfg.mysql.bind.clone();
+    let mysql_db = db.clone();
+    let mysql_task = tokio::spawn(async move {
+        server::start_mysql_server(&mysql_bind, mysql_db).await;
     });
-
-    let mysql_task = if cfg.mysql.enabled {
-        let mysql_bind = cfg.mysql.bind.clone();
-        let mysql_db = db.clone();
-        Some(tokio::spawn(async move {
-            server::start_mysql_server(&mysql_bind, mysql_db).await;
-        }))
-    } else {
-        info!("MySQL wire protocol disabled by config");
-        None
-    };
 
     let snap_dir = cfg.snapshot.dir.clone();
     let snap_prefix = cfg.snapshot.prefix.clone();
@@ -183,10 +185,7 @@ async fn main() {
     if let Some(task) = partition_task {
         task.abort();
     }
-    if let Some(task) = mysql_task {
-        task.abort();
-    }
-    pg_task.abort();
+    mysql_task.abort();
     db.shutdown();
 }
 
@@ -231,9 +230,46 @@ fn run_reset_admin_password(cfg: &config::RsduckConfig, password: &str) {
     }
 }
 
+fn parse_migrate_snapshot_args(args: &[String]) -> Result<(String, String), String> {
+    match args {
+        [from_flag, from, to_flag, to] if from_flag == "--from" && to_flag == "--to" => {
+            if from.is_empty() || to.is_empty() {
+                Err("snapshot migration paths cannot be empty".into())
+            } else {
+                Ok((from.clone(), to.clone()))
+            }
+        }
+        _ => Err("invalid migrate-snapshot arguments".into()),
+    }
+}
+
+fn run_migrate_snapshot(cfg: &config::RsduckConfig, from: &str, to: &str) {
+    let _process_lock = match process_lock::ProcessLock::acquire(
+        PROCESS_LOCK_FILE,
+        process_lock_payload(cfg, "migrate-snapshot"),
+    ) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    match db::migrate_snapshot(from, to, &cfg.snapshot.prefix) {
+        Ok(path) => println!("snapshot migrated to {path}"),
+        Err(e) => {
+            eprintln!("snapshot migration failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod main_tests {
-    use super::{parse_reset_admin_password_args, DEFAULT_RESET_ADMIN_PASSWORD_VALUE};
+    use super::{
+        parse_migrate_snapshot_args, parse_reset_admin_password_args,
+        DEFAULT_RESET_ADMIN_PASSWORD_VALUE,
+    };
 
     #[test]
     fn reset_admin_password_args_default_to_admin() {
@@ -254,6 +290,21 @@ mod main_tests {
     fn reset_admin_password_args_reject_unknown_shape() {
         let args = vec!["--password".to_string()];
         assert!(parse_reset_admin_password_args(&args).is_err());
+    }
+
+    #[test]
+    fn migrate_snapshot_args_require_explicit_source_and_target() {
+        let args = vec![
+            "--from".to_string(),
+            "legacy".to_string(),
+            "--to".to_string(),
+            "snapshot".to_string(),
+        ];
+        assert_eq!(
+            parse_migrate_snapshot_args(&args).unwrap(),
+            ("legacy".to_string(), "snapshot".to_string())
+        );
+        assert!(parse_migrate_snapshot_args(&args[..3]).is_err());
     }
 }
 

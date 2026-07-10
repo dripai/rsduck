@@ -14,8 +14,6 @@ pub struct RsduckConfig {
     #[serde(default)]
     pub partition: PartitionConfig,
     #[serde(default)]
-    pub pg: PgConfig,
-    #[serde(default)]
     pub mysql: MysqlConfig,
     #[serde(default)]
     pub web: WebConfig,
@@ -83,16 +81,7 @@ pub struct PartitionConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PgConfig {
-    #[serde(default = "default_pg_bind")]
-    pub bind: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MysqlConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_mysql_bind")]
     pub bind: String,
 }
@@ -160,10 +149,6 @@ fn default_partition_verify_interval_secs() -> u64 {
 
 fn default_partition_max_jobs_per_tick() -> usize {
     100
-}
-
-fn default_pg_bind() -> String {
-    "127.0.0.1:15432".into()
 }
 
 fn default_mysql_bind() -> String {
@@ -238,14 +223,6 @@ impl Default for PartitionConfig {
     }
 }
 
-impl Default for PgConfig {
-    fn default() -> Self {
-        Self {
-            bind: default_pg_bind(),
-        }
-    }
-}
-
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
@@ -258,7 +235,6 @@ impl Default for WebConfig {
 impl Default for MysqlConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             bind: default_mysql_bind(),
         }
     }
@@ -271,7 +247,6 @@ impl Default for RsduckConfig {
             db: DbConfig::default(),
             snapshot: SnapshotConfig::default(),
             partition: PartitionConfig::default(),
-            pg: PgConfig::default(),
             mysql: MysqlConfig::default(),
             web: WebConfig::default(),
         }

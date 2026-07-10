@@ -171,7 +171,7 @@ pub(in crate::catalog) fn insert_constraint(
 ) -> Result<(), String> {
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_constraint(oid, conname, connamespace, contype, conrelid, \
+            "INSERT INTO rsduck_catalog.rs_constraint(oid, conname, connamespace, contype, conrelid, \
              conindid, conkey, confrelid, confkey, convalidated, conbin) \
              VALUES ({oid}, '{}', {namespace_oid}, '{}', {rel_oid}, 0, '{}', {confrelid}, '{}', TRUE, '{}')",
             sql_string(conname),
@@ -270,10 +270,10 @@ pub(in crate::catalog) fn insert_constraint_dependencies(
 ) -> Result<(), String> {
     insert_depend_if_missing(
         conn,
-        PG_CONSTRAINT_CLASSOID,
+        OBJECT_CONSTRAINT_KIND,
         constraint_oid,
         0,
-        PG_CLASS_CLASSOID,
+        OBJECT_RELATION_KIND,
         rel_oid,
         0,
         "n",
@@ -281,10 +281,10 @@ pub(in crate::catalog) fn insert_constraint_dependencies(
     for attnum in parse_attnums(conkey) {
         insert_depend_if_missing(
             conn,
-            PG_CONSTRAINT_CLASSOID,
+            OBJECT_CONSTRAINT_KIND,
             constraint_oid,
             0,
-            PG_CLASS_CLASSOID,
+            OBJECT_RELATION_KIND,
             rel_oid,
             attnum,
             "n",
@@ -293,10 +293,10 @@ pub(in crate::catalog) fn insert_constraint_dependencies(
     if confrelid > 0 {
         insert_depend_if_missing(
             conn,
-            PG_CONSTRAINT_CLASSOID,
+            OBJECT_CONSTRAINT_KIND,
             constraint_oid,
             0,
-            PG_CLASS_CLASSOID,
+            OBJECT_RELATION_KIND,
             confrelid,
             0,
             "n",
@@ -304,10 +304,10 @@ pub(in crate::catalog) fn insert_constraint_dependencies(
         for attnum in parse_attnums(confkey) {
             insert_depend_if_missing(
                 conn,
-                PG_CONSTRAINT_CLASSOID,
+                OBJECT_CONSTRAINT_KIND,
                 constraint_oid,
                 0,
-                PG_CLASS_CLASSOID,
+                OBJECT_RELATION_KIND,
                 confrelid,
                 attnum,
                 "n",
@@ -338,7 +338,7 @@ pub(in crate::catalog) fn insert_depend_if_missing(
     let count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM rsduck_catalog.pg_depend \
+                "SELECT COUNT(*) FROM rsduck_catalog.rs_dependency \
                  WHERE classid = {classid} AND objid = {objid} AND objsubid = {objsubid} \
                    AND refclassid = {refclassid} AND refobjid = {refobjid} \
                    AND refobjsubid = {refobjsubid}"
@@ -352,7 +352,7 @@ pub(in crate::catalog) fn insert_depend_if_missing(
     }
     conn.execute(
         &format!(
-            "INSERT INTO rsduck_catalog.pg_depend(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
+            "INSERT INTO rsduck_catalog.rs_dependency(classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype) \
              VALUES ({classid}, {objid}, {objsubid}, {refclassid}, {refobjid}, {refobjsubid}, '{}')",
             sql_string(deptype)
         ),
@@ -422,7 +422,7 @@ pub(in crate::catalog) fn load_duckdb_columns(
             .map_err(|e| format!("read column_index failed: {e}"))?;
         columns.push(CatalogColumn {
             name,
-            pg_type_oid: pg_type_oid_for_duckdb_type(&duckdb_type)?,
+            type_id: type_id_for_duckdb_type(&duckdb_type)?,
             attnum: column_index,
             not_null: !is_nullable,
             default_expr,

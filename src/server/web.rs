@@ -34,7 +34,8 @@ pub struct SqlResp {
 #[derive(Debug, Serialize)]
 pub struct SqlRespColumn {
     pub name: String,
-    pub pg_type_oid: u32,
+    pub sql_type: String,
+    pub mysql_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +97,8 @@ async fn sql_handler(
                 .into_iter()
                 .map(|column| SqlRespColumn {
                     name: column.name,
-                    pg_type_oid: column.data_type.pg_type_oid(),
+                    sql_type: column.data_type.sql_type_name().to_string(),
+                    mysql_type: column.data_type.mysql_type_name().to_string(),
                 })
                 .collect();
             Json(SqlResp {

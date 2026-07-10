@@ -64,10 +64,10 @@ pub(in crate::catalog) fn insert_view_dependencies(
         }
         insert_depend_if_missing(
             conn,
-            PG_CLASS_CLASSOID,
+            OBJECT_RELATION_KIND,
             view_oid,
             0,
-            PG_CLASS_CLASSOID,
+            OBJECT_RELATION_KIND,
             ref_oid,
             0,
             "n",

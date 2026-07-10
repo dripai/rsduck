@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
-pgwire = "0.26"
 duckdb = { version = "1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,10 +23,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 fs2 = "0.4"
 bytes = "1"
-postgres-types = { version = "0.2", features = ["with-uuid-1"] }
-rust_decimal = { version = "1", features = ["db-postgres"] }
+rust_decimal = "1"
 uuid = "1"
 sha2 = "0.10"
-
-[dev-dependencies]
-tokio-postgres = "0.7"

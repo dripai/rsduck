@@ -1,5 +1,6 @@
 use super::*;
 use crate::auth::BlockingAuthenticator;
+use std::sync::Arc;
 
 pub(super) async fn send_typed_sql(
     tx: &SyncSender<SqlCommand>,
@@ -30,6 +31,7 @@ pub(super) fn spawn_sql_worker<N>(
     conn: Connection,
     rx: Receiver<SqlCommand>,
     max_result_rows: usize,
+    write_gate: Option<Arc<Mutex<()>>>,
 ) -> JoinHandle<()>
 where
     N: Into<String>,
@@ -50,6 +52,17 @@ where
                         resp,
                     } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
+                            let _write_guard = if route == SqlRoute::Write {
+                                Some(
+                                    write_gate
+                                        .as_ref()
+                                        .expect("write workers require a snapshot gate")
+                                        .lock()
+                                        .map_err(|_| "snapshot gate is poisoned".to_string())?,
+                                )
+                            } else {
+                                None
+                            };
                             execute_typed_sql_blocking(
                                 &conn,
                                 &username,
@@ -93,6 +106,7 @@ pub(super) fn spawn_snapshot_worker<N>(
     name: N,
     conn: Connection,
     rx: Receiver<SnapshotCommand>,
+    write_gate: Arc<Mutex<()>>,
 ) -> JoinHandle<()>
 where
     N: Into<String>,
@@ -112,6 +126,9 @@ where
                         resp,
                     } => {
                         let result = catch_unwind(AssertUnwindSafe(|| {
+                            let _write_guard = write_gate
+                                .lock()
+                                .map_err(|_| "snapshot gate is poisoned".to_string())?;
                             if let Some(username) = username.as_deref() {
                                 crate::catalog::authorize_snapshot(&conn, username)?;
                             }

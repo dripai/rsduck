@@ -12,9 +12,7 @@ pub fn guard_external_sql(sql: &str) -> Result<(), String> {
             && (!matches!(schema, "pg_catalog" | "information_schema")
                 || !is_catalog_projection_read(&normalized))
         {
-            return Err(format!(
-                "reserved schema is managed by rsduck catalog: {schema}"
-            ));
+            return Err(format!("reserved schema is managed by rsduck: {schema}"));
         }
     }
     Ok(())
@@ -351,6 +349,9 @@ pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
         return None;
     }
     let lower = token.to_ascii_lowercase();
+    if matches!(lower.as_str(), "duckdb_functions" | "unnest") {
+        return None;
+    }
     if matches!(
         lower.as_str(),
         "select"
@@ -370,7 +371,7 @@ pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
 
     let parts = token
         .split('.')
-        .map(|part| part.trim_matches('"').to_string())
+        .map(normalize_relation_identifier)
         .collect::<Vec<_>>();
     match parts.as_slice() {
         [relation] if !relation.is_empty() => Some(("main".to_string(), relation.clone())),
@@ -379,6 +380,11 @@ pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
         }
         _ => None,
     }
+}
+
+fn normalize_relation_identifier(part: &str) -> String {
+    let part = part.trim().trim_matches(|ch| matches!(ch, '"' | '`'));
+    part.replace("``", "`").replace("\"\"", "\"")
 }
 
 pub(super) fn quoted_literals(sql: &str) -> Vec<String> {

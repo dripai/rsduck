@@ -71,9 +71,7 @@ pub(super) fn ident_parts(name: &ObjectName) -> Result<Vec<String>, String> {
 
 pub(super) fn reject_reserved_schema(schema: &str) -> Result<(), String> {
     if is_reserved_schema(schema) {
-        Err(format!(
-            "reserved schema is managed by rsduck catalog: {schema}"
-        ))
+        Err(format!("reserved schema is managed by rsduck: {schema}"))
     } else {
         Ok(())
     }
@@ -91,6 +89,7 @@ pub(super) fn normalize_for_guard(sql: &str) -> String {
         .trim_end_matches(';')
         .to_ascii_lowercase()
         .replace('"', "")
+        .replace('`', "")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

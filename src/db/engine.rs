@@ -12,6 +12,7 @@ impl DbHandle {
         let max_result_rows = cfg.max_result_rows.max(1);
         let mut read_txs = Vec::with_capacity(read_workers);
         let mut workers = Vec::with_capacity(read_workers + 2);
+        let snapshot_write_gate = Arc::new(Mutex::new(()));
 
         let write_conn = base_conn
             .try_clone()
@@ -22,6 +23,7 @@ impl DbHandle {
             write_conn,
             write_rx,
             max_result_rows,
+            Some(snapshot_write_gate.clone()),
         ));
 
         for idx in 0..read_workers {
@@ -34,6 +36,7 @@ impl DbHandle {
                 read_conn,
                 read_rx,
                 max_result_rows,
+                None,
             ));
             read_txs.push(read_tx);
         }
@@ -46,6 +49,7 @@ impl DbHandle {
             "duckdb-snapshot",
             snapshot_conn,
             snapshot_rx,
+            snapshot_write_gate,
         ));
 
         Self {

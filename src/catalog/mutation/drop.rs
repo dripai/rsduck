@@ -214,8 +214,8 @@ pub(in crate::catalog) fn partition_child_metas(
         .prepare(&format!(
             "SELECT c.oid, c.reltype, c.relkind, c.relispartition, n.nspname, c.relname \
              FROM rsduck_catalog.rs_partition p \
-             JOIN rsduck_catalog.pg_class c ON c.oid = p.child_relid \
-             JOIN rsduck_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = p.child_relid \
+             JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
              WHERE p.parent_relid = {parent_oid} \
              ORDER BY p.is_null_partition, p.partition_value"
         ))
