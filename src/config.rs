@@ -162,7 +162,7 @@ fn default_mysql_bind() -> String {
 }
 
 fn default_web_bind() -> String {
-    "127.0.0.1:8080".into()
+    "127.0.0.1:13307".into()
 }
 
 fn default_log_level() -> String {

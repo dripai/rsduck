@@ -90,10 +90,10 @@ The repository `rsduck.toml` uses:
 
 ```text
 MySQL: 127.0.0.1:13306
-Web:   http://127.0.0.1:15433
+Web:   http://127.0.0.1:13307
 ```
 
-If `rsduck.toml` does not exist, the code default Web port is `8080`.
+If `rsduck.toml` does not exist, the code default Web port is also `13307`.
 
 Initial administrator account:
 
@@ -152,7 +152,7 @@ bind = "127.0.0.1:13306"
 
 [web]
 enabled = true
-bind = "127.0.0.1:15433"
+bind = "127.0.0.1:13307"
 migration_root = "."
 ```
 

@@ -25,5 +25,5 @@ bind = "127.0.0.1:13306"
 
 [web]
 enabled = true
-bind = "127.0.0.1:15433"
+bind = "127.0.0.1:13307"
 migration_root = "."

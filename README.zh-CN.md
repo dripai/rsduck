@@ -90,10 +90,10 @@ cargo run
 
 ```text
 MySQL: 127.0.0.1:13306
-Web:   http://127.0.0.1:15433
+Web:   http://127.0.0.1:13307
 ```
 
-如果没有 `rsduck.toml`，代码默认 Web 端口是 `8080`。
+如果没有 `rsduck.toml`，代码默认 Web 端口同样是 `13307`。
 
 初始管理员账号：
 
@@ -152,7 +152,7 @@ bind = "127.0.0.1:13306"
 
 [web]
 enabled = true
-bind = "127.0.0.1:15433"
+bind = "127.0.0.1:13307"
 migration_root = "."
 ```
 
