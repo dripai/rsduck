@@ -15,16 +15,27 @@ pub fn rewrite_sql(sql: &str, current_schema: &str, username: &str) -> Option<St
         .or_else(|| show_columns_sql(sql, current_schema, username))
         .or_else(|| show_index_sql(sql, current_schema, username))
         .or_else(|| show_routine_status_sql(sql, current_schema))
-        .or_else(|| rewrite_mysql_user_sql(sql))
+        .or_else(|| rewrite_mysql_system_sql(sql))
         .or_else(|| rewrite_information_schema_sql(sql, username))
 }
 
-pub fn is_mysql_user_projection(sql: &str) -> bool {
-    sql.chars()
+pub fn is_mysql_system_projection(sql: &str) -> bool {
+    let compact = sql
+        .chars()
         .filter(|ch| !ch.is_ascii_whitespace() && *ch != '`' && *ch != '"')
         .collect::<String>()
-        .to_ascii_lowercase()
-        .contains("mysql.user")
+        .to_ascii_lowercase();
+    [
+        "user",
+        "role_edges",
+        "default_roles",
+        "db",
+        "procs_priv",
+        "tables_priv",
+        "columns_priv",
+    ]
+    .iter()
+    .any(|relation| compact.contains(&format!("mysql.{relation}")))
 }
 
 pub fn validate_metadata_projection(conn: &Connection, username: &str) -> Result<(), String> {
@@ -122,9 +133,25 @@ fn rewrite_information_schema_sql(sql: &str, username: &str) -> Option<String> {
     changed.then_some(rewritten)
 }
 
-fn rewrite_mysql_user_sql(sql: &str) -> Option<String> {
-    let rewritten = replace_schema_relation(sql, "mysql", "user", &mysql_user_sql());
-    (rewritten != sql).then_some(rewritten)
+fn rewrite_mysql_system_sql(sql: &str) -> Option<String> {
+    let mut rewritten = sql.to_string();
+    let mut changed = false;
+    for (relation, projection) in [
+        ("role_edges", mysql_role_edges_sql()),
+        ("default_roles", mysql_default_roles_sql()),
+        ("procs_priv", mysql_procs_priv_sql()),
+        ("tables_priv", mysql_tables_priv_sql()),
+        ("columns_priv", mysql_columns_priv_sql()),
+        ("user", mysql_user_sql()),
+        ("db", mysql_db_sql()),
+    ] {
+        let next = replace_schema_relation(&rewritten, "mysql", relation, &projection);
+        if next != rewritten {
+            rewritten = next;
+            changed = true;
+        }
+    }
+    changed.then_some(rewritten)
 }
 
 fn replace_information_schema_relation(sql: &str, relation: &str, projection: &str) -> String {
@@ -141,9 +168,49 @@ fn replace_schema_relation(sql: &str, schema: &str, relation: &str, projection: 
 
 fn mysql_user_sql() -> String {
     "
+    WITH accounts AS (
+        SELECT
+            u.*,
+            EXISTS (
+                SELECT 1
+                FROM rsduck_catalog.rs_user_role ur
+                JOIN rsduck_catalog.rs_role role ON role.role_id = ur.role_id
+                WHERE ur.user_id = u.user_id AND role.role_name = 'admin'
+            ) AS is_admin
+        FROM rsduck_catalog.rs_user u
+    )
     SELECT
-        u.username AS user,
         '%' AS host,
+        u.username AS user,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS select_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS insert_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS update_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS delete_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS drop_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS reload_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS shutdown_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS process_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS file_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS grant_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS references_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS index_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS alter_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS show_db_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS super_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_tmp_table_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS lock_tables_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS execute_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS repl_slave_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS repl_client_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_view_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS show_view_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_routine_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS alter_routine_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_user_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS event_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS trigger_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_tablespace_priv,
         '' AS ssl_type,
         '' AS ssl_cipher,
         '' AS x509_issuer,
@@ -151,18 +218,149 @@ fn mysql_user_sql() -> String {
         0 AS max_questions,
         0 AS max_updates,
         0 AS max_connections,
-        CASE WHEN EXISTS (
-            SELECT 1
-            FROM rsduck_catalog.rs_user_role ur
-            JOIN rsduck_catalog.rs_role role ON role.role_id = ur.role_id
-            WHERE ur.user_id = u.user_id AND role.role_name = 'admin'
-        ) THEN 'Y' ELSE 'N' END AS super_priv,
         0 AS max_user_connections,
         u.mysql_auth_plugin AS plugin,
+        u.mysql_auth_string AS authentication_string,
         'N' AS password_expired,
-        CAST(NULL AS BIGINT) AS password_lifetime
-    FROM rsduck_catalog.rs_user u
-    WHERE u.status = 'active'
+        u.updated_at AS password_last_changed,
+        CAST(NULL AS BIGINT) AS password_lifetime,
+        CASE WHEN u.status = 'active' THEN 'N' ELSE 'Y' END AS account_locked,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS create_role_priv,
+        CASE WHEN u.is_admin THEN 'Y' ELSE 'N' END AS drop_role_priv,
+        CAST(NULL AS BIGINT) AS password_reuse_history,
+        CAST(NULL AS BIGINT) AS password_reuse_time,
+        CAST(NULL AS VARCHAR) AS password_require_current,
+        CAST(NULL AS VARCHAR) AS user_attributes
+    FROM accounts u
+    "
+    .to_string()
+}
+
+fn mysql_role_edges_sql() -> String {
+    "
+    SELECT
+        '%' AS from_host,
+        role.role_name AS from_user,
+        '%' AS to_host,
+        u.username AS to_user
+    FROM rsduck_catalog.rs_user_role ur
+    JOIN rsduck_catalog.rs_role role ON role.role_id = ur.role_id
+    JOIN rsduck_catalog.rs_user u ON u.user_id = ur.user_id
+    ORDER BY role.role_name, u.username
+    "
+    .to_string()
+}
+
+fn mysql_default_roles_sql() -> String {
+    "
+    SELECT
+        '%' AS default_role_host,
+        role.role_name AS default_role_user,
+        '%' AS host,
+        u.username AS user
+    FROM rsduck_catalog.rs_user_role ur
+    JOIN rsduck_catalog.rs_role role ON role.role_id = ur.role_id
+    JOIN rsduck_catalog.rs_user u ON u.user_id = ur.user_id
+    ORDER BY role.role_name, u.username
+    "
+    .to_string()
+}
+
+fn mysql_db_sql() -> String {
+    "
+    WITH schema_privileges AS (
+        SELECT
+            n.nspname AS db,
+            COALESCE(u.username, role.role_name) AS principal_name,
+            privilege.action
+        FROM rsduck_catalog.rs_privilege privilege
+        JOIN rsduck_catalog.rs_schema n ON n.oid = privilege.object_id
+        LEFT JOIN rsduck_catalog.rs_user u
+          ON privilege.principal_type = 'user' AND u.user_id = privilege.principal_id
+        LEFT JOIN rsduck_catalog.rs_role role
+          ON privilege.principal_type = 'role' AND role.role_id = privilege.principal_id
+        WHERE privilege.object_type = 'schema'
+          AND COALESCE(u.username, role.role_name) IS NOT NULL
+    )
+    SELECT
+        '%' AS host,
+        db,
+        principal_name AS user,
+        CASE WHEN max(CASE WHEN action = 'read' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS select_priv,
+        CASE WHEN max(CASE WHEN action = 'write' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS insert_priv,
+        CASE WHEN max(CASE WHEN action = 'write' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS update_priv,
+        CASE WHEN max(CASE WHEN action = 'write' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS delete_priv,
+        CASE WHEN max(CASE WHEN action = 'ddl' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS create_priv,
+        CASE WHEN max(CASE WHEN action = 'ddl' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS drop_priv,
+        'N' AS grant_priv,
+        'N' AS references_priv,
+        CASE WHEN max(CASE WHEN action = 'ddl' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS index_priv,
+        CASE WHEN max(CASE WHEN action = 'ddl' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS alter_priv,
+        'N' AS create_tmp_table_priv,
+        'N' AS lock_tables_priv,
+        CASE WHEN max(CASE WHEN action = 'ddl' THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS create_view_priv,
+        CASE WHEN max(CASE WHEN action IN ('read', 'ddl') THEN 1 ELSE 0 END) = 1 THEN 'Y' ELSE 'N' END AS show_view_priv,
+        'N' AS create_routine_priv,
+        'N' AS alter_routine_priv,
+        'N' AS execute_priv,
+        'N' AS event_priv,
+        'N' AS trigger_priv
+    FROM schema_privileges
+    GROUP BY db, principal_name
+    "
+    .to_string()
+}
+
+fn mysql_tables_priv_sql() -> String {
+    "
+    SELECT
+        '%' AS host,
+        n.nspname AS db,
+        COALESCE(u.username, role.role_name) AS user,
+        c.relname AS table_name,
+        CASE privilege.action
+            WHEN 'read' THEN 'Select'
+            WHEN 'write' THEN 'Insert,Update,Delete'
+            WHEN 'ddl' THEN 'Create,Drop,Index,Alter'
+            ELSE ''
+        END AS table_priv
+    FROM rsduck_catalog.rs_privilege privilege
+    JOIN rsduck_catalog.rs_relation c ON c.oid = privilege.object_id
+    JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace
+    LEFT JOIN rsduck_catalog.rs_user u
+      ON privilege.principal_type = 'user' AND u.user_id = privilege.principal_id
+    LEFT JOIN rsduck_catalog.rs_role role
+      ON privilege.principal_type = 'role' AND role.role_id = privilege.principal_id
+    WHERE privilege.object_type = 'relation'
+      AND COALESCE(u.username, role.role_name) IS NOT NULL
+    "
+    .to_string()
+}
+
+fn mysql_procs_priv_sql() -> String {
+    "
+    SELECT
+        CAST(NULL AS VARCHAR) AS host,
+        CAST(NULL AS VARCHAR) AS db,
+        CAST(NULL AS VARCHAR) AS user,
+        CAST(NULL AS VARCHAR) AS routine_name,
+        CAST(NULL AS VARCHAR) AS routine_type,
+        CAST(NULL AS VARCHAR) AS proc_priv
+    WHERE FALSE
+    "
+    .to_string()
+}
+
+fn mysql_columns_priv_sql() -> String {
+    "
+    SELECT
+        CAST(NULL AS VARCHAR) AS host,
+        CAST(NULL AS VARCHAR) AS db,
+        CAST(NULL AS VARCHAR) AS user,
+        CAST(NULL AS VARCHAR) AS table_name,
+        CAST(NULL AS VARCHAR) AS column_name,
+        CAST(NULL AS VARCHAR) AS column_priv
+    WHERE FALSE
     "
     .to_string()
 }

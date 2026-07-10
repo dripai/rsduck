@@ -135,6 +135,69 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
     assert_eq!(rows[0][12], "N");
 
     let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT * FROM mysql.user u");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 51).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "%");
+    assert_eq!(rows[0][1], "admin");
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT FROM_HOST, FROM_USER, TO_HOST, TO_USER FROM mysql.role_edges");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 4).await;
+    assert!(rows.contains(&vec![
+        "%".to_string(),
+        "admin".to_string(),
+        "%".to_string(),
+        "admin".to_string(),
+    ]));
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(
+        b"SELECT DEFAULT_ROLE_HOST, DEFAULT_ROLE_USER, HOST, USER FROM mysql.default_roles",
+    );
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 4).await;
+    assert!(rows.contains(&vec![
+        "%".to_string(),
+        "admin".to_string(),
+        "%".to_string(),
+        "admin".to_string(),
+    ]));
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT db.Host, db.Db, db.User, db.Select_priv, db.Insert_priv, db.Update_priv, db.Delete_priv, db.Create_priv, db.Drop_priv, db.Grant_priv, db.References_priv, db.Index_priv, db.Alter_priv, db.Create_tmp_table_priv, db.Lock_tables_priv, db.Create_view_priv, db.Show_view_priv, db.Create_routine_priv, db.Alter_routine_priv, db.Execute_priv, db.Event_priv, db.Trigger_priv FROM mysql.db db");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 22).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT pp.Host, pp.Db, pp.User, pp.Routine_name, pp.Routine_type, pp.Proc_priv FROM mysql.procs_priv pp ORDER BY pp.User");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 6).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT tp.Host, tp.Db, tp.User, tp.Table_name, tp.Table_priv FROM mysql.tables_priv tp WHERE tp.Table_priv != '' ORDER BY tp.User");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 5).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT cp.Host, cp.Db, cp.User, cp.Table_name, cp.Column_name, cp.Column_priv FROM mysql.columns_priv cp ORDER BY cp.User");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let rows = read_text_resultset(&mut stream, 6).await;
+    assert!(rows.is_empty());
+
+    let mut query = vec![0x03];
     query.extend_from_slice(b"SHOW FUNCTION STATUS WHERE Db = 'main'");
     let mut seq = 0_u8;
     write_packet(&mut stream, &mut seq, &query).await.unwrap();
