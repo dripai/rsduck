@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::BlockingAuthenticator;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 
 pub(super) async fn send_typed_sql(
     tx: &SyncSender<SqlCommand>,
@@ -51,27 +51,34 @@ where
                         command,
                         resp,
                     } => {
-                        let result = catch_unwind(AssertUnwindSafe(|| {
-                            let _write_guard = if route == SqlRoute::Write {
-                                Some(
-                                    write_gate
-                                        .as_ref()
-                                        .expect("write workers require a snapshot gate")
-                                        .lock()
-                                        .map_err(|_| "snapshot gate is poisoned".to_string())?,
+                        let result = if route == SqlRoute::Write {
+                            let _write_guard = lock_snapshot_gate(
+                                write_gate
+                                    .as_ref()
+                                    .expect("write workers require a snapshot gate"),
+                            );
+                            catch_unwind(AssertUnwindSafe(|| {
+                                execute_typed_sql_blocking(
+                                    &conn,
+                                    &username,
+                                    &sql,
+                                    route,
+                                    &command,
+                                    max_result_rows,
                                 )
-                            } else {
-                                None
-                            };
-                            execute_typed_sql_blocking(
-                                &conn,
-                                &username,
-                                &sql,
-                                route,
-                                &command,
-                                max_result_rows,
-                            )
-                        }))
+                            }))
+                        } else {
+                            catch_unwind(AssertUnwindSafe(|| {
+                                execute_typed_sql_blocking(
+                                    &conn,
+                                    &username,
+                                    &sql,
+                                    route,
+                                    &command,
+                                    max_result_rows,
+                                )
+                            }))
+                        }
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result.map_err(DbError::execution));
                     }
@@ -100,12 +107,12 @@ where
                         sources,
                         resp,
                     } => {
-                        let result = catch_unwind(AssertUnwindSafe(|| {
-                            let _write_guard = write_gate
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
                                 .as_ref()
-                                .expect("write workers require a snapshot gate")
-                                .lock()
-                                .map_err(|_| "snapshot gate is poisoned".to_string())?;
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
                             prepare_snapshot_parquet_extension(&conn, None)?;
                             crate::catalog::import_parquet_tables_as(
                                 &conn, &username, &schema, &sources,
@@ -120,6 +127,16 @@ where
             info!("DuckDB worker stopped: {thread_log_name}");
         })
         .unwrap_or_else(|e| panic!("spawn DuckDB worker {name} failed: {e}"))
+}
+
+fn lock_snapshot_gate(write_gate: &Arc<Mutex<()>>) -> MutexGuard<'_, ()> {
+    match write_gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            error!("snapshot gate was poisoned; recovering lock");
+            poisoned.into_inner()
+        }
+    }
 }
 
 pub(super) fn spawn_snapshot_worker<N>(
@@ -145,10 +162,8 @@ where
                         prefix,
                         resp,
                     } => {
+                        let _write_guard = lock_snapshot_gate(&write_gate);
                         let result = catch_unwind(AssertUnwindSafe(|| {
-                            let _write_guard = write_gate
-                                .lock()
-                                .map_err(|_| "snapshot gate is poisoned".to_string())?;
                             if let Some(username) = username.as_deref() {
                                 crate::catalog::authorize_snapshot(&conn, username)?;
                             }
@@ -178,4 +193,23 @@ where
             info!("DuckDB snapshot worker stopped: {thread_log_name}");
         })
         .unwrap_or_else(|e| panic!("spawn DuckDB snapshot worker {name} failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lock_snapshot_gate;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn snapshot_gate_lock_recovers_from_poison() {
+        let gate = Arc::new(Mutex::new(()));
+        let thread_gate = gate.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = thread_gate.lock().unwrap();
+            panic!("poison snapshot gate");
+        })
+        .join();
+
+        let _guard = lock_snapshot_gate(&gate);
+    }
 }

@@ -1262,10 +1262,12 @@ fn replace_ignore_ascii_case(input: &str, needle: &str, replacement: &str) -> St
     let mut output = String::with_capacity(input.len());
     let mut idx = 0;
     while idx < input.len() {
-        let end = idx + needle.len();
-        if end <= input.len() && input[idx..end].eq_ignore_ascii_case(needle) {
+        if input[idx..]
+            .get(..needle.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+        {
             output.push_str(replacement);
-            idx = end;
+            idx += needle.len();
         } else {
             let ch = input[idx..].chars().next().expect("valid char boundary");
             output.push(ch);
@@ -1324,8 +1326,17 @@ fn mysql_engines_result() -> SqlTypedResult {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_sql;
+    use super::{replace_ignore_ascii_case, rewrite_sql};
     use duckdb::Connection;
+
+    #[test]
+    fn replace_ignore_ascii_case_is_utf8_boundary_safe() {
+        let sql = "INSERT INTO sector_list VALUES ('GN_SEMI', '半导体')";
+        assert_eq!(
+            replace_ignore_ascii_case(sql, "information_schema.tables", "x"),
+            sql
+        );
+    }
 
     #[test]
     fn projects_duckdb_macros_as_mysql_routines_and_parameters() {

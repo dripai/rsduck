@@ -1,8 +1,8 @@
 use super::{
     describe_sql_blocking, execute_sql_blocking, execute_typed_sql_blocking, export_database_sql,
     find_latest_snapshot_dir, import_database_sql, parse_snapshot_dir_timestamp,
-    reset_admin_password_offline, restore_or_initialize, save_snapshot_blocking, SqlParam, SqlType,
-    SqlTypedResult, SqlValue, SNAPSHOT_MANIFEST_FILE,
+    reset_admin_password_offline, restore_or_initialize, save_snapshot_blocking, SqlParam,
+    SqlResult, SqlType, SqlTypedResult, SqlValue, SNAPSHOT_MANIFEST_FILE,
 };
 use crate::sql_route::route_sql;
 use duckdb::Connection;
@@ -334,6 +334,59 @@ fn postgres_catalog_queries_are_rejected_through_db_path() {
     let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
         .unwrap_err();
     assert_eq!(err, "reserved schema is managed by rsduck: pg_catalog");
+}
+
+#[test]
+fn insert_with_chinese_text_executes_through_web_sql_path() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    let create_sql = "CREATE TABLE sector_list (
+        sector_code VARCHAR,
+        sector_name VARCHAR,
+        category VARCHAR,
+        constituent_count INTEGER,
+        source VARCHAR,
+        ingest_batch_id VARCHAR,
+        ingest_at TIMESTAMP
+    )";
+    let decision = route_sql(create_sql).unwrap();
+    execute_sql_blocking(
+        &conn,
+        "admin",
+        create_sql,
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap();
+
+    let insert_sql = "INSERT INTO sector_list
+    VALUES
+      ('GN_SEMI', '半导体', 'concept', 3, 'xtquant', 'batch_20260710_001', now()),
+      ('SW_ELEC', '电子', 'sw_industry', 2, 'xtquant', 'batch_20260710_001', now())";
+    let decision = route_sql(insert_sql).unwrap();
+    let result = execute_sql_blocking(
+        &conn,
+        "admin",
+        insert_sql,
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlResult::Execute { affected_rows, .. } = result else {
+        panic!("expected execute result");
+    };
+    assert_eq!(affected_rows, 2);
+
+    let name: String = conn
+        .query_row(
+            "SELECT sector_name FROM sector_list WHERE sector_code = 'GN_SEMI'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "半导体");
 }
 
 #[test]
