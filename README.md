@@ -122,7 +122,7 @@ Full configuration example:
 [log]
 level = "debug"
 dir = "logs"
-file_name = "rsduck.log"
+file_prefix = "rsduck"
 retain_files = 3
 console = false
 

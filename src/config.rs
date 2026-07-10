@@ -26,8 +26,8 @@ pub struct LogConfig {
     pub level: String,
     #[serde(default = "default_log_dir")]
     pub dir: String,
-    #[serde(default = "default_log_file_name")]
-    pub file_name: String,
+    #[serde(default = "default_log_file_prefix")]
+    pub file_prefix: String,
     #[serde(default = "default_log_retain_files")]
     pub retain_files: usize,
     #[serde(default)]
@@ -173,8 +173,8 @@ fn default_log_dir() -> String {
     "logs".into()
 }
 
-fn default_log_file_name() -> String {
-    "rsduck.log".into()
+fn default_log_file_prefix() -> String {
+    "rsduck".into()
 }
 
 fn default_log_retain_files() -> usize {
@@ -186,7 +186,7 @@ impl Default for LogConfig {
         Self {
             level: default_log_level(),
             dir: default_log_dir(),
-            file_name: default_log_file_name(),
+            file_prefix: default_log_file_prefix(),
             retain_files: default_log_retain_files(),
             console: false,
         }

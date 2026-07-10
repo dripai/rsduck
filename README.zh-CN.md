@@ -122,7 +122,7 @@ ALTER USER admin PASSWORD 'replace_with_a_strong_password';
 [log]
 level = "debug"
 dir = "logs"
-file_name = "rsduck.log"
+file_prefix = "rsduck"
 retain_files = 3
 console = false
 
