@@ -1,5 +1,8 @@
 /target
 /snapshot
+/logs
+/.rsduck.lock
+/.rsduck.lock.guard
 /web/node_modules
 __pycache__/
 *.pyc
