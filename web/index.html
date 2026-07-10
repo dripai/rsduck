@@ -243,6 +243,7 @@ let sqlEditor = null;
 let currentUser = '';
 let uiReady = false;
 const editorHeightKey = 'rsduck.editorHeight';
+const sqlEditorCacheKey = 'rsduck.sqlConsole.currentSql';
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -295,7 +296,6 @@ async function login(event) {
   document.getElementById('loginPassword').value = '';
   showApp(data.username);
   await loadTables();
-  await run();
 }
 
 async function logout() {
@@ -316,7 +316,22 @@ async function initSession() {
   }
   showApp(data.username);
   await loadTables();
-  await run();
+}
+
+function loadCachedSql() {
+  try {
+    return localStorage.getItem(sqlEditorCacheKey) || 'SHOW TABLES;';
+  } catch (error) {
+    return 'SHOW TABLES;';
+  }
+}
+
+function saveCachedSql(sql) {
+  try {
+    localStorage.setItem(sqlEditorCacheKey, sql || '');
+  } catch (error) {
+    // Ignore localStorage failures so the SQL console still works in restricted browsers.
+  }
 }
 
 function setSqlValue(value) {
@@ -354,8 +369,9 @@ function setupSqlEditor() {
   const parent = document.getElementById('sqlEditor');
   sqlEditor = window.RsduckEditor.create({
     parent,
-    initialDoc: 'SHOW TABLES;',
-    onRun: (sql, meta) => runSqlText(sql, true, { batchSelection: meta?.selected === true })
+    initialDoc: loadCachedSql(),
+    onRun: (sql, meta) => runSqlText(sql, true, { batchSelection: meta?.selected === true }),
+    onChange: saveCachedSql
   });
 
   parent.addEventListener('contextmenu', event => {
@@ -567,9 +583,7 @@ function renderTables() {
 
 function selectTable(schema, table) {
   activeTable = schema + '.' + table;
-  setSqlValue(tableSql(schema, table));
   renderTables();
-  run();
 }
 
 async function run(resetPage = true) {

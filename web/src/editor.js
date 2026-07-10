@@ -241,6 +241,7 @@ function createRsduckSqlEditor(options) {
   const parent = options.parent;
   const initialDoc = options.initialDoc || "";
   const onRun = options.onRun || (() => {});
+  const onChange = options.onChange || (() => {});
 
   const view = new EditorView({
     state: EditorState.create({
@@ -250,6 +251,9 @@ function createRsduckSqlEditor(options) {
         sql(),
         rsduckTheme,
         nativeSelectionTheme,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) onChange(update.state.doc.toString());
+        }),
         runKeymap(onRun),
       ],
     }),
