@@ -1,6 +1,12 @@
-# rsduck 开发者使用手册
+# rsduck介绍
 
 语言：[English](README.md) | 中文
+
+相关文档：
+
+- [总体架构设计](doc/architecture-overview.md)
+- [catalog 和权限设计](doc/mysql-compat-auth-catalog-design.md)
+- [实战案例](doc/rsduck-practical-examples.md)
 
 本文面向需要运行、接入、维护或继续开发 rsduck 的工程人员。内容以当前代码行为为准，重点说明可以做什么、不能做什么、失败时如何处理，以及新增能力时必须保持的约束。
 
