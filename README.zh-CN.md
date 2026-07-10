@@ -120,7 +120,7 @@ ALTER USER admin PASSWORD 'replace_with_a_strong_password';
 
 ```toml
 [log]
-level = "debug"
+level = "info"
 dir = "logs"
 file_prefix = "rsduck"
 retain_files = 3

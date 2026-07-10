@@ -120,7 +120,7 @@ Full configuration example:
 
 ```toml
 [log]
-level = "debug"
+level = "info"
 dir = "logs"
 file_prefix = "rsduck"
 retain_files = 3
