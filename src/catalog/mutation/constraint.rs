@@ -237,7 +237,16 @@ pub(in crate::catalog) fn index_columns_to_attnums(
         let attnum = columns
             .iter()
             .find(|column| column.name.eq_ignore_ascii_case(&column_name))
-            .map(|column| column.attnum)
+            .map(|column| {
+                if is_complex_duckdb_type(&column.duckdb_type) {
+                    Err(format!(
+                        "complex column cannot be used in constraint or index: {column_name}"
+                    ))
+                } else {
+                    Ok(column.attnum)
+                }
+            })
+            .transpose()?
             .ok_or_else(|| format!("constraint references unknown column: {column_name}"))?;
         attnums.push(attnum.to_string());
     }
@@ -253,7 +262,17 @@ pub(in crate::catalog) fn ident_columns_to_attnums(
         let attnum = columns
             .iter()
             .find(|column| column.name.eq_ignore_ascii_case(&ident.value))
-            .map(|column| column.attnum)
+            .map(|column| {
+                if is_complex_duckdb_type(&column.duckdb_type) {
+                    Err(format!(
+                        "complex column cannot be used in constraint or index: {}",
+                        ident.value
+                    ))
+                } else {
+                    Ok(column.attnum)
+                }
+            })
+            .transpose()?
             .ok_or_else(|| format!("constraint references unknown column: {}", ident.value))?;
         attnums.push(attnum.to_string());
     }
@@ -422,7 +441,8 @@ pub(in crate::catalog) fn load_duckdb_columns(
             .map_err(|e| format!("read column_index failed: {e}"))?;
         columns.push(CatalogColumn {
             name,
-            type_id: type_id_for_duckdb_type(&duckdb_type)?,
+            type_id: ensure_type_id_for_duckdb_type(conn, &duckdb_type)?,
+            duckdb_type,
             attnum: column_index,
             not_null: !is_nullable,
             default_expr,

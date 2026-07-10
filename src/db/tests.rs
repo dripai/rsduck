@@ -296,6 +296,101 @@ fn typed_query_preserves_complex_values_as_json() {
 }
 
 #[test]
+fn shallow_complex_columns_query_and_restore_as_json() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE sector_snapshot(
+            sector_code VARCHAR,
+            stock_codes VARCHAR[],
+            metrics STRUCT(total_count INTEGER, active_count INTEGER),
+            extra MAP(VARCHAR, VARCHAR),
+            ingest_at TIMESTAMP
+        )",
+    )
+    .unwrap();
+
+    let insert_sql = "\
+        INSERT INTO sector_snapshot VALUES (
+            'GN_SEMI',
+            ['688981.SH', '002371.SZ'],
+            {'total_count': 2, 'active_count': 2},
+            map(['source', 'category'], ['xtquant', 'concept']),
+            TIMESTAMP '2026-07-10 15:04:06'
+        )";
+    let insert_decision = route_sql(insert_sql).unwrap();
+    execute_sql_blocking(
+        &conn,
+        "admin",
+        insert_sql,
+        insert_decision.route,
+        &insert_decision.command,
+        100,
+    )
+    .unwrap();
+
+    assert_sector_snapshot_complex_json(&conn);
+
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_complex_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+    assert_sector_snapshot_complex_json(&restored);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn assert_sector_snapshot_complex_json(conn: &Connection) {
+    let query_sql = "\
+        SELECT stock_codes, metrics, extra
+        FROM sector_snapshot
+        WHERE sector_code = 'GN_SEMI'";
+    let query_decision = route_sql(query_sql).unwrap();
+    let result = execute_typed_sql_blocking(
+        conn,
+        "admin",
+        query_sql,
+        query_decision.route,
+        &query_decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlTypedResult::Query { columns, rows } = result else {
+        panic!("expected typed query result");
+    };
+    assert_eq!(
+        columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.data_type))
+            .collect::<Vec<_>>(),
+        vec![
+            ("stock_codes", SqlType::Json),
+            ("metrics", SqlType::Json),
+            ("extra", SqlType::Json),
+        ]
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            SqlValue::Json(serde_json::json!(["688981.SH", "002371.SZ"])),
+            SqlValue::Json(serde_json::json!({"total_count": 2, "active_count": 2})),
+            SqlValue::Json(serde_json::json!([
+                {"key": "source", "value": "xtquant"},
+                {"key": "category", "value": "concept"}
+            ])),
+        ]]
+    );
+}
+
+#[test]
 fn bind_sql_params_rewrites_numbered_params_outside_literals() {
     let sql = "SELECT $1 AS a, '$2' AS literal, \"$3\" AS ident, -- $4\n$2 AS b, /* $5 */ $1 AS c";
     let bound = super::bind_sql_params(

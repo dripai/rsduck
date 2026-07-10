@@ -552,6 +552,100 @@ fn create_table_rejects_unsupported_duckdb_type_without_leftovers() {
 }
 
 #[test]
+fn create_table_accepts_shallow_complex_column_types() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE sector_snapshot(
+            sector_code VARCHAR,
+            stock_codes VARCHAR[],
+            metrics STRUCT(total_count INTEGER, active_count INTEGER),
+            extra MAP(VARCHAR, VARCHAR)
+        )",
+    )
+    .unwrap();
+
+    let types = conn
+        .prepare(
+            "SELECT a.attname, t.rsduck_physical_type
+             FROM rsduck_catalog.rs_column a
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid
+             JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid
+             WHERE c.relname = 'sector_snapshot'
+             ORDER BY a.attnum",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(types[0], ("sector_code".to_string(), "VARCHAR".to_string()));
+    assert_eq!(
+        types[1],
+        ("stock_codes".to_string(), "VARCHAR[]".to_string())
+    );
+    assert!(types[2].0 == "metrics" && types[2].1.starts_with("STRUCT("));
+    assert_eq!(
+        types[3],
+        ("extra".to_string(), "MAP(VARCHAR, VARCHAR)".to_string())
+    );
+}
+
+#[test]
+fn create_table_rejects_nested_complex_column_types() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    let err = execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE bad_complex(
+            sector_code VARCHAR,
+            metrics STRUCT(total_count INTEGER, stock_codes VARCHAR[])
+        )",
+    )
+    .unwrap_err();
+    assert!(err.contains("nested complex DuckDB types"));
+
+    let catalog_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'bad_complex'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(catalog_count, 0);
+}
+
+#[test]
+fn complex_columns_cannot_be_keys_or_indexes() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    let primary_key_err = execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE bad_complex_key(stock_codes VARCHAR[] PRIMARY KEY)",
+    )
+    .unwrap_err();
+    assert!(primary_key_err.contains("complex column cannot be used as primary key"));
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE sector_snapshot(sector_code VARCHAR, stock_codes VARCHAR[])",
+    )
+    .unwrap();
+    let index_err = execute_catalog_aware_write(
+        &conn,
+        "CREATE INDEX idx_sector_snapshot_codes ON sector_snapshot(stock_codes)",
+    )
+    .unwrap_err();
+    assert!(index_err.contains("complex column cannot be used as index column"));
+}
+
+#[test]
 fn create_partitioned_table_rejects_unsupported_type_without_leftovers() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();

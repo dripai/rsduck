@@ -51,7 +51,16 @@ pub(in crate::catalog) fn create_index_relation(
             let attnum = table_columns
                 .iter()
                 .find(|column| column.name.eq_ignore_ascii_case(column_name))
-                .map(|column| column.attnum)
+                .map(|column| {
+                    if is_complex_duckdb_type(&column.duckdb_type) {
+                        Err(format!(
+                            "complex column cannot be used as index column: {column_name}"
+                        ))
+                    } else {
+                        Ok(column.attnum)
+                    }
+                })
+                .transpose()?
                 .ok_or_else(|| format!("index references unknown column: {column_name}"))?;
             indkey.push(attnum.to_string());
         }

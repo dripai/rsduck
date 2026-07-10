@@ -360,7 +360,17 @@ TIME
 TIMESTAMP
 ```
 
-DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet import fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
+Complex column types:
+
+```text
+<simple_type>[]
+STRUCT(field_name <simple_type>, ...)
+MAP(<simple_type>, <simple_type>)
+```
+
+rsduck supports DuckDB native complex column types, but complex types may not nest other complex types. Complex type internals may only use simple scalar types. Query results serialize complex values as JSON.
+
+Complex columns may be used as ordinary data columns, but are not supported as primary keys, unique keys, index columns, foreign keys, partition keys, or non-`NULL` default values. DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet import fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
 
 ## 8. Ordinary Table Examples
 

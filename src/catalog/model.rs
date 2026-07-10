@@ -39,6 +39,7 @@ pub(super) const AUTH_FAILED: &str = "invalid username or password";
 pub(super) struct CatalogColumn {
     pub(super) name: String,
     pub(super) type_id: i64,
+    pub(super) duckdb_type: String,
     pub(super) attnum: i32,
     pub(super) not_null: bool,
     pub(super) default_expr: Option<String>,

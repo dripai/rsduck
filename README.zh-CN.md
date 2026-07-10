@@ -360,7 +360,17 @@ TIME
 TIMESTAMP
 ```
 
-DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 导入会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
+复杂列类型支持：
+
+```text
+<simple_type>[]
+STRUCT(field_name <simple_type>, ...)
+MAP(<simple_type>, <simple_type>)
+```
+
+rsduck 支持 DuckDB 原生复杂列类型，但不允许复杂类型嵌套复杂类型。复杂列内部只能使用简单标量类型，查询结果统一序列化为 JSON。
+
+复杂列可以作为普通数据列使用，但暂不支持作为主键、唯一键、索引列、外键、分区键，也不支持非 `NULL` 默认值。DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 导入会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
 
 ## 8. 普通表开发案例
 

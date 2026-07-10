@@ -24,6 +24,7 @@ pub(in crate::catalog) fn alter_table_relation(
                     "ALTER TABLE ADD COLUMN position is not supported by rsduck catalog".into(),
                 );
             }
+            validate_column_def_type(column_def)?;
 
             run_catalog_tx(conn, || {
                 let rel_oid = relation_oid(conn, &schema, &table)?;
