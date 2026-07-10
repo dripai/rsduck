@@ -93,8 +93,8 @@ pub struct WebConfig {
     pub enabled: bool,
     #[serde(default = "default_web_bind")]
     pub bind: String,
-    #[serde(default = "default_migration_root")]
-    pub migration_root: String,
+    #[serde(default = "default_parquet_import_root")]
+    pub parquet_import_root: String,
 }
 
 fn default_true() -> bool {
@@ -109,7 +109,7 @@ fn default_snapshot_prefix() -> String {
     "rsduck".into()
 }
 
-fn default_migration_root() -> String {
+fn default_parquet_import_root() -> String {
     ".".into()
 }
 
@@ -234,7 +234,7 @@ impl Default for WebConfig {
         Self {
             enabled: default_true(),
             bind: default_web_bind(),
-            migration_root: default_migration_root(),
+            parquet_import_root: default_parquet_import_root(),
         }
     }
 }

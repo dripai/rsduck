@@ -60,14 +60,14 @@ pub struct SessionResp {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MigrationReq {
+pub struct ParquetImportReq {
     pub source: String,
     pub schema: String,
     pub table: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MigrationResp {
+pub struct ParquetImportResp {
     pub success: bool,
     pub msg: String,
     pub tables: Vec<String>,
@@ -75,7 +75,7 @@ pub struct MigrationResp {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MigrationInfoResp {
+pub struct ParquetImportInfoResp {
     pub success: bool,
     pub root: String,
     pub msg: String,
@@ -86,7 +86,7 @@ pub struct WebState {
     pub db: DbHandle,
     pub snapshot_dir: Arc<String>,
     pub snapshot_prefix: Arc<String>,
-    pub migration_root: Arc<PathBuf>,
+    pub parquet_import_root: Arc<PathBuf>,
     pub sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -302,31 +302,31 @@ async fn snapshot_handler(State(state): State<WebState>, headers: HeaderMap) -> 
     }
 }
 
-async fn migration_info_handler(
+async fn parquet_import_info_handler(
     State(state): State<WebState>,
     headers: HeaderMap,
-) -> Json<MigrationInfoResp> {
+) -> Json<ParquetImportInfoResp> {
     if session_username(&state, &headers).is_none() {
-        return Json(MigrationInfoResp {
+        return Json(ParquetImportInfoResp {
             success: false,
             root: String::new(),
             msg: "authentication required".into(),
         });
     }
-    Json(MigrationInfoResp {
+    Json(ParquetImportInfoResp {
         success: true,
-        root: state.migration_root.display().to_string(),
+        root: state.parquet_import_root.display().to_string(),
         msg: "ok".into(),
     })
 }
 
-async fn migration_handler(
+async fn parquet_import_handler(
     State(state): State<WebState>,
     headers: HeaderMap,
-    Json(req): Json<MigrationReq>,
-) -> Json<MigrationResp> {
+    Json(req): Json<ParquetImportReq>,
+) -> Json<ParquetImportResp> {
     let Some(username) = session_username(&state, &headers) else {
-        return Json(MigrationResp {
+        return Json(ParquetImportResp {
             success: false,
             msg: "authentication required".into(),
             tables: vec![],
@@ -334,10 +334,10 @@ async fn migration_handler(
         });
     };
     let t0 = Instant::now();
-    let sources = match resolve_migration_sources(&state.migration_root, &req) {
+    let sources = match resolve_parquet_import_sources(&state.parquet_import_root, &req) {
         Ok(sources) => sources,
         Err(msg) => {
-            return Json(MigrationResp {
+            return Json(ParquetImportResp {
                 success: false,
                 msg,
                 tables: vec![],
@@ -355,7 +355,7 @@ async fn migration_handler(
         .import_parquet_tables_as(username, req.schema, sources)
         .await
     {
-        Ok(rows) => Json(MigrationResp {
+        Ok(rows) => Json(ParquetImportResp {
             success: true,
             msg: format!(
                 "imported {} table(s), {rows} row(s) ({:.2?})",
@@ -365,7 +365,7 @@ async fn migration_handler(
             tables,
             rows,
         }),
-        Err(e) => Json(MigrationResp {
+        Err(e) => Json(ParquetImportResp {
             success: false,
             msg: format!("Parquet import failed: {e}"),
             tables: vec![],
@@ -374,35 +374,35 @@ async fn migration_handler(
     }
 }
 
-fn resolve_migration_sources(
-    migration_root: &Path,
-    req: &MigrationReq,
+fn resolve_parquet_import_sources(
+    parquet_import_root: &Path,
+    req: &ParquetImportReq,
 ) -> Result<Vec<ParquetImportSource>, String> {
     let source = req.source.trim();
     if source.is_empty() {
-        return Err("migration source path cannot be empty".into());
+        return Err("Parquet import source path cannot be empty".into());
     }
     let relative = Path::new(source);
     if relative.is_absolute() {
-        return Err("migration source path must be relative to the configured root".into());
+        return Err("Parquet import source path must be relative to the configured root".into());
     }
-    let root = fs::canonicalize(migration_root).map_err(|e| {
+    let root = fs::canonicalize(parquet_import_root).map_err(|e| {
         format!(
-            "migration root is unavailable: {}: {e}",
-            migration_root.display()
+            "Parquet import root is unavailable: {}: {e}",
+            parquet_import_root.display()
         )
     })?;
     let source_path = fs::canonicalize(root.join(relative))
-        .map_err(|e| format!("migration source is unavailable: {source}: {e}"))?;
+        .map_err(|e| format!("Parquet import source is unavailable: {source}: {e}"))?;
     if !source_path.starts_with(&root) {
-        return Err("migration source escapes the configured root".into());
+        return Err("Parquet import source escapes the configured root".into());
     }
 
     let metadata = fs::metadata(&source_path)
-        .map_err(|e| format!("read migration source metadata failed: {e}"))?;
+        .map_err(|e| format!("read Parquet import source metadata failed: {e}"))?;
     let mut files = if metadata.is_file() {
         if !is_parquet_file(&source_path) {
-            return Err("migration source file must use the .parquet extension".into());
+            return Err("Parquet import source file must use the .parquet extension".into());
         }
         vec![source_path]
     } else if metadata.is_dir() {
@@ -410,22 +410,22 @@ fn resolve_migration_sources(
             return Err("target table can only be specified for a single Parquet file".into());
         }
         fs::read_dir(&source_path)
-            .map_err(|e| format!("read migration source directory failed: {e}"))?
+            .map_err(|e| format!("read Parquet import source directory failed: {e}"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read migration source entry failed: {e}"))?
+            .map_err(|e| format!("read Parquet import source entry failed: {e}"))?
             .into_iter()
             .filter(|path| path.is_file() && is_parquet_file(path))
             .collect::<Vec<_>>()
     } else {
-        return Err("migration source must be a Parquet file or directory".into());
+        return Err("Parquet import source must be a Parquet file or directory".into());
     };
     files.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
     if files.is_empty() {
-        return Err("migration source contains no .parquet files".into());
+        return Err("Parquet import source contains no .parquet files".into());
     }
     if files.len() > 256 {
-        return Err("migration supports at most 256 Parquet files per batch".into());
+        return Err("Parquet import supports at most 256 files per batch".into());
     }
 
     files
@@ -467,7 +467,7 @@ pub fn web_router(
     db: DbHandle,
     snapshot_dir: String,
     snapshot_prefix: String,
-    migration_root: String,
+    parquet_import_root: String,
 ) -> Router {
     Router::new()
         .route("/", get(index_page))
@@ -478,14 +478,14 @@ pub fn web_router(
         .route("/sql", post(sql_handler))
         .route("/snapshot", post(snapshot_handler))
         .route(
-            "/migration",
-            get(migration_info_handler).post(migration_handler),
+            "/parquet-import",
+            get(parquet_import_info_handler).post(parquet_import_handler),
         )
         .with_state(WebState {
             db,
             snapshot_dir: Arc::new(snapshot_dir),
             snapshot_prefix: Arc::new(snapshot_prefix),
-            migration_root: Arc::new(PathBuf::from(migration_root)),
+            parquet_import_root: Arc::new(PathBuf::from(parquet_import_root)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         })
 }
@@ -516,7 +516,7 @@ fn new_session_token() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{paged_sql, parse_session_token, resolve_migration_sources, MigrationReq};
+    use super::{paged_sql, parse_session_token, resolve_parquet_import_sources, ParquetImportReq};
     use axum::http::{header, HeaderMap, HeaderValue};
     use std::fs;
 
@@ -549,9 +549,9 @@ mod tests {
     }
 
     #[test]
-    fn migration_directory_maps_each_parquet_file_to_one_table() {
+    fn parquet_import_directory_maps_each_file_to_one_table() {
         let temp = std::env::temp_dir().join(format!(
-            "rsduck_web_migration_{}_{}",
+            "rsduck_web_parquet_import_{}_{}",
             std::process::id(),
             chrono::Local::now()
                 .timestamp_nanos_opt()
@@ -564,9 +564,9 @@ mod tests {
         fs::write(batch.join("beta.PARQUET"), b"").unwrap();
         fs::write(batch.join("schema.sql"), b"").unwrap();
 
-        let sources = resolve_migration_sources(
+        let sources = resolve_parquet_import_sources(
             &root,
-            &MigrationReq {
+            &ParquetImportReq {
                 source: "batch".into(),
                 schema: "main".into(),
                 table: None,
@@ -585,9 +585,9 @@ mod tests {
     }
 
     #[test]
-    fn migration_source_cannot_escape_configured_root() {
+    fn parquet_import_source_cannot_escape_configured_root() {
         let temp = std::env::temp_dir().join(format!(
-            "rsduck_web_migration_escape_{}_{}",
+            "rsduck_web_parquet_import_escape_{}_{}",
             std::process::id(),
             chrono::Local::now()
                 .timestamp_nanos_opt()
@@ -597,9 +597,9 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(temp.join("outside.parquet"), b"").unwrap();
 
-        let error = resolve_migration_sources(
+        let error = resolve_parquet_import_sources(
             &root,
-            &MigrationReq {
+            &ParquetImportReq {
                 source: "../outside.parquet".into(),
                 schema: "main".into(),
                 table: None,

@@ -182,7 +182,7 @@ pub(in crate::catalog) fn insert_constraint(
         ),
         [],
     )
-    .map_err(|e| format!("write pg_constraint failed: {e}"))?;
+    .map_err(|e| format!("write rs_constraint failed: {e}"))?;
     insert_constraint_dependencies(conn, oid, rel_oid, conkey, confrelid, confkey)?;
     Ok(())
 }

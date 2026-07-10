@@ -13,10 +13,9 @@ impl BlockingAuthenticator for CatalogAuthenticator {
         request: &AuthRequest,
     ) -> Result<AuthenticatedPrincipal, String> {
         match (request.protocol, &request.credential) {
-            (
-                crate::auth::AuthProtocol::WebApi | crate::auth::AuthProtocol::PgWire,
-                AuthCredential::CleartextPassword(password),
-            ) => authenticate_cleartext_user(conn, &request.username, password),
+            (crate::auth::AuthProtocol::WebApi, AuthCredential::CleartextPassword(password)) => {
+                authenticate_cleartext_user(conn, &request.username, password)
+            }
             (crate::auth::AuthProtocol::MySqlWire, AuthCredential::MySqlNativePassword { .. }) => {
                 warn_auth_failure(
                     &request.username,

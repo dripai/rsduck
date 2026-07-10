@@ -417,7 +417,7 @@ Web API 返回 `sql_type` 和 `mysql_type`。MySQL protocol 层把 `SqlType` 映
 - Web `sql_type/mysql_type` 展示。
 - MySQL column type 映射。
 - Snapshot 保存恢复。
-- Parquet 迁移。
+- Parquet 导入。
 - 测试。
 
 ## 16. Snapshot 与 Catalog 的关系
@@ -462,7 +462,7 @@ Navicat 的对象树会触发很多 metadata 查询。rsduck 的策略是：
 - 外部 SQL 不能直接写 `rsduck_catalog`、`rsduck_internal`、`information_schema`、`pg_catalog`。
 - 用户、角色和权限只能通过 DDL 或管理命令修改。
 - Snapshot 手工保存需要 `manage_snapshot`。
-- Parquet 迁移路径必须限制在 `web.migration_root` 下。
+- Parquet 导入路径必须限制在 `web.parquet_import_root` 下。
 - 未支持的 MySQL metadata relation 不应自动放行到 DuckDB 内部 catalog。
 
 ## 19. 新增兼容能力的开发规则

@@ -29,9 +29,9 @@ button, input, textarea { font: inherit; }
 .icon-button { height: 28px; padding: 0 9px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; color: #334155; cursor: pointer; font-size: 12px; }
 .icon-button:hover { background: #edf4ff; border-color: #7daeea; }
 .schema-actions { display: flex; margin-top: 7px; }
-.migration-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; height: 29px; padding: 0 10px; border: 1px solid #93a4b8; border-radius: 4px; color: #263445; background: #fff; cursor: pointer; font-size: 12px; }
-.migration-button:hover { color: #0b61c9; border-color: #6f9fd8; background: #edf4ff; }
-.migration-button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
+.parquet-import-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; height: 29px; padding: 0 10px; border: 1px solid #93a4b8; border-radius: 4px; color: #263445; background: #fff; cursor: pointer; font-size: 12px; }
+.parquet-import-button:hover { color: #0b61c9; border-color: #6f9fd8; background: #edf4ff; }
+.parquet-import-button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
 .tree { overflow: auto; padding: 6px 0 12px; flex: 1; }
 .schema-group { margin: 2px 0 8px; }
 .schema-name { padding: 5px 12px; color: #526172; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
@@ -101,7 +101,7 @@ tbody tr:nth-child(even) { background: #fafbfc; }
 .dialog-field input { width: 100%; height: 32px; padding: 5px 8px; border: 1px solid #b9c4d3; border-radius: 4px; background: #fff; }
 .dialog-field input:focus { outline: 2px solid #8fc2ff; border-color: #1a73e8; }
 .dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.migration-root { overflow-wrap: anywhere; margin-bottom: 12px; padding: 7px 8px; border: 1px solid #d8dde6; border-radius: 4px; color: #526172; background: #f4f6f8; font: 12px Consolas, monospace; }
+.parquet-import-root { overflow-wrap: anywhere; margin-bottom: 12px; padding: 7px 8px; border: 1px solid #d8dde6; border-radius: 4px; color: #526172; background: #f4f6f8; font: 12px Consolas, monospace; }
 .dialog-error { min-height: 18px; color: #b42318; font-size: 12px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px 15px; }
 .primary-button:disabled, .secondary-button:disabled { color: #8995a5; border-color: #c8d0dc; background: #eef1f4; cursor: wait; }
@@ -148,7 +148,7 @@ tbody tr:nth-child(even) { background: #fafbfc; }
         <button class="icon-button" onclick="loadTables()" title="Refresh tables">Refresh</button>
       </div>
       <div class="schema-actions">
-        <button class="migration-button" type="button" onclick="openMigrationDialog()" title="Import Parquet tables">
+        <button class="parquet-import-button" type="button" onclick="openParquetImportDialog()" title="Import Parquet tables">
           <span aria-hidden="true">&#8681;</span>
           <span>Import Parquet</span>
         </button>
@@ -196,36 +196,36 @@ tbody tr:nth-child(even) { background: #fafbfc; }
     </section>
   </main>
 </div>
-<div id="migrationDialog" class="modal-backdrop" hidden onclick="closeMigrationFromBackdrop(event)">
-  <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="migrationTitle" onsubmit="submitMigration(event)">
+<div id="parquetImportDialog" class="modal-backdrop" hidden onclick="closeParquetImportFromBackdrop(event)">
+  <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="parquetImportTitle" onsubmit="submitParquetImport(event)">
     <div class="dialog-header">
-      <div id="migrationTitle" class="dialog-title">Import Parquet Tables</div>
-      <button class="dialog-close" type="button" onclick="closeMigrationDialog()" title="Close" aria-label="Close">&#215;</button>
+      <div id="parquetImportTitle" class="dialog-title">Import Parquet Tables</div>
+      <button class="dialog-close" type="button" onclick="closeParquetImportDialog()" title="Close" aria-label="Close">&#215;</button>
     </div>
     <div class="dialog-body">
       <label class="dialog-field">
-        <span>Migration root</span>
-        <span id="migrationRoot" class="migration-root">Loading...</span>
+        <span>Parquet import root</span>
+        <span id="parquetImportRoot" class="parquet-import-root">Loading...</span>
       </label>
       <label class="dialog-field">
         <span>Source path</span>
-        <input id="migrationSource" value="." required autocomplete="off">
+        <input id="parquetImportSource" value="." required autocomplete="off">
       </label>
       <div class="dialog-grid">
         <label class="dialog-field">
           <span>Target schema</span>
-          <input id="migrationSchema" value="main" required autocomplete="off">
+          <input id="parquetImportSchema" value="main" required autocomplete="off">
         </label>
         <label class="dialog-field">
           <span>Target table (single file)</span>
-          <input id="migrationTable" autocomplete="off">
+          <input id="parquetImportTable" autocomplete="off">
         </label>
       </div>
-      <div id="migrationMsg" class="dialog-error" role="alert"></div>
+      <div id="parquetImportMsg" class="dialog-error" role="alert"></div>
     </div>
     <div class="dialog-actions">
-      <button class="secondary-button" type="button" onclick="closeMigrationDialog()">Cancel</button>
-      <button id="migrationSubmit" class="primary-button" type="submit">Import</button>
+      <button class="secondary-button" type="button" onclick="closeParquetImportDialog()">Cancel</button>
+      <button id="parquetImportSubmit" class="primary-button" type="submit">Import</button>
     </div>
   </form>
 </div>
@@ -347,7 +347,7 @@ function hideSqlContextMenu() {
 function executeContextSql() {
   const sql = contextSql;
   hideSqlContextMenu();
-  if (sql) runSqlText(sql, true);
+  if (sql) runSqlText(sql, true, { batchSelection: true });
 }
 
 function setupSqlEditor() {
@@ -355,7 +355,7 @@ function setupSqlEditor() {
   sqlEditor = window.RsduckEditor.create({
     parent,
     initialDoc: 'SHOW TABLES;',
-    onRun: sql => runSqlText(sql, true)
+    onRun: (sql, meta) => runSqlText(sql, true, { batchSelection: meta?.selected === true })
   });
 
   parent.addEventListener('contextmenu', event => {
@@ -387,7 +387,102 @@ function shouldRefreshTables(sql) {
     .replace(/--.*$/gm, ' ')
     .trim();
   const command = cleanSql.split(/\s+/)[0]?.toUpperCase() || '';
-  return ['CREATE', 'DROP', 'ALTER', 'IMPORT', 'ATTACH', 'DETACH'].includes(command);
+  return ['CREATE', 'DROP', 'ALTER', 'COMMENT', 'IMPORT', 'ATTACH', 'DETACH'].includes(command);
+}
+
+function hasExecutableSql(sql) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ')
+    .trim()
+    .length > 0;
+}
+
+function splitSqlStatements(sql) {
+  const statements = [];
+  let start = 0;
+  let state = 'normal';
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (state === 'lineComment') {
+      if (ch === '\n' || ch === '\r') state = 'normal';
+      continue;
+    }
+
+    if (state === 'blockComment') {
+      if (ch === '*' && next === '/') {
+        i += 1;
+        state = 'normal';
+      }
+      continue;
+    }
+
+    if (state === 'singleQuote') {
+      if (ch === "'" && next === "'") {
+        i += 1;
+      } else if (ch === "'") {
+        state = 'normal';
+      }
+      continue;
+    }
+
+    if (state === 'doubleQuote') {
+      if (ch === '"' && next === '"') {
+        i += 1;
+      } else if (ch === '"') {
+        state = 'normal';
+      }
+      continue;
+    }
+
+    if (state === 'backtick') {
+      if (ch === '`' && next === '`') {
+        i += 1;
+      } else if (ch === '`') {
+        state = 'normal';
+      }
+      continue;
+    }
+
+    if (ch === '-' && next === '-') {
+      i += 1;
+      state = 'lineComment';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 1;
+      state = 'blockComment';
+      continue;
+    }
+    if (ch === "'") {
+      state = 'singleQuote';
+      continue;
+    }
+    if (ch === '"') {
+      state = 'doubleQuote';
+      continue;
+    }
+    if (ch === '`') {
+      state = 'backtick';
+      continue;
+    }
+    if (ch === ';') {
+      const statement = sql.slice(start, i).trim();
+      if (hasExecutableSql(statement)) statements.push(statement);
+      start = i + 1;
+    }
+  }
+
+  const tail = sql.slice(start).trim();
+  if (hasExecutableSql(tail)) statements.push(tail);
+  return statements;
+}
+
+function sqlSummary(sql) {
+  return sql.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 
 async function postSql(sql, page = 0, pageSize = 1000) {
@@ -478,13 +573,72 @@ function selectTable(schema, table) {
 }
 
 async function run(resetPage = true) {
-  const sql = (getSelectedSql() || getSqlValue()).trim();
-  return runSqlText(sql, resetPage);
+  const selectedSql = getSelectedSql();
+  const sql = (selectedSql || getSqlValue()).trim();
+  return runSqlText(sql, resetPage, { batchSelection: Boolean(selectedSql) });
 }
 
-async function runSqlText(sql, resetPage = true) {
+function renderBatchResult(items) {
+  const tbl = document.getElementById('tbl');
+  let html = '<thead><tr><th>#</th><th>Status</th><th>SQL</th><th>Message</th><th>ms</th></tr></thead><tbody>';
+  for (const item of items) {
+    html += '<tr>';
+    html += '<td>' + item.index + '</td>';
+    html += '<td>' + escapeHtml(item.success ? 'ok' : 'error') + '</td>';
+    html += '<td>' + escapeHtml(item.sql) + '</td>';
+    html += '<td>' + escapeHtml(item.message) + '</td>';
+    html += '<td>' + escapeHtml(item.ms) + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody>';
+  tbl.innerHTML = html;
+}
+
+async function runSqlBatch(statements, pageSize) {
+  const msg = document.getElementById('msg');
+  const results = [];
+  const totalStart = performance.now();
+  let shouldRefresh = false;
+
+  document.getElementById('pageLabel').innerText = 'Page 1';
+  for (let i = 0; i < statements.length; i += 1) {
+    const statement = statements[i];
+    msg.innerText = 'Running statement ' + (i + 1) + '/' + statements.length + '...';
+    const t0 = performance.now();
+    const data = await postSql(statement, 0, pageSize);
+    const ms = (performance.now() - t0).toFixed(1);
+    const result = {
+      index: i + 1,
+      success: data.success,
+      sql: sqlSummary(statement),
+      message: data.success ? data.msg : data.msg,
+      ms
+    };
+    results.push(result);
+    renderBatchResult(results);
+    if (shouldRefreshTables(statement)) shouldRefresh = true;
+    if (!data.success) {
+      msg.innerText = 'Error at statement ' + (i + 1) + '/' + statements.length + ': ' + data.msg;
+      if (shouldRefresh) loadTables(false);
+      return;
+    }
+  }
+
+  const totalMs = (performance.now() - totalStart).toFixed(1);
+  msg.innerText = 'Batch ok: ' + statements.length + ' statements in ' + totalMs + 'ms';
+  if (shouldRefresh) loadTables(false);
+}
+
+async function runSqlText(sql, resetPage = true, options = {}) {
   sql = sql.trim();
   if (!sql) return;
+  const statements = options.batchSelection ? splitSqlStatements(sql) : [];
+  if (statements.length > 1) {
+    if (resetPage || sql !== lastSql) currentPage = 0;
+    lastSql = sql;
+    const pageSize = Math.max(1, Math.min(100000, Number(document.getElementById('pageSize').value) || 100));
+    return runSqlBatch(statements, pageSize);
+  }
   if (resetPage || sql !== lastSql) currentPage = 0;
   lastSql = sql;
   const pageSize = Math.max(1, Math.min(100000, Number(document.getElementById('pageSize').value) || 100));
@@ -492,6 +646,7 @@ async function runSqlText(sql, resetPage = true) {
   const data = await postSql(sql, currentPage, pageSize);
   const ms = (performance.now() - t0).toFixed(1);
   const msg = document.getElementById('msg');
+  const refreshTables = shouldRefreshTables(sql);
   if (!data.success) {
     msg.innerText = 'Error: ' + data.msg;
     return;
@@ -501,6 +656,7 @@ async function runSqlText(sql, resetPage = true) {
   const tbl = document.getElementById('tbl');
   if (!data.columns.length) {
     tbl.innerHTML = '';
+    if (refreshTables) loadTables(false);
     return;
   }
   let html = '<thead><tr>' + data.columns.map(c => '<th>' + escapeHtml(c.name) + '</th>').join('') + '</tr></thead><tbody>';
@@ -509,7 +665,7 @@ async function runSqlText(sql, resetPage = true) {
   }
   html += '</tbody>';
   tbl.innerHTML = html;
-  if (shouldRefreshTables(sql)) loadTables(false);
+  if (refreshTables) loadTables(false);
 }
 
 function nextPage() {
@@ -540,48 +696,48 @@ async function saveSnapshot() {
   }
 }
 
-async function openMigrationDialog() {
-  const dialog = document.getElementById('migrationDialog');
-  const root = document.getElementById('migrationRoot');
-  document.getElementById('migrationMsg').innerText = '';
-  document.getElementById('migrationSource').value = '.';
-  document.getElementById('migrationSchema').value = 'main';
-  document.getElementById('migrationTable').value = '';
+async function openParquetImportDialog() {
+  const dialog = document.getElementById('parquetImportDialog');
+  const root = document.getElementById('parquetImportRoot');
+  document.getElementById('parquetImportMsg').innerText = '';
+  document.getElementById('parquetImportSource').value = '.';
+  document.getElementById('parquetImportSchema').value = 'main';
+  document.getElementById('parquetImportTable').value = '';
   root.innerText = 'Loading...';
   dialog.hidden = false;
   try {
-    const resp = await fetch('/migration');
+    const resp = await fetch('/parquet-import');
     const data = await resp.json();
     root.innerText = data.success ? data.root : data.msg;
   } catch (error) {
-    root.innerText = 'Failed to load migration root';
+    root.innerText = 'Failed to load Parquet import root';
   }
-  document.getElementById('migrationSource').focus();
+  document.getElementById('parquetImportSource').focus();
 }
 
-function closeMigrationDialog() {
-  if (document.getElementById('migrationSubmit').disabled) return;
-  document.getElementById('migrationDialog').hidden = true;
+function closeParquetImportDialog() {
+  if (document.getElementById('parquetImportSubmit').disabled) return;
+  document.getElementById('parquetImportDialog').hidden = true;
 }
 
-function closeMigrationFromBackdrop(event) {
-  if (event.target === event.currentTarget) closeMigrationDialog();
+function closeParquetImportFromBackdrop(event) {
+  if (event.target === event.currentTarget) closeParquetImportDialog();
 }
 
-async function submitMigration(event) {
+async function submitParquetImport(event) {
   event.preventDefault();
-  const submit = document.getElementById('migrationSubmit');
-  const message = document.getElementById('migrationMsg');
-  const table = document.getElementById('migrationTable').value.trim();
+  const submit = document.getElementById('parquetImportSubmit');
+  const message = document.getElementById('parquetImportMsg');
+  const table = document.getElementById('parquetImportTable').value.trim();
   const payload = {
-    source: document.getElementById('migrationSource').value.trim(),
-    schema: document.getElementById('migrationSchema').value.trim(),
+    source: document.getElementById('parquetImportSource').value.trim(),
+    schema: document.getElementById('parquetImportSchema').value.trim(),
     table: table || null
   };
   submit.disabled = true;
   message.innerText = '';
   try {
-    const resp = await fetch('/migration', {
+    const resp = await fetch('/parquet-import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -592,7 +748,7 @@ async function submitMigration(event) {
       return;
     }
     document.getElementById('msg').innerText = data.msg;
-    document.getElementById('migrationDialog').hidden = true;
+    document.getElementById('parquetImportDialog').hidden = true;
     await loadTables();
   } catch (error) {
     message.innerText = 'Parquet import request failed';
@@ -656,8 +812,8 @@ function setupEditorSplitter() {
 }
 
 window.addEventListener('keydown', event => {
-  const dialog = document.getElementById('migrationDialog');
-  if (event.key === 'Escape' && !dialog.hidden) closeMigrationDialog();
+  const dialog = document.getElementById('parquetImportDialog');
+  if (event.key === 'Escape' && !dialog.hidden) closeParquetImportDialog();
 });
 
 initSession();

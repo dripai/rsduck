@@ -36,7 +36,7 @@ pub(in crate::catalog) fn insert_relation_rows(
         ),
         [],
     )
-    .map_err(|e| format!("write pg_class failed: {e}"))?;
+    .map_err(|e| format!("write rs_relation failed: {e}"))?;
 
     for column in columns {
         insert_attribute_row(conn, rel_oid, column)?;
@@ -76,7 +76,7 @@ pub(in crate::catalog) fn insert_attribute_row(
         ),
         [],
     )
-    .map_err(|e| format!("write pg_attribute failed: {e}"))?;
+    .map_err(|e| format!("write rs_column failed: {e}"))?;
 
     if let Some(default_expr) = &column.default_expr {
         let default_oid = allocate_oid(conn)?;
@@ -89,7 +89,7 @@ pub(in crate::catalog) fn insert_attribute_row(
             ),
             [],
         )
-        .map_err(|e| format!("write pg_attrdef failed: {e}"))?;
+        .map_err(|e| format!("write rs_column_default failed: {e}"))?;
     }
     Ok(())
 }

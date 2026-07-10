@@ -126,7 +126,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
          FROM rsduck_catalog.rs_relation c \
          LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = c.relnamespace \
          WHERE n.oid IS NULL",
-        "pg_class.relnamespace must reference pg_namespace",
+        "rs_relation.relnamespace must reference rs_schema",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -134,7 +134,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
          FROM rsduck_catalog.rs_column a \
          LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid \
          WHERE c.oid IS NULL",
-        "pg_attribute.attrelid must reference pg_class",
+        "rs_column.attrelid must reference rs_relation",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -142,7 +142,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
          FROM rsduck_catalog.rs_column a \
          LEFT JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid \
          WHERE t.oid IS NULL",
-        "pg_attribute.atttypid must reference pg_type",
+        "rs_column.atttypid must reference rs_type",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -162,7 +162,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              WHERE classid NOT IN ({OBJECT_RELATION_KIND}, {OBJECT_CONSTRAINT_KIND}, {OBJECT_SCHEMA_KIND}) \
                 OR refclassid NOT IN ({OBJECT_RELATION_KIND}, {OBJECT_CONSTRAINT_KIND}, {OBJECT_SCHEMA_KIND})"
         ),
-        "pg_depend classid/refclassid must reference supported catalog classes",
+        "rs_dependency classid/refclassid must reference supported catalog classes",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -172,7 +172,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = d.objid \
              WHERE d.classid = {OBJECT_RELATION_KIND} AND c.oid IS NULL"
         ),
-        "pg_depend class object must reference pg_class",
+        "rs_dependency relation object must reference rs_relation",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -182,7 +182,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_relation c ON c.oid = d.refobjid \
              WHERE d.refclassid = {OBJECT_RELATION_KIND} AND c.oid IS NULL"
         ),
-        "pg_depend referenced class object must reference pg_class",
+        "rs_dependency referenced relation object must reference rs_relation",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -192,7 +192,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_constraint con ON con.oid = d.objid \
              WHERE d.classid = {OBJECT_CONSTRAINT_KIND} AND con.oid IS NULL"
         ),
-        "pg_depend constraint object must reference pg_constraint",
+        "rs_dependency constraint object must reference rs_constraint",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -202,7 +202,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_constraint con ON con.oid = d.refobjid \
              WHERE d.refclassid = {OBJECT_CONSTRAINT_KIND} AND con.oid IS NULL"
         ),
-        "pg_depend referenced constraint object must reference pg_constraint",
+        "rs_dependency referenced constraint object must reference rs_constraint",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -212,7 +212,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = d.objid \
              WHERE d.classid = {OBJECT_SCHEMA_KIND} AND n.oid IS NULL"
         ),
-        "pg_depend namespace object must reference pg_namespace",
+        "rs_dependency schema object must reference rs_schema",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -222,7 +222,7 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
              LEFT JOIN rsduck_catalog.rs_schema n ON n.oid = d.refobjid \
              WHERE d.refclassid = {OBJECT_SCHEMA_KIND} AND n.oid IS NULL"
         ),
-        "pg_depend referenced namespace object must reference pg_namespace",
+        "rs_dependency referenced schema object must reference rs_schema",
     )?;
     Ok(())
 }

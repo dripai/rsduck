@@ -27,7 +27,7 @@ pub(in crate::catalog) fn create_schema(
             ),
             [],
         )
-        .map_err(|e| format!("write pg_namespace failed: {e}"))?;
+        .map_err(|e| format!("write rs_schema failed: {e}"))?;
         conn.execute(&format!("CREATE SCHEMA {}", quote_ident(&schema)), [])
             .map_err(|e| format!("execute DuckDB CREATE SCHEMA failed: {e}"))?;
         finish_journal(conn, journal_id)?;

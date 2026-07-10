@@ -22,6 +22,13 @@ pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
         });
     }
 
+    if looks_like_comment_on(sql) {
+        return Ok(SqlRouteDecision {
+            route: SqlRoute::Write,
+            command: "COMMENT".to_string(),
+        });
+    }
+
     let dialect = DuckDbDialect {};
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| format!("sql parse failed: {e}"))?;
@@ -38,6 +45,11 @@ pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
         route: statement_route(statement),
         command: statement_command(statement).to_string(),
     })
+}
+
+fn looks_like_comment_on(sql: &str) -> bool {
+    let normalized = sql.trim_start().to_ascii_lowercase();
+    normalized.starts_with("comment on ")
 }
 
 pub fn is_pageable_sql(sql: &str) -> Result<bool, String> {
@@ -254,6 +266,9 @@ mod tests {
             route_sql("CREATE TABLE t(id INTEGER)").unwrap().route,
             SqlRoute::Write
         );
+        let comment = route_sql("COMMENT ON TABLE quotes IS 'quotes table'").unwrap();
+        assert_eq!(comment.route, SqlRoute::Write);
+        assert_eq!(comment.command, "COMMENT");
         assert_eq!(
             route_sql("CREATE USER alice PASSWORD='pw'")
                 .unwrap()

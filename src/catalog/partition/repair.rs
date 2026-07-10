@@ -130,7 +130,7 @@ pub(in crate::catalog) fn repair_non_active_partition(
             ),
             [],
         )
-        .map_err(|e| format!("mark repaired partition pg_class failed: {e}"))?;
+        .map_err(|e| format!("mark repaired partition rs_relation failed: {e}"))?;
         update_partition_relation_ext(
             conn,
             child_oid,

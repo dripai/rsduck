@@ -9,7 +9,7 @@ This document is for engineers who need to run, integrate, maintain, or continue
 rsduck is an in-memory database service built on DuckDB. It exposes:
 
 - A MySQL wire protocol endpoint for Navicat and MySQL clients.
-- A Web SQL console with query, pagination, snapshot, and Parquet table migration features.
+- A Web SQL console with query, pagination, snapshot, and Parquet table import features.
 - The `rsduck_catalog.rs_*` metadata and privilege system.
 - Ordinary tables, views, indexes, users, roles, and managed range-partitioned tables.
 - Snapshot v2 persistence and restore.
@@ -153,7 +153,7 @@ bind = "127.0.0.1:13306"
 [web]
 enabled = true
 bind = "127.0.0.1:13307"
-migration_root = "."
+parquet_import_root = "."
 ```
 
 ### 4.1 Configuration Rules
@@ -164,7 +164,7 @@ migration_root = "."
 - When a queue reaches its capacity, rsduck returns a clear queue full error. It does not switch to another execution path automatically.
 - `max_result_rows` is the server-side maximum result size for one request. It is not the same as the Web page size.
 - `snapshot.prefix` only accepts safe snapshot directory prefixes. An unsafe prefix prevents startup.
-- `migration_root` is the root directory allowed for Web Parquet migration. Migration requests may only use relative paths under this directory.
+- `parquet_import_root` is the root directory allowed for Web Parquet import. Import requests may only use relative paths under this directory.
 
 ### 4.2 Startup Data Sources
 
@@ -331,7 +331,7 @@ Queries go to read workers. Write operations go to the serialized write worker.
 |---|---|---|
 | `CREATE SCHEMA` | Supported | Requires system `manage_catalog` |
 | `CREATE TABLE` | Supported | Must create a managed ordinary table |
-| `CREATE TABLE AS SELECT` | Not supported from external SQL | Web Parquet migration uses a dedicated catalog-aware implementation |
+| `CREATE TABLE AS SELECT` | Not supported from external SQL | Web Parquet import uses a dedicated catalog-aware implementation |
 | `CREATE TEMP TABLE` | Not supported from external SQL | Recommended only for internal same-connection tasks |
 | `ALTER TABLE ADD COLUMN` | Supported | Column position is not supported |
 | `ALTER TABLE DROP COLUMN` | Supported | Protected by dependencies from constraints, indexes, foreign keys, and partition keys |
@@ -360,7 +360,7 @@ TIME
 TIMESTAMP
 ```
 
-DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet migration fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
+DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet import fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
 
 ## 8. Ordinary Table Examples
 
@@ -534,7 +534,7 @@ CALL rsduck_repair_partition('ods_access_log', '20260710');
 
 These commands require `manage_catalog`.
 
-## 11. Web Parquet Table Migration
+## 11. Web Parquet Table Import
 
 The **Import Parquet** button in the Web sidebar copies existing Parquet data into the rsduck in-memory database and registers it as catalog-managed ordinary tables.
 
@@ -555,7 +555,7 @@ Configuration:
 
 ```toml
 [web]
-migration_root = "D:/data/rsduck-import"
+parquet_import_root = "D:/data/rsduck-import"
 ```
 
 The Web form may only submit paths relative to that root:
@@ -567,7 +567,7 @@ batch_20260710
 
 Absolute paths are not allowed. `..` and symbolic-link escapes from the root are not allowed.
 
-### 11.3 Migration Semantics
+### 11.3 Import Semantics
 
 - All imported objects are ordinary tables, with `managed_kind = ordinary`.
 - Data is copied into in-memory DuckDB. After success, the source files do not need to remain available.
@@ -576,7 +576,7 @@ Absolute paths are not allowed. `..` and symbolic-link escapes from the root are
 - Parquet provides only data and column types. Primary keys, indexes, comments, owners, and original database privileges are not restored.
 - Unsupported column types fail the whole batch.
 
-After migration, create indexes, constraints, comments, and privileges separately as needed.
+After import, create indexes, constraints, comments, and privileges separately as needed.
 
 ## 12. Snapshot v2
 
@@ -630,17 +630,7 @@ Key failure behavior:
 
 The periodic task deletes expired final snapshot directories according to `retain_hours`. It only recognizes directories matching `{prefix}_YYYYMMDD_HHMMSS`. `.tmp` directories are not treated as valid snapshots.
 
-### 12.4 Legacy Snapshot Migration
-
-Legacy DuckDB `EXPORT DATABASE` directories are not restored automatically at startup. Migrate them explicitly while offline:
-
-```powershell
-rsduck migrate-snapshot --from <legacy_snapshot_dir> --to <snapshot_dir>
-```
-
-The migration command shares `.rsduck.lock` with the service, so it cannot run while the service is running.
-
-### 12.5 Offline Administrator Password Reset
+### 12.4 Offline Administrator Password Reset
 
 Stop the service first, then run:
 
@@ -709,8 +699,8 @@ POST /logout            Logout
 GET  /session           Current session
 POST /sql               SQL query/execute
 POST /snapshot          Manual snapshot
-GET  /migration         Get migration root
-POST /migration         Execute Parquet table migration
+GET  /parquet-import    Get Parquet import root
+POST /parquet-import    Import Parquet table(s)
 ```
 
 Sessions are stored with HttpOnly, SameSite=Lax cookies. The Web API is not an unauthenticated management interface.
@@ -754,7 +744,7 @@ Handling:
 
 1. Do not create business tables through a native connection that bypasses the catalog.
 2. Check whether `rs_relation`, `rs_schema`, and DuckDB `duckdb_tables()` are consistent.
-3. For old data, use managed Parquet migration or snapshot migration. Do not manually insert catalog rows.
+3. For existing Parquet data, use managed Web Parquet import. Do not manually insert catalog rows.
 
 ### `only one SQL statement is supported`
 
@@ -809,7 +799,7 @@ Current test coverage focuses on:
 - Partition creation, writes, retention, and repair
 - Snapshot v2 save and restore
 - MySQL protocol and metadata projections
-- Web pagination and Parquet migration
+- Web pagination and Parquet import
 - Full rollback when a batch Parquet import fails
 
 ### 16.1 Checklist For New DDL
@@ -854,7 +844,7 @@ For scheduler pre-SQL or temporary-table workflows, do not expose an arbitrary m
 ### 16.4 Modifying Snapshot Format
 
 - Increase `snapshot_format_version`.
-- Define legacy-format migration explicitly. Do not guess implicitly at startup.
+- Define snapshot format changes explicitly. Do not guess implicitly at startup.
 - Update manifest validation, restore order, and tamper tests.
 - Keep catalog as a single file and keep business table data separated by relation.
 
@@ -891,12 +881,12 @@ Service deployment must also verify:
 
 The following behaviors are explicit current product boundaries:
 
-- MySQL-only external connection. No PostgreSQL wire service is provided.
+- External client connections use the MySQL-compatible protocol.
 - Catalog metadata only uses `rsduck_catalog.rs_*`.
 - External requests execute only one SQL statement.
 - External temporary tables and cross-request transactions are not supported.
 - External `CREATE TABLE AS SELECT` is not supported.
-- Parquet import must go through the Web managed migration entry point.
+- Parquet import must go through the Web managed import entry point.
 - One Parquet file corresponds to one logical table.
 - Unsupported catalog relations, types, or DDL return clear errors.
 - Missing dependencies do not automatically fall back to old paths.

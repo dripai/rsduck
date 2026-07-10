@@ -97,6 +97,31 @@ fn describe_sql_reports_read_columns_without_executing_writes() {
 }
 
 #[test]
+fn comment_on_table_executes_through_web_sql_path() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR)")
+        .unwrap();
+
+    let sql = "COMMENT ON TABLE quotes IS 'quotes table'";
+    let decision = route_sql(sql).unwrap();
+    assert_eq!(decision.command, "COMMENT");
+    execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100).unwrap();
+
+    let comment: String = conn
+        .query_row(
+            "SELECT description
+             FROM rsduck_catalog.rs_comment d
+             JOIN rsduck_catalog.rs_relation c ON d.objoid = c.oid
+             WHERE c.relname = 'quotes' AND d.objsubid = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(comment, "quotes table");
+}
+
+#[test]
 fn information_schema_hides_relations_without_read_privilege() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
@@ -181,7 +206,7 @@ fn mysql_user_projection_requires_user_management_privilege() {
 }
 
 #[test]
-fn typed_query_preserves_common_pg_types_and_null_cells() {
+fn typed_query_preserves_common_duckdb_types_and_null_cells() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
 
@@ -325,11 +350,11 @@ fn internal_catalog_query_requires_catalog_diagnostic_privilege() {
 }
 
 #[test]
-fn postgres_catalog_queries_are_rejected_through_db_path() {
+fn reserved_catalog_queries_are_rejected_through_db_path() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
 
-    let sql = "INSERT INTO pg_catalog.pg_class VALUES (1)";
+    let sql = "INSERT INTO pg_catalog.blocked_relation VALUES (1)";
     let decision = route_sql(sql).unwrap();
     let err = execute_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
         .unwrap_err();

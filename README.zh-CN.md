@@ -9,7 +9,7 @@
 rsduck 是一个基于 DuckDB 的内存数据库服务，对外提供：
 
 - MySQL wire 协议，便于 Navicat 和 MySQL 客户端连接。
-- Web SQL 控制台，支持查询、分页、快照和 Parquet 表迁移。
+- Web SQL 控制台，支持查询、分页、快照和 Parquet 表导入。
 - `rsduck_catalog.rs_*` 元数据与权限体系。
 - 普通表、视图、索引、用户、角色和受管范围分区表。
 - Snapshot v2 持久化与恢复。
@@ -153,7 +153,7 @@ bind = "127.0.0.1:13306"
 [web]
 enabled = true
 bind = "127.0.0.1:13307"
-migration_root = "."
+parquet_import_root = "."
 ```
 
 ### 4.1 配置规则
@@ -164,7 +164,7 @@ migration_root = "."
 - 各队列达到上限时返回明确的 queue full 错误，不自动切换到其他执行路径。
 - `max_result_rows` 是单次服务端结果上限，不等同于 Web 页大小。
 - `snapshot.prefix` 只允许安全的快照目录前缀；非法前缀会阻止启动。
-- `migration_root` 是 Web Parquet 迁移允许访问的根目录。迁移请求只能使用该目录下的相对路径。
+- `parquet_import_root` 是 Web Parquet 导入允许访问的根目录。导入请求只能使用该目录下的相对路径。
 
 ### 4.2 启动数据来源
 
@@ -331,7 +331,7 @@ SELECT * FROM prepared WHERE avg_close > 10;
 |---|---|---|
 | `CREATE SCHEMA` | 支持 | 需要 system `manage_catalog` |
 | `CREATE TABLE` | 支持 | 必须是受管普通表 |
-| `CREATE TABLE AS SELECT` | 不支持外部 SQL | Parquet Web 迁移使用专用 catalog-aware 实现 |
+| `CREATE TABLE AS SELECT` | 不支持外部 SQL | Parquet Web 导入使用专用 catalog-aware 实现 |
 | `CREATE TEMP TABLE` | 不支持外部 SQL | 仅建议程序内部同连接任务使用 |
 | `ALTER TABLE ADD COLUMN` | 支持 | 不支持指定列位置 |
 | `ALTER TABLE DROP COLUMN` | 支持 | 受约束、索引、外键、分区键依赖保护 |
@@ -360,7 +360,7 @@ TIME
 TIMESTAMP
 ```
 
-DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 迁移会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
+DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 导入会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
 
 ## 8. 普通表开发案例
 
@@ -534,14 +534,14 @@ CALL rsduck_repair_partition('ods_access_log', '20260710');
 
 这些命令需要 `manage_catalog`。
 
-## 11. Web Parquet 表迁移
+## 11. Web Parquet 表导入
 
 Web 左侧的 **Import Parquet** 用于将已有 Parquet 数据复制到 rsduck 内存数据库，并登记为 catalog 管理的普通表。
 
 ### 11.1 输入模型
 
 - 单个 `.parquet` 文件表示一张逻辑表。
-- 选择目录时，迁移该目录顶层的所有 `.parquet` 文件。
+- 选择目录时，导入该目录顶层的所有 `.parquet` 文件。
 - 目录模式按“一文件一表”处理。
 - 默认使用文件名（不含扩展名）作为表名。
 - 仅单文件模式允许指定自定义目标表名。
@@ -555,7 +555,7 @@ Web 左侧的 **Import Parquet** 用于将已有 Parquet 数据复制到 rsduck 
 
 ```toml
 [web]
-migration_root = "D:/data/rsduck-import"
+parquet_import_root = "D:/data/rsduck-import"
 ```
 
 Web 中只能填写相对于该根目录的路径：
@@ -567,7 +567,7 @@ batch_20260710
 
 不允许绝对路径，也不允许使用 `..` 或符号链接逃逸根目录。
 
-### 11.3 迁移语义
+### 11.3 导入语义
 
 - 全部创建为普通表，`managed_kind = ordinary`。
 - 数据复制进内存 DuckDB，成功后不依赖源文件继续存在。
@@ -576,7 +576,7 @@ batch_20260710
 - Parquet 只提供数据和列类型，不恢复主键、索引、注释、owner 或原数据库权限。
 - 不支持的列类型会导致整批失败。
 
-迁移完成后，根据业务需要单独创建索引、约束、注释和权限。
+导入完成后，根据业务需要单独创建索引、约束、注释和权限。
 
 ## 12. Snapshot v2
 
@@ -630,17 +630,7 @@ snapshot/
 
 周期任务会按 `retain_hours` 删除过期的最终快照目录。只识别符合 `{prefix}_YYYYMMDD_HHMMSS` 规则的目录，不把 `.tmp` 目录当作有效快照。
 
-### 12.4 旧快照迁移
-
-旧 DuckDB `EXPORT DATABASE` 目录不会在启动时自动恢复。必须离线显式迁移：
-
-```powershell
-rsduck migrate-snapshot --from <legacy_snapshot_dir> --to <snapshot_dir>
-```
-
-迁移命令与服务共用 `.rsduck.lock`，服务运行时不能执行。
-
-### 12.5 离线重置管理员密码
+### 12.4 离线重置管理员密码
 
 先停止服务，再执行：
 
@@ -709,8 +699,8 @@ POST /logout            退出
 GET  /session           当前会话
 POST /sql               SQL 查询/执行
 POST /snapshot          手工快照
-GET  /migration         获取迁移根目录
-POST /migration         执行 Parquet 表迁移
+GET  /parquet-import         获取 Parquet 导入根目录
+POST /parquet-import         执行 Parquet 表导入
 ```
 
 会话通过 HttpOnly、SameSite=Lax cookie 保存。Web API 不是无认证管理接口。
@@ -754,7 +744,7 @@ Web 只对顶层没有 `LIMIT/OFFSET` 的 `SELECT/WITH` 自动增加分页包装
 
 1. 不要通过绕过 catalog 的原生连接创建业务表。
 2. 检查 `rs_relation`、`rs_schema` 和 DuckDB `duckdb_tables()` 是否一致。
-3. 如果来自旧数据，使用受管 Parquet 迁移或快照迁移，不要手工补 catalog 行。
+3. 如果来自旧数据，使用受管 Parquet 导入，不要手工补 catalog 行。
 
 ### `only one SQL statement is supported`
 
@@ -809,7 +799,7 @@ cargo test
 - 分区创建、写入、保留、修复
 - Snapshot v2 保存和恢复
 - MySQL 协议和 metadata 投影
-- Web 分页和 Parquet 迁移
+- Web 分页和 Parquet 导入
 - 批量 Parquet 导入失败时整批回滚
 
 ### 16.1 新增 DDL 的检查清单
@@ -854,7 +844,7 @@ cargo test
 ### 16.4 修改快照格式
 
 - 提升 `snapshot_format_version`。
-- 明确定义旧格式迁移，不在启动时隐式猜测。
+- 旧格式快照不做自动兼容；数据导入走明确的 Parquet 导入入口。
 - 更新 manifest 校验、恢复顺序和篡改测试。
 - catalog 文件继续保持单文件，业务表数据继续按 relation 分离。
 
@@ -891,12 +881,12 @@ cargo build --release
 
 以下行为是当前明确的产品边界：
 
-- MySQL-only 对外连接，不提供 PostgreSQL wire 服务。
+- 对外客户端连接使用 MySQL 兼容协议。
 - catalog 只使用 `rsduck_catalog.rs_*`。
 - 外部一次只执行一条 SQL。
 - 外部不支持临时表和跨请求事务。
 - 外部 `CREATE TABLE AS SELECT` 不支持。
-- Parquet 导入必须走 Web 受管迁移入口。
+- Parquet 导入必须走 Web 受管导入入口。
 - 单个 Parquet 文件对应一张逻辑表。
 - 不支持的 catalog relation、类型或 DDL 直接报错。
 - 缺失依赖不自动回退到旧路径。

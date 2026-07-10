@@ -6,7 +6,6 @@ pub const MYSQL_LEGACY_NATIVE_AUTH_PLUGIN: &str = "mysql_native_password";
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AuthProtocol {
     WebApi,
-    PgWire,
     MySqlWire,
 }
 

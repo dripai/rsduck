@@ -9,10 +9,10 @@ use rand_core::OsRng;
 use sqlparser::ast::{
     Action, AlterTable, AlterTableOperation, AlterUser, ColumnOption, CommentObject, CreateIndex,
     CreateRole, CreateTable, CreateUser, CreateView, Expr, ForeignKeyConstraint, Grant,
-    GrantObjects, GranteeName, GranteesType, Insert, ObjectName, ObjectNamePart, ObjectType,
+    GrantObjects, GranteeName, GranteesType, Ident, Insert, ObjectName, ObjectNamePart, ObjectType,
     Privileges, Revoke, SchemaName, SetExpr, Statement, TableConstraint, TableObject, Value,
 };
-use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
+use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 use tracing::{info, warn};
 

@@ -358,15 +358,13 @@ pub(in crate::catalog) fn skip_ascii_ws(sql: &str, mut idx: usize) -> usize {
 }
 
 pub(in crate::catalog) fn parse_one_statement(sql: &str) -> Result<(Statement, String), String> {
-    let normalized = sql.trim_start().to_ascii_lowercase();
-    let statements = if normalized.starts_with("comment on ") {
-        let dialect = PostgreSqlDialect {};
-        Parser::parse_sql(&dialect, sql)
-    } else {
-        let dialect = DuckDbDialect {};
-        Parser::parse_sql(&dialect, sql)
+    if let Some(custom) = parse_custom_statement(sql)? {
+        return Ok(custom);
     }
-    .map_err(|e| format!("catalog sql parse failed: {e}"))?;
+
+    let dialect = DuckDbDialect {};
+    let statements =
+        Parser::parse_sql(&dialect, sql).map_err(|e| format!("catalog sql parse failed: {e}"))?;
     if statements.len() != 1 {
         return Err(format!(
             "only one SQL statement is supported, got {}",
@@ -376,4 +374,195 @@ pub(in crate::catalog) fn parse_one_statement(sql: &str) -> Result<(Statement, S
     let statement = statements.into_iter().next().expect("statement exists");
     let normalized_sql = statement.to_string();
     Ok((statement, normalized_sql))
+}
+
+fn parse_custom_statement(sql: &str) -> Result<Option<(Statement, String)>, String> {
+    let normalized = sql.trim_start().to_ascii_lowercase();
+    if !normalized.starts_with("comment on ") {
+        return Ok(None);
+    }
+
+    let statement = parse_comment_on_statement(sql)?;
+    let normalized_sql = statement.to_string();
+    Ok(Some((statement, normalized_sql)))
+}
+
+fn parse_comment_on_statement(sql: &str) -> Result<Statement, String> {
+    let mut cursor = 0;
+    cursor = expect_keyword(sql, cursor, "comment")?;
+    cursor = expect_keyword(sql, cursor, "on")?;
+    let (object_type, after_object_type) = parse_comment_object_type(sql, cursor)?;
+    cursor = after_object_type;
+    let (object_name, after_object_name) = parse_object_name_text(sql, cursor)?;
+    cursor = after_object_name;
+    cursor = expect_keyword(sql, cursor, "is")?;
+    let (comment, after_comment) = parse_comment_value(sql, cursor)?;
+    cursor = skip_ascii_ws(sql, after_comment);
+    if cursor < sql.len() {
+        if sql.as_bytes()[cursor] != b';' {
+            return Err(format!(
+                "unexpected text after COMMENT ON statement: {}",
+                sql[cursor..].trim()
+            ));
+        }
+        cursor = skip_ascii_ws(sql, cursor + 1);
+        if cursor < sql.len() {
+            return Err(format!(
+                "unexpected text after COMMENT ON statement: {}",
+                sql[cursor..].trim()
+            ));
+        }
+    }
+
+    Ok(Statement::Comment {
+        object_type,
+        object_name,
+        comment,
+        if_exists: false,
+    })
+}
+
+fn parse_comment_object_type(sql: &str, cursor: usize) -> Result<(CommentObject, usize), String> {
+    let (keyword, cursor) = parse_ascii_word(sql, cursor)?;
+    let object_type = match keyword.to_ascii_lowercase().as_str() {
+        "schema" => CommentObject::Schema,
+        "table" => CommentObject::Table,
+        "view" => CommentObject::View,
+        "index" => CommentObject::Index,
+        "column" => CommentObject::Column,
+        _ => {
+            return Err(format!(
+                "COMMENT ON only supports SCHEMA, TABLE, VIEW, INDEX, and COLUMN, got: {keyword}"
+            ))
+        }
+    };
+    Ok((object_type, cursor))
+}
+
+fn parse_object_name_text(sql: &str, cursor: usize) -> Result<(ObjectName, usize), String> {
+    let mut cursor = skip_ascii_ws(sql, cursor);
+    let mut parts = Vec::new();
+    loop {
+        let (ident, after_ident) = parse_identifier_part(sql, cursor)?;
+        parts.push(ident);
+        cursor = skip_ascii_ws(sql, after_ident);
+        if cursor >= sql.len() || sql.as_bytes()[cursor] != b'.' {
+            break;
+        }
+        cursor = skip_ascii_ws(sql, cursor + 1);
+    }
+
+    Ok((ObjectName::from(parts), cursor))
+}
+
+fn parse_identifier_part(sql: &str, cursor: usize) -> Result<(Ident, usize), String> {
+    let cursor = skip_ascii_ws(sql, cursor);
+    if cursor >= sql.len() {
+        return Err("expected identifier".into());
+    }
+
+    match sql.as_bytes()[cursor] {
+        b'"' => parse_quoted_identifier(sql, cursor, '"'),
+        b'`' => parse_quoted_identifier(sql, cursor, '`'),
+        byte if byte.is_ascii_alphanumeric() || byte == b'_' => {
+            let start = cursor;
+            let mut end = cursor + 1;
+            while end < sql.len() && is_ident_byte(sql.as_bytes()[end]) {
+                end += 1;
+            }
+            Ok((Ident::new(&sql[start..end]), end))
+        }
+        _ => Err(format!("expected identifier at: {}", sql[cursor..].trim())),
+    }
+}
+
+fn parse_quoted_identifier(
+    sql: &str,
+    cursor: usize,
+    quote: char,
+) -> Result<(Ident, usize), String> {
+    let quote_byte = quote as u8;
+    let bytes = sql.as_bytes();
+    let mut idx = cursor + 1;
+    let mut value = String::new();
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte == quote_byte {
+            if bytes.get(idx + 1) == Some(&quote_byte) {
+                value.push(quote);
+                idx += 2;
+                continue;
+            }
+            return Ok((Ident::with_quote(quote, value), idx + 1));
+        }
+        let ch = sql[idx..]
+            .chars()
+            .next()
+            .ok_or_else(|| "invalid quoted identifier".to_string())?;
+        value.push(ch);
+        idx += ch.len_utf8();
+    }
+    Err("unclosed quoted identifier".into())
+}
+
+fn parse_comment_value(sql: &str, cursor: usize) -> Result<(Option<String>, usize), String> {
+    let cursor = skip_ascii_ws(sql, cursor);
+    if keyword_at(sql, cursor, "null") {
+        return Ok((None, cursor + "null".len()));
+    }
+    if cursor >= sql.len() || sql.as_bytes()[cursor] != b'\'' {
+        return Err("COMMENT ON value must be a single-quoted string or NULL".into());
+    }
+
+    let bytes = sql.as_bytes();
+    let mut idx = cursor + 1;
+    let mut value = String::new();
+    while idx < bytes.len() {
+        if bytes[idx] == b'\'' {
+            if bytes.get(idx + 1) == Some(&b'\'') {
+                value.push('\'');
+                idx += 2;
+                continue;
+            }
+            return Ok((Some(value), idx + 1));
+        }
+        let ch = sql[idx..]
+            .chars()
+            .next()
+            .ok_or_else(|| "invalid COMMENT ON string".to_string())?;
+        value.push(ch);
+        idx += ch.len_utf8();
+    }
+    Err("unclosed COMMENT ON string".into())
+}
+
+fn parse_ascii_word(sql: &str, cursor: usize) -> Result<(String, usize), String> {
+    let cursor = skip_ascii_ws(sql, cursor);
+    if cursor >= sql.len() {
+        return Err("expected keyword".into());
+    }
+    let mut end = cursor;
+    while end < sql.len() && sql.as_bytes()[end].is_ascii_alphabetic() {
+        end += 1;
+    }
+    if end == cursor {
+        return Err(format!("expected keyword at: {}", sql[cursor..].trim()));
+    }
+    Ok((sql[cursor..end].to_string(), end))
+}
+
+fn expect_keyword(sql: &str, cursor: usize, keyword: &str) -> Result<usize, String> {
+    let cursor = skip_ascii_ws(sql, cursor);
+    if keyword_at(sql, cursor, keyword) {
+        Ok(cursor + keyword.len())
+    } else {
+        Err(format!("expected keyword {keyword}"))
+    }
+}
+
+fn keyword_at(sql: &str, cursor: usize, keyword: &str) -> bool {
+    let end = cursor + keyword.len();
+    end <= sql.len()
+        && sql[cursor..end].eq_ignore_ascii_case(keyword)
+        && is_keyword_boundary(sql.as_bytes(), cursor, end)
 }

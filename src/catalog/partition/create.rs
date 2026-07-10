@@ -176,7 +176,7 @@ pub(in crate::catalog) fn create_range_partition(
         ),
         [],
     )
-    .map_err(|e| format!("mark physical partition pg_class failed: {e}"))?;
+    .map_err(|e| format!("mark physical partition rs_relation failed: {e}"))?;
     update_partition_relation_ext(
         conn,
         child_oid,

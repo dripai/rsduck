@@ -79,7 +79,7 @@ pub(in crate::catalog) fn create_role_account(
         || create_role.authorization_owner.is_some()
     {
         return Err(
-            "CREATE ROLE only supports plain rsduck roles without PostgreSQL role options".into(),
+            "CREATE ROLE only supports plain rsduck roles without extra role options".into(),
         );
     }
 

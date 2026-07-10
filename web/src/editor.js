@@ -176,8 +176,9 @@ function selectedSql(view) {
 }
 
 function runFromView(view, onRun) {
-  const sqlText = selectedSql(view) || view.state.doc.toString().trim();
-  if (sqlText) onRun(sqlText);
+  const selectedText = selectedSql(view);
+  const sqlText = selectedText || view.state.doc.toString().trim();
+  if (sqlText) onRun(sqlText, { selected: Boolean(selectedText) });
 }
 
 class RunLineNumberMarker extends GutterMarker {

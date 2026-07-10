@@ -82,7 +82,7 @@ pub(in crate::catalog) fn create_index_relation(
             ),
             [],
         )
-        .map_err(|e| format!("write index pg_class failed: {e}"))?;
+        .map_err(|e| format!("write index rs_relation failed: {e}"))?;
 
         conn.execute(
             &format!(
@@ -96,7 +96,7 @@ pub(in crate::catalog) fn create_index_relation(
             ),
             [],
         )
-        .map_err(|e| format!("write pg_index failed: {e}"))?;
+        .map_err(|e| format!("write rs_index failed: {e}"))?;
 
         conn.execute(
             &format!(

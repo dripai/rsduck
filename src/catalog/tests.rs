@@ -196,7 +196,7 @@ fn authenticate_default_admin_uses_catalog_password_hash() {
 }
 
 #[test]
-fn catalog_authenticator_uses_protocol_neutral_request() {
+fn catalog_authenticator_accepts_web_cleartext_request() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
 
@@ -204,7 +204,7 @@ fn catalog_authenticator_uses_protocol_neutral_request() {
     let principal = authenticator
         .authenticate(
             &conn,
-            &AuthRequest::cleartext(AuthProtocol::PgWire, "admin", "admin"),
+            &AuthRequest::cleartext(AuthProtocol::WebApi, "admin", "admin"),
         )
         .unwrap();
     assert_eq!(principal.user_id, 10);
@@ -469,7 +469,7 @@ fn grant_on_reserved_schema_is_rejected_without_privilege_rows() {
 }
 
 #[test]
-fn create_table_writes_pg_class_and_attributes() {
+fn create_table_writes_rs_relation_and_columns() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
     let before_checksum: String = conn
@@ -783,13 +783,17 @@ fn alter_table_drop_column_marks_catalog_column_dropped() {
 }
 
 #[test]
-fn comment_on_table_and_column_writes_pg_description() {
+fn comment_on_table_and_column_writes_catalog_description() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
     execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)").unwrap();
 
-    execute_catalog_aware_write(&conn, "COMMENT ON TABLE quotes IS 'quotes table'").unwrap();
-    execute_catalog_aware_write(&conn, "COMMENT ON COLUMN quotes.close IS 'close price'").unwrap();
+    execute_catalog_aware_write(&conn, "COMMENT ON TABLE quotes IS 'Bob''s quotes'").unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "COMMENT ON COLUMN \"quotes\".\"close\" IS 'close price'",
+    )
+    .unwrap();
 
     let table_comment: String = conn
         .query_row(
@@ -801,7 +805,7 @@ fn comment_on_table_and_column_writes_pg_description() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(table_comment, "quotes table");
+    assert_eq!(table_comment, "Bob's quotes");
 
     let column_comment: String = conn
         .query_row(
@@ -815,6 +819,19 @@ fn comment_on_table_and_column_writes_pg_description() {
         )
         .unwrap();
     assert_eq!(column_comment, "close price");
+
+    execute_catalog_aware_write(&conn, "COMMENT ON TABLE quotes IS NULL").unwrap();
+    let table_comment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) \
+             FROM rsduck_catalog.rs_comment d \
+             JOIN rsduck_catalog.rs_relation c ON c.oid = d.objoid \
+             WHERE c.relname = 'quotes' AND d.objsubid = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_comment_count, 0);
 }
 
 #[test]
@@ -840,6 +857,19 @@ fn comment_on_reserved_schema_is_rejected() {
         )
         .unwrap();
     assert_eq!(comment_count, 0);
+}
+
+#[test]
+fn comment_on_unsupported_object_is_rejected_by_custom_parser() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    let err = execute_catalog_aware_write(&conn, "COMMENT ON FUNCTION fn IS 'function comment'")
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "COMMENT ON only supports SCHEMA, TABLE, VIEW, INDEX, and COLUMN, got: FUNCTION"
+    );
 }
 
 #[test]
@@ -1113,14 +1143,14 @@ fn partition_retention_expires_old_ordinary_partitions() {
         .unwrap();
     assert_eq!(visible_rows, 2);
 
-    let pg_class_old_count: i64 = conn
+    let old_relation_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM rsduck_catalog.rs_relation WHERE relname = 'ods_access_log_20260701'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(pg_class_old_count, 0);
+    assert_eq!(old_relation_count, 0);
 
     let recreate_err = execute_catalog_aware_write(
         &conn,
@@ -1824,7 +1854,7 @@ fn startup_validation_rejects_broken_catalog_references() {
     .unwrap();
 
     let err = validate_after_start(&conn).unwrap_err();
-    assert!(err.contains("pg_attribute.atttypid"));
+    assert!(err.contains("rs_column.atttypid"));
 }
 
 #[test]

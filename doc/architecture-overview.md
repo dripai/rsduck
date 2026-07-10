@@ -7,7 +7,7 @@
 rsduck 的目标不是把 DuckDB 原封不动暴露给外部客户端，而是把 DuckDB 包装成一个受控的内存数据库服务：
 
 - 对外提供 MySQL wire 协议，方便 Navicat 和 MySQL 客户端连接。
-- 对外提供 Web SQL 控制台，方便查询、快照和 Parquet 表迁移。
+- 对外提供 Web SQL 控制台，方便查询、快照和 Parquet 表导入。
 - 使用 `rsduck_catalog.rs_*` 管理对象、权限、依赖、快照元数据。
 - 所有可恢复状态进入 Snapshot v2。
 - 不支持的能力返回明确错误，不隐式回退到 DuckDB 内部 catalog 或历史路径。
@@ -114,7 +114,7 @@ write worker 是单线程串行执行入口，负责：
 - DML。
 - `COPY FROM`。
 - 用户、角色、权限管理。
-- Parquet 迁移。
+- Parquet 导入。
 - Web/MySQL 认证查询。
 
 写操作进入 `write_tx` 有界队列。队列满时返回 queue full 错误，不切换到其他路径执行。这个设计让写入顺序清晰，也让 catalog mutation 的原子性更容易维护。
@@ -226,8 +226,8 @@ POST /logout            退出
 GET  /session           当前会话
 POST /sql               SQL 查询/执行
 POST /snapshot          手工快照
-GET  /migration         获取迁移根目录
-POST /migration         执行 Parquet 表迁移
+GET  /parquet-import         获取 Parquet 导入根目录
+POST /parquet-import         执行 Parquet 表导入
 ```
 
 Web 链路如下：
@@ -305,14 +305,14 @@ trigger
 
 Web 手工保存会携带 username，并执行 `authorize_snapshot`。系统周期保存和关闭保存使用 system 身份。
 
-## 11. Parquet 迁移链路
+## 11. Parquet 导入链路
 
-Parquet 迁移只从 Web 入口提供，不开放为普通外部 SQL：
+Parquet 导入只从 Web 入口提供，不开放为普通外部 SQL：
 
 ```text
-POST /migration
+POST /parquet-import
   -> session check
-  -> resolve path under web.migration_root
+  -> resolve path under web.parquet_import_root
   -> build ParquetImportSource list
   -> SqlCommand::ImportParquet
   -> write worker
@@ -320,17 +320,17 @@ POST /migration
   -> catalog-aware import
 ```
 
-迁移规则：
+导入规则：
 
 - 单个 Parquet 文件对应一张普通表。
 - 目录模式导入顶层所有 `.parquet` 文件。
 - 目录模式是一文件一表，不自动 union。
-- 批量迁移原子执行，任一文件失败则整批回滚。
+- 批量导入原子执行，任一文件失败则整批回滚。
 - 所有导入表进入 `rsduck_catalog`，可被权限、快照和 Navicat metadata 管理。
 
 ## 12. 下游存储边界
 
-rsduck 的下游只有内存 DuckDB 和 snapshot 文件。它不依赖外部 MySQL/PostgreSQL 系统表，也不把 MySQL metadata 当作事实来源。
+rsduck 的下游只有内存 DuckDB 和 snapshot 文件。它不依赖外部数据库系统表，也不把 MySQL metadata 当作事实来源。
 
 运行时状态：
 
