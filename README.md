@@ -14,6 +14,25 @@ Language: English | [中文](README.zh-CN.md)
   <sub>Navicat through the MySQL wire protocol</sub>
 </p>
 
+## Measured Continuous Writes
+
+<p align="center">
+  <a href="yace.png"><img src="yace.png" alt="RSDuck HTTP and MySQL wire continuous-write comparison"></a>
+  <br>
+  <sub>Local 120-second continuous-write run, batch size 200, no intentional interval</sub>
+</p>
+
+The two runnable demos use the same generated rows and batch size against separate ordinary tables. In this local run, the HTTP path consistently completed more batches than the PyMySQL MySQL-wire path:
+
+| Metric | HTTP | MySQL wire |
+|---|---:|---:|
+| Rows written | 71,400 | 42,600 |
+| Steady throughput | ~595 rows/s | ~355 rows/s |
+| Average batch latency | ~336 ms | ~564 ms |
+| Maximum batch latency | 454 ms | 922 ms |
+
+This is a reproducible product-path measurement, not a universal database benchmark: both paths ultimately use RSDuck's one serialized write worker, and results depend on the table shape, batch size, host, and background activity. Use the [HTTP](demo/python/4_8_http_continuous_write.py) and [MySQL wire](demo/python/4_8_mysql_continuous_write.py) demos to repeat the comparison.
+
 Related documents:
 
 - [Architecture overview](doc/architecture-overview.en.md)

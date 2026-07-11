@@ -14,6 +14,25 @@
   <sub>通过 MySQL wire 协议使用 Navicat</sub>
 </p>
 
+## 实测：持续批量写入
+
+<p align="center">
+  <a href="yace.png"><img src="yace.png" alt="RSDuck HTTP 与 MySQL wire 持续写入对比"></a>
+  <br>
+  <sub>本机连续写入 120 秒，batch size 为 200，无人为写入间隔</sub>
+</p>
+
+两个可运行 Demo 使用相同的模拟数据和批大小，写入各自独立的普通表。本次本机实测中，HTTP 路径稳定完成了更多批次：
+
+| 指标 | HTTP | MySQL wire |
+|---|---:|---:|
+| 累计写入 | 71,400 | 42,600 |
+| 稳定吞吐 | ~595 rows/s | ~355 rows/s |
+| 平均批次延迟 | ~336 ms | ~564 ms |
+| 最大批次延迟 | 454 ms | 922 ms |
+
+这是一组可复现的产品路径实测，不是泛化的数据库跑分：两条路径最终都会进入 RSDuck 唯一的串行写 worker，结果会受到表结构、批大小、主机环境和后台任务影响。可直接运行 [HTTP](demo/python/4_8_http_continuous_write.py) 与 [MySQL wire](demo/python/4_8_mysql_continuous_write.py) Demo 复现对比。
+
 相关文档：
 
 - [总体架构设计](doc/architecture-overview.md)
