@@ -2,6 +2,21 @@
 
 语言：[English](README.md) | 中文
 
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="console.png"><img src="console.png" alt="RSDuck Web SQL 控制台"></a>
+      <br>
+      <sub>Web SQL 控制台</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="navicat_query.png"><img src="navicat_query.png" alt="在 Navicat 中查询 RSDuck"></a>
+      <br>
+      <sub>通过 MySQL wire 协议使用 Navicat</sub>
+    </td>
+  </tr>
+</table>
+
 相关文档：
 
 - [总体架构设计](doc/architecture-overview.md)

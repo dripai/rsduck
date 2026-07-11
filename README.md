@@ -2,6 +2,21 @@
 
 Language: English | [中文](README.zh-CN.md)
 
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="console.png"><img src="console.png" alt="RSDuck Web SQL Console"></a>
+      <br>
+      <sub>Web SQL Console</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="navicat_query.png"><img src="navicat_query.png" alt="RSDuck query in Navicat"></a>
+      <br>
+      <sub>Navicat through the MySQL wire protocol</sub>
+    </td>
+  </tr>
+</table>
+
 Related documents:
 
 - [Architecture overview](doc/architecture-overview.en.md)
