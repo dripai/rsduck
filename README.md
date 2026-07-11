@@ -4,9 +4,9 @@ Language: English | [中文](README.zh-CN.md)
 
 Related documents:
 
-- [Architecture overview](doc/architecture-overview.md)
-- [Catalog and permission design](doc/mysql-compat-auth-catalog-design.md)
-- [Practical examples](doc/rsduck-practical-examples.md)
+- [Architecture overview](doc/architecture-overview.en.md)
+- [Catalog and permission design](doc/mysql-compat-auth-catalog-design.en.md)
+- [Practical examples](doc/rsduck-practical-examples.en.md)
 
 This document is for engineers who need to run, integrate, maintain, or continue developing rsduck. It describes the current code behavior, with emphasis on what is supported, what is not supported, how failures should be handled, and which constraints must be preserved when adding new capabilities.
 

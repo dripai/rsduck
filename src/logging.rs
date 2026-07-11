@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub fn init_tracing(log: &LogConfig) -> WorkerGuard {
     validate_log_config(log);
@@ -18,19 +18,28 @@ pub fn init_tracing(log: &LogConfig) -> WorkerGuard {
     let level = parse_log_level(&log.level);
     let timer = tracing_subscriber::fmt::time::LocalTime::rfc_3339();
 
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_target(false)
+        .with_timer(timer.clone())
+        .with_writer(file_writer);
+
     if log.console {
-        tracing_subscriber::fmt()
-            .with_max_level(level)
+        let console_layer = fmt::layer()
+            .with_ansi(true)
             .with_target(false)
             .with_timer(timer)
-            .with_writer(file_writer.and(std::io::stdout))
+            .with_writer(std::io::stdout);
+
+        tracing_subscriber::registry()
+            .with(level)
+            .with(file_layer)
+            .with(console_layer)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_max_level(level)
-            .with_target(false)
-            .with_timer(timer)
-            .with_writer(file_writer)
+        tracing_subscriber::registry()
+            .with(level)
+            .with(file_layer)
             .init();
     }
 

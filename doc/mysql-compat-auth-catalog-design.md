@@ -1,5 +1,7 @@
 # rsduck MySQL 兼容、鉴权与 Catalog 管理设计
 
+语言：中文 | [English](mysql-compat-auth-catalog-design.en.md)
+
 本文说明 rsduck 如何在 DuckDB 之上提供 MySQL 兼容体验，以及鉴权、权限和自身 catalog 的管理原则。重点不是逐项复刻 MySQL，而是解释哪些能力被投影、哪些能力被拒绝，以及为什么 `rsduck_catalog.rs_*` 必须是唯一事实来源。
 
 ## 1. 设计定位

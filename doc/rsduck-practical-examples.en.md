@@ -1,36 +1,36 @@
-# RSDuck实战样例
+# RSDuck Practical Examples
 
-语言：中文 | [English](rsduck-practical-examples.en.md)
+Language: English | [中文](rsduck-practical-examples.md)
 
-本文按两类场景组织：
+This document is organized around two types of usage:
 
-- 单条 SQL：在 Navicat、MySQL 客户端、RSDuck Web SQL 页面直接执行。
-- 程序化任务：由后端接口、定时任务或数据同步流程执行。
+- Single SQL statements: executed directly in Navicat, a MySQL client, or the RSDuck Web SQL page.
+- Programmatic tasks: executed by backend APIs, scheduled jobs, or data synchronization workflows.
 
-约定：示例股票代码格式为 `688981.SH`、`603986.SH`、`300661.SZ`；批次号格式为 `batch_20260710_001`。
+Conventions: sample stock codes use `688981.SH`, `603986.SH`, and `300661.SZ`; batch ids use a format such as `batch_20260710_001`.
 
-## 1. 操作边界
+## 1. Operation Boundary
 
-单条 SQL：
+Single SQL statements:
 
-- 查看对象：`SHOW TABLES`、`DESCRIBE`
-- 创建对象：`CREATE TABLE`、`CREATE VIEW`
-- 小范围修改：`ALTER TABLE`、`COMMENT ON`、带明确 `WHERE` 的 `UPDATE` / `DELETE`
+- Inspect objects: `SHOW TABLES`, `DESCRIBE`
+- Create objects: `CREATE TABLE`, `CREATE VIEW`
+- Small-scope changes: `ALTER TABLE`, `COMMENT ON`, and `UPDATE` / `DELETE` with an explicit `WHERE`
 
-程序化任务：
+Programmatic tasks:
 
-- 批量同步板块和成分股
-- 导入 Parquet 文件
-- 管理分区表
-- 聚合行情指标
-- 执行数据质量检查
-- 保存和恢复 snapshot
+- Batch synchronize sectors and constituents.
+- Import Parquet files.
+- Manage partitioned tables.
+- Aggregate market indicators.
+- Run data quality checks.
+- Save and restore snapshots.
 
-Web SQL 页面应对 `ALTER`、`UPDATE`、`DELETE`、`DROP` 标记高风险；没有 `WHERE` 的 `UPDATE` / `DELETE` 应拒绝或要求管理员确认。
+The Web SQL page should mark `ALTER`, `UPDATE`, `DELETE`, and `DROP` as high-risk operations. `UPDATE` / `DELETE` without `WHERE` should be rejected or require administrator confirmation.
 
-## 2. 普通表
+## 2. Ordinary Table
 
-板块主表只保存板块自身信息。
+The sector master table stores only sector-level information.
 
 ```sql
 CREATE TABLE sector_list (
@@ -44,26 +44,26 @@ CREATE TABLE sector_list (
 );
 ```
 
-字段说明：
+Field notes:
 
-- `sector_code`：板块代码，全局唯一。
-- `sector_name`：板块名称。
-- `category`：板块分类，例如 `concept`、`sw_industry`、`region`、`index`、`fund_etf`。
-- `constituent_count`：成分股数量，便于列表页展示和质量检查。
-- `source`：数据来源，例如 `xtquant`。
-- `ingest_batch_id`：同步批次号。
-- `ingest_at`：写入时间。
+- `sector_code`: globally unique sector code.
+- `sector_name`: sector name.
+- `category`: sector category, for example `concept`, `sw_industry`, `region`, `index`, `fund_etf`.
+- `constituent_count`: number of constituents, useful for list display and quality checks.
+- `source`: data source, for example `xtquant`.
+- `ingest_batch_id`: ingestion batch id.
+- `ingest_at`: write time.
 
-插入样例：
+Insert sample data:
 
 ```sql
 INSERT INTO sector_list
 VALUES
-  ('GN_SEMI', '半导体', 'concept', 3, 'xtquant', 'batch_20260710_001', now()),
-  ('SW_ELEC', '电子', 'sw_industry', 2, 'xtquant', 'batch_20260710_001', now());
+  ('GN_SEMI', 'Semiconductor', 'concept', 3, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_ELEC', 'Electronics', 'sw_industry', 2, 'xtquant', 'batch_20260710_001', now());
 ```
 
-检查写入结果：
+Check inserted rows:
 
 ```sql
 SELECT *
@@ -71,9 +71,9 @@ FROM sector_list
 ORDER BY sector_code;
 ```
 
-## 3. 成分股表
+## 3. Constituent Table
 
-板块和股票是多对多关系。一行保存一个板块成分，便于反查、关联行情和聚合统计。
+Sectors and stocks are many-to-many. Store one sector constituent per row. This makes reverse lookup, quote joins, and aggregation straightforward.
 
 ```sql
 CREATE TABLE sector_constituents (
@@ -84,7 +84,7 @@ CREATE TABLE sector_constituents (
 );
 ```
 
-插入样例：
+Insert sample data:
 
 ```sql
 INSERT INTO sector_constituents
@@ -94,7 +94,7 @@ VALUES
   ('GN_SEMI', '300661.SZ', 'batch_20260710_001', now());
 ```
 
-查询某个板块的成分股：
+Query constituents of one sector:
 
 ```sql
 SELECT stock_code
@@ -103,7 +103,7 @@ WHERE sector_code = 'GN_SEMI'
 ORDER BY stock_code;
 ```
 
-查询某只股票属于哪些板块：
+Query which sectors a stock belongs to:
 
 ```sql
 SELECT
@@ -117,7 +117,7 @@ WHERE c.stock_code = '688981.SH'
 ORDER BY s.category, s.sector_code;
 ```
 
-检查重复成分：
+Check duplicated constituents:
 
 ```sql
 SELECT
@@ -129,9 +129,9 @@ GROUP BY sector_code, stock_code
 HAVING count(*) > 1;
 ```
 
-## 4. LIST 字段
+## 4. LIST Columns
 
-DuckDB 支持 `LIST` 类型，常用写法是 `VARCHAR[]`。用于展示型快照，不替代明细关系表。
+DuckDB supports `LIST` columns. The common syntax is `VARCHAR[]`. Use LIST columns for display snapshots, not as a replacement for detail relation tables.
 
 ```sql
 CREATE TABLE sector_snapshot (
@@ -142,15 +142,15 @@ CREATE TABLE sector_snapshot (
 );
 ```
 
-插入样例：
+Insert sample data:
 
 ```sql
 INSERT INTO sector_snapshot
 VALUES
-  ('GN_SEMI', '半导体', ['688981.SH', '603986.SH', '300661.SZ'], now());
+  ('GN_SEMI', 'Semiconductor', ['688981.SH', '603986.SH', '300661.SZ'], now());
 ```
 
-判断列表中是否包含某只股票：
+Check whether the list contains a stock:
 
 ```sql
 SELECT *
@@ -158,7 +158,7 @@ FROM sector_snapshot
 WHERE list_contains(stock_codes, '688981.SH');
 ```
 
-把列表拆成明细行：
+Expand the list into detail rows:
 
 ```sql
 SELECT
@@ -168,17 +168,17 @@ SELECT
 FROM sector_snapshot;
 ```
 
-使用规则：
+Usage rules:
 
-- 页面展示“某板块包含哪些股票”：可以用 `VARCHAR[]`。
-- 查询“某股票属于哪些板块”：用 `sector_constituents`。
-- 关联 K 线、统计涨跌幅、做板块聚合：用 `sector_constituents`。
+- Display "which stocks are in this sector": `VARCHAR[]` is acceptable.
+- Query "which sectors contain this stock": use `sector_constituents`.
+- Join K-line data, compute returns, or aggregate by sector: use `sector_constituents`.
 
-## 5. 分区表
+## 5. Partitioned Table
 
-RSDuck 的分区表使用范围分区语法，不直接暴露 DuckDB 的 Hive 目录分区数据集。业务侧只操作逻辑表，物理分区由 RSDuck 在 `rsduck_internal` 下创建和维护。
+RSDuck partitioned tables use range partition syntax. They do not expose DuckDB Hive directory partition datasets directly. Business code operates on the logical table; physical partitions are created and maintained by RSDuck under `rsduck_internal`.
 
-创建按日分区、保留 30 个分区的分钟线表：
+Create a minute K-line table partitioned by day and retaining 30 partitions:
 
 ```sql
 CREATE TABLE kline_1m (
@@ -201,7 +201,7 @@ WITH (
 );
 ```
 
-写入时只写逻辑表：
+Write only to the logical table:
 
 ```sql
 INSERT INTO kline_1m (
@@ -221,7 +221,7 @@ VALUES
   ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now());
 ```
 
-查询仍然查询逻辑表：
+Query the logical table:
 
 ```sql
 SELECT
@@ -236,19 +236,19 @@ WHERE stock_code = '688981.SH'
 ORDER BY trade_time;
 ```
 
-查看分区状态：
+Show partition status:
 
 ```sql
 SHOW PARTITIONS FROM kline_1m;
 ```
 
-维护命令：
+Maintenance command:
 
 ```sql
 CALL rsduck_run_partition_maintenance();
 ```
 
-如果某个物理分区异常，可以先标记再修复：
+If a physical partition is abnormal, mark it first and then repair it:
 
 ```sql
 CALL rsduck_mark_partition_unavailable(
@@ -260,16 +260,16 @@ CALL rsduck_mark_partition_unavailable(
 CALL rsduck_repair_partition('kline_1m', '20260710');
 ```
 
-使用规则：
+Usage rules:
 
-- 分区键必须是 `DATE` 或 `TIMESTAMP`，且必须 `NOT NULL`。
-- `partition_unit` 支持 `hour`、`day`、`month`、`year`。
-- 外部不要直接操作 `rsduck_internal` 下的物理分区。
-- 需要导入外部 Parquet 文件时，使用 Web 的 Parquet 导入入口，不把它和分区表混在一个示例里。
+- The partition key must be `DATE` or `TIMESTAMP`, and must be `NOT NULL`.
+- `partition_unit` supports `hour`, `day`, `month`, and `year`.
+- External SQL should not directly operate on physical partitions under `rsduck_internal`.
+- Use the Web Parquet import entry point for external Parquet files. Do not mix it with the partitioned-table example.
 
-## 6. 视图
+## 6. Views
 
-视图用于固化常用查询。
+Views are used to persist common queries.
 
 ```sql
 CREATE VIEW v_sector_constituents AS
@@ -285,7 +285,7 @@ JOIN sector_constituents c
   ON s.sector_code = c.sector_code;
 ```
 
-查询视图：
+Query the view:
 
 ```sql
 SELECT *
@@ -294,7 +294,7 @@ WHERE sector_code = 'GN_SEMI'
 ORDER BY stock_code;
 ```
 
-替换视图：
+Replace the view:
 
 ```sql
 CREATE OR REPLACE VIEW v_sector_constituents AS
@@ -308,57 +308,57 @@ JOIN sector_constituents c
   ON s.sector_code = c.sector_code;
 ```
 
-## 7. 修改表结构
+## 7. Change Table Structure
 
-增加字段：
+Add a column:
 
 ```sql
 ALTER TABLE sector_list ADD COLUMN description VARCHAR;
 ```
 
-删除字段：
+Drop a column:
 
 ```sql
 ALTER TABLE sector_list DROP COLUMN description;
 ```
 
-修改字段名：
+Rename a column:
 
 ```sql
 ALTER TABLE sector_list RENAME COLUMN sector_name TO name;
 ```
 
-修改字段类型：
+Change a column type:
 
 ```sql
 ALTER TABLE sector_list ALTER COLUMN constituent_count SET DATA TYPE BIGINT;
 ```
 
-修改后检查：
+Check after changing structure:
 
 ```sql
 DESCRIBE sector_list;
 ```
 
-注意点：
+Notes:
 
-- 删除字段前先确认下游视图、查询、导出任务是否依赖该字段。
-- 修改字段类型前先检查现有数据能否转换。
-- 结构变更应写入操作日志。
+- Before dropping a column, check whether downstream views, queries, or export tasks depend on it.
+- Before changing a column type, check whether existing data can be converted.
+- Structural changes should be written to an operation log.
 
-## 8. 修改元数据
+## 8. Change Metadata
 
-表和字段说明用 `COMMENT ON`。
+Use `COMMENT ON` for table and column descriptions.
 
 ```sql
-COMMENT ON TABLE sector_list IS '股票板块主表';
+COMMENT ON TABLE sector_list IS 'Stock sector master table';
 ```
 
 ```sql
-COMMENT ON COLUMN sector_list.category IS '板块分类：concept、sw_industry、region、index 等';
+COMMENT ON COLUMN sector_list.category IS 'Sector category: concept, sw_industry, region, index, etc.';
 ```
 
-管理信息单独建表保存。
+Store management metadata in a separate table.
 
 ```sql
 CREATE TABLE data_catalog (
@@ -375,15 +375,15 @@ CREATE TABLE data_catalog (
 );
 ```
 
-写入样例：
+Insert sample data:
 
 ```sql
 INSERT INTO data_catalog
 VALUES (
   'sector_constituents',
   'table',
-  '板块成分股表',
-  '一行代表一个板块成分股',
+  'Sector constituent table',
+  'One row represents one sector constituent stock',
   'research',
   'xtquant',
   'scheduled',
@@ -393,7 +393,7 @@ VALUES (
 );
 ```
 
-查询数据目录：
+Query the data catalog:
 
 ```sql
 SELECT *
@@ -401,17 +401,17 @@ FROM data_catalog
 WHERE object_name = 'sector_constituents';
 ```
 
-## 9. 修改记录
+## 9. Change Records
 
-修改板块名称：
+Change a sector name:
 
 ```sql
 UPDATE sector_list
-SET sector_name = '半导体'
+SET sector_name = 'Semiconductor'
 WHERE sector_code = 'GN_SEMI';
 ```
 
-修改板块分类：
+Change a sector category:
 
 ```sql
 UPDATE sector_list
@@ -419,7 +419,7 @@ SET category = 'concept'
 WHERE sector_code = 'GN_SEMI';
 ```
 
-删除某个成分股：
+Delete one constituent:
 
 ```sql
 DELETE FROM sector_constituents
@@ -427,7 +427,7 @@ WHERE sector_code = 'GN_SEMI'
   AND stock_code = '300661.SZ';
 ```
 
-修改后校验：
+Validate after the change:
 
 ```sql
 SELECT *
@@ -436,27 +436,27 @@ WHERE sector_code = 'GN_SEMI'
 ORDER BY stock_code;
 ```
 
-执行规则：
+Execution rules:
 
-- `UPDATE` / `DELETE` 必须带明确 `WHERE`。
-- 批量修改优先走程序化任务。
-- 高风险修改记录执行人、SQL 摘要、影响行数。
+- `UPDATE` / `DELETE` must have an explicit `WHERE`.
+- Batch changes should preferably run as programmatic tasks.
+- High-risk changes should record executor, SQL digest, and affected row count.
 
-## 10. 查看对象和结构
+## 10. Inspect Objects and Structure
 
-查看表：
+Show tables:
 
 ```sql
 SHOW TABLES;
 ```
 
-查看字段：
+Show columns:
 
 ```sql
 DESCRIBE sector_list;
 ```
 
-查看样例数据：
+Show sample data:
 
 ```sql
 SELECT *
@@ -464,7 +464,7 @@ FROM sector_list
 LIMIT 20;
 ```
 
-查看视图：
+Show view data:
 
 ```sql
 SELECT *
@@ -472,20 +472,20 @@ FROM v_sector_constituents
 LIMIT 20;
 ```
 
-放在 Web SQL 样例库首页，风险等级标记为低。
+These examples belong on the Web SQL example library home page with low risk.
 
-## 11. SQL 样例库
+## 11. SQL Example Catalog
 
-样例字段：
+Example fields:
 
-- `title`：样例名称。
-- `category`：查询、建表、结构变更、数据修改、数据工程。
-- `risk_level`：low、medium、high。
-- `entry`：Navicat、Web SQL、后端任务。
-- `sql_template`：SQL 模板。
-- `params`：可替换参数。
+- `title`: example name.
+- `category`: query, table creation, structural change, data change, data engineering.
+- `risk_level`: low, medium, high.
+- `entry`: Navicat, Web SQL, backend task.
+- `sql_template`: SQL template.
+- `params`: replaceable parameters.
 
-样例表：
+Example table:
 
 ```sql
 CREATE TABLE sql_example_catalog (
@@ -499,13 +499,13 @@ CREATE TABLE sql_example_catalog (
 );
 ```
 
-示例数据：
+Sample data:
 
 ```sql
 INSERT INTO sql_example_catalog
 VALUES (
-  '查询板块成分股',
-  '查询',
+  'Query sector constituents',
+  'query',
   'low',
   'Web SQL',
   'SELECT stock_code FROM sector_constituents WHERE sector_code = $sector_code ORDER BY stock_code',
@@ -514,24 +514,24 @@ VALUES (
 );
 ```
 
-页面规则：
+Page rules:
 
-- 低风险样例允许直接运行。
-- 中风险样例显示确认弹窗。
-- 高风险样例要求管理员权限和二次确认。
+- Low-risk examples can run directly.
+- Medium-risk examples show a confirmation dialog.
+- High-risk examples require administrator permission and second confirmation.
 
-## 12. 程序化场景：板块成分全量同步
+## 12. Programmatic Scenario: Full Sector Constituent Sync
 
-流程：
+Flow:
 
-1. 生成 `ingest_batch_id`。
-2. 拉取板块列表和成分股列表。
-3. 写入 staging 表。
-4. 检查空板块、重复成分、非法股票代码。
-5. 事务内替换正式表。
-6. 写入同步日志。
+1. Generate `ingest_batch_id`.
+2. Fetch sector list and constituent list.
+3. Write to staging tables.
+4. Check empty sectors, duplicated constituents, and invalid stock codes.
+5. Replace official tables inside a transaction.
+6. Write sync log.
 
-同步日志表：
+Sync log table:
 
 ```sql
 CREATE TABLE sector_sync_log (
@@ -546,21 +546,21 @@ CREATE TABLE sector_sync_log (
 );
 ```
 
-核心要求：
+Core requirements:
 
-- 新批次校验失败时不覆盖旧数据。
-- 每次同步必须能按批次追踪。
-- 失败信息写入 `message`。
+- Do not overwrite old data if a new batch fails validation.
+- Every sync must be traceable by batch id.
+- Write failure details to `message`.
 
-## 13. 程序化场景：单个板块增量刷新
+## 13. Programmatic Scenario: Incremental Refresh for One Sector
 
-输入参数：
+Input parameters:
 
 - `sector_code`
 - `source`
 - `ingest_batch_id`
 
-事务 SQL 形态：
+Transaction SQL shape:
 
 ```sql
 BEGIN TRANSACTION;
@@ -582,15 +582,15 @@ WHERE sector_code = 'GN_SEMI';
 COMMIT;
 ```
 
-失败处理：
+Failure handling:
 
-- 拉取失败：不进入事务。
-- 校验失败：返回错误，不改正式表。
-- 写入失败：回滚事务。
+- Fetch failure: do not enter the transaction.
+- Validation failure: return an error and do not modify official tables.
+- Write failure: roll back the transaction.
 
-## 14. 程序化场景：板块行情聚合
+## 14. Programmatic Scenario: Sector Quote Aggregation
 
-结果表：
+Result table:
 
 ```sql
 CREATE TABLE sector_daily_stats (
@@ -606,7 +606,7 @@ CREATE TABLE sector_daily_stats (
 );
 ```
 
-按交易日生成统计：
+Generate statistics by trading day:
 
 ```sql
 INSERT INTO sector_daily_stats
@@ -627,7 +627,7 @@ WHERE k.trade_date = DATE '2026-07-10'
 GROUP BY c.sector_code, k.trade_date;
 ```
 
-查询某天板块排行：
+Query sector ranking for one day:
 
 ```sql
 SELECT *
@@ -637,9 +637,9 @@ ORDER BY avg_pct_chg DESC
 LIMIT 20;
 ```
 
-## 15. 程序化场景：Parquet 导入
+## 15. Programmatic Scenario: Parquet Import
 
-单文件导入：
+Single-file import shape:
 
 ```sql
 CREATE TABLE imported_daily_quote AS
@@ -647,24 +647,24 @@ SELECT *
 FROM read_parquet('snapshot/import/daily_quote.parquet');
 ```
 
-目录读取：
+Directory read shape:
 
 ```sql
 SELECT *
 FROM read_parquet('snapshot/import/daily_quote/*.parquet');
 ```
 
-导入页面需要做：
+The import page should:
 
-- 限制文件路径在允许目录内。
-- 导入前预览字段和行数。
-- 校验目标表名。
-- 批量导入失败时整体回滚。
-- 导入成功后写入 `data_catalog`。
+- Restrict file paths to the allowed root directory.
+- Preview columns and row count before import.
+- Validate target table names.
+- Roll back the whole batch if any file fails.
+- Write `data_catalog` after successful import.
 
-## 16. 程序化场景：数据质量检查
+## 16. Programmatic Scenario: Data Quality Checks
 
-检查没有成分股的板块：
+Check sectors without constituents:
 
 ```sql
 SELECT
@@ -677,7 +677,7 @@ GROUP BY s.sector_code, s.sector_name
 HAVING count(c.stock_code) = 0;
 ```
 
-检查成分数量不一致：
+Check constituent count mismatch:
 
 ```sql
 SELECT
@@ -691,7 +691,7 @@ GROUP BY s.sector_code, s.constituent_count
 HAVING s.constituent_count <> count(c.stock_code);
 ```
 
-检查非法股票代码：
+Check invalid stock codes:
 
 ```sql
 SELECT stock_code
@@ -699,51 +699,51 @@ FROM sector_constituents
 WHERE NOT regexp_matches(stock_code, '^[0-9]{6}\\.(SH|SZ|BJ)$');
 ```
 
-结果分级：
+Result levels:
 
-- error：阻止发布。
-- warning：允许发布，但页面展示。
-- info：只写日志。
+- error: block publishing.
+- warning: allow publishing but show on page.
+- info: log only.
 
-## 17. 程序化场景：快照与恢复
+## 17. Programmatic Scenario: Snapshot and Restore
 
-快照入口：
+Snapshot entry points:
 
-- 系统定时快照。
-- Web 手工快照。
-- 服务关闭前快照。
+- System periodic snapshot.
+- Manual Web snapshot.
+- Snapshot before service shutdown.
 
-页面展示字段：
+Page fields:
 
-- 快照时间。
-- 触发方式。
-- 对象数量。
-- 数据文件数量。
-- manifest 校验状态。
-- 是否可恢复。
+- Snapshot time.
+- Trigger type.
+- Object count.
+- Data file count.
+- Manifest verification status.
+- Whether it is restorable.
 
-权限要求：
+Permission requirements:
 
-- 普通用户不能保存和恢复 snapshot。
-- 管理员操作需要审计日志。
-- 恢复前展示目标快照的 manifest 信息。
+- Normal users cannot save or restore snapshots.
+- Administrator operations require audit logs.
+- Show target snapshot manifest information before restore.
 
-## 18. 程序化场景：权限和审计
+## 18. Programmatic Scenario: Privilege and Audit
 
-创建分析角色：
+Create an analyst role:
 
 ```sql
 CREATE ROLE analyst;
 ```
 
-授权读取板块表：
+Grant read access to sector tables:
 
 ```sql
 GRANT SELECT ON TABLE sector_list TO ROLE analyst;
 GRANT SELECT ON TABLE sector_constituents TO ROLE analyst;
 ```
 
-审计日志字段：
+Audit log fields:
 
 ```sql
 CREATE TABLE sql_audit_log (
@@ -758,37 +758,37 @@ CREATE TABLE sql_audit_log (
 );
 ```
 
-记录范围：
+Record scope:
 
-- DDL：`CREATE`、`ALTER`、`DROP`
-- DML：`INSERT`、`UPDATE`、`DELETE`
-- 系统操作：导入、快照、恢复、权限变更
+- DDL: `CREATE`, `ALTER`, `DROP`
+- DML: `INSERT`, `UPDATE`, `DELETE`
+- System operations: import, snapshot, restore, privilege changes
 
-## 19. 页面落地
+## 19. Web Implementation
 
-SQL 样例库：
+SQL example library:
 
-- 按风险等级和操作类型筛选。
-- 支持参数填写后生成 SQL。
-- 低风险可直接运行，高风险必须确认。
+- Filter by risk level and operation type.
+- Generate SQL after parameter input.
+- Low-risk examples can run directly; high-risk examples require confirmation.
 
-数据对象管理：
+Data object management:
 
-- 展示表、视图、字段、注释、数据目录信息。
-- 展示行数概览和最近更新时间。
-- 修改元数据走受控表单，不直接编辑系统表。
+- Show tables, views, columns, comments, and data catalog information.
+- Show row-count overview and latest update time.
+- Metadata changes should use controlled forms, not direct system-table editing.
 
-数据任务：
+Data tasks:
 
-- 板块同步。
-- Parquet 导入。
-- 分区表维护。
-- 数据质量检查。
-- snapshot 保存和恢复。
+- Sector sync.
+- Parquet import.
+- Partitioned table maintenance.
+- Data quality checks.
+- Snapshot save and restore.
 
-每个任务至少展示：状态、开始时间、结束时间、批次号、影响行数、失败原因。
+Each task should at least show: status, start time, finish time, batch id, affected row count, and failure reason.
 
-## 20. 参考
+## 20. References
 
 - DuckDB `CREATE TABLE`: https://duckdb.org/docs/current/sql/statements/create_table
 - DuckDB `ALTER TABLE`: https://duckdb.org/docs/current/sql/statements/alter_table

@@ -1,5 +1,7 @@
 # rsduck 总体架构设计
 
+语言：中文 | [English](architecture-overview.en.md)
+
 本文从架构视角说明 rsduck 的整体设计：进程如何启动，内存 DuckDB 如何被包装成服务，线程和 worker 如何协作，以及 Web/MySQL 两类外部接口如何进入同一套执行引擎。
 
 ## 1. 设计目标
