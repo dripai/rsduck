@@ -1,6 +1,6 @@
 #define AppName "rsduck"
 #ifndef AppVersion
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.11"
 #endif
 #ifndef SourceDir
 #define SourceDir "..\..\service"
@@ -8,6 +8,7 @@
 #ifndef OutputDir
 #define OutputDir "..\..\dist"
 #endif
+#define WebConsoleUrl "http://127.0.0.1:13307"
 
 [Setup]
 AppId={{2B24BCB9-6A7A-4D35-8F86-2C0A1865A2F8}
@@ -44,13 +45,17 @@ Source: "{#SourceDir}\uninstall-service.ps1"; DestDir: "{app}"; Flags: ignorever
 Source: "{#SourceDir}\rsduck.toml"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "{#SourceDir}\init.sql"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+
 [Icons]
-Name: "{group}\rsduck Web Console"; Filename: "http://127.0.0.1:8080"
+Name: "{group}\rsduck Web Console"; Filename: "{#WebConsoleUrl}"
+Name: "{autodesktop}\rsduck"; Filename: "{#WebConsoleUrl}"; Tasks: desktopicon
 Name: "{group}\Uninstall rsduck"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-service.ps1"""; WorkingDir: "{app}"; StatusMsg: "Installing and starting rsduck service..."; Flags: runhidden waituntilterminated
-Filename: "http://127.0.0.1:8080"; Description: "Open rsduck Web Console"; Flags: postinstall shellexec skipifsilent unchecked
+Filename: "{#WebConsoleUrl}"; Description: "Open rsduck Web Console"; Flags: postinstall shellexec skipifsilent unchecked
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall-service.ps1"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated
