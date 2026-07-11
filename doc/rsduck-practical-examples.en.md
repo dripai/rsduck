@@ -60,7 +60,15 @@ Insert sample data:
 INSERT INTO sector_list
 VALUES
   ('GN_SEMI', 'Semiconductor', 'concept', 3, 'xtquant', 'batch_20260710_001', now()),
-  ('SW_ELEC', 'Electronics', 'sw_industry', 2, 'xtquant', 'batch_20260710_001', now());
+  ('GN_AI', 'Artificial Intelligence', 'concept', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('GN_CLOUD', 'Cloud Computing', 'concept', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_ELEC', 'Electronics', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_COMP', 'Computer Industry', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_MED', 'Healthcare', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('REG_BEIJING', 'Beijing Sector', 'region', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('INDEX_HS300', 'CSI 300', 'index', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('INDEX_ZZ500', 'CSI 500', 'index', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('ETF_50', 'SSE 50 ETF', 'fund_etf', 1, 'xtquant', 'batch_20260710_001', now());
 ```
 
 Check inserted rows:
@@ -91,7 +99,16 @@ INSERT INTO sector_constituents
 VALUES
   ('GN_SEMI', '688981.SH', 'batch_20260710_001', now()),
   ('GN_SEMI', '603986.SH', 'batch_20260710_001', now()),
-  ('GN_SEMI', '300661.SZ', 'batch_20260710_001', now());
+  ('GN_SEMI', '300661.SZ', 'batch_20260710_001', now()),
+  ('GN_AI', '688111.SH', 'batch_20260710_001', now()),
+  ('GN_CLOUD', '600570.SH', 'batch_20260710_001', now()),
+  ('SW_ELEC', '002049.SZ', 'batch_20260710_001', now()),
+  ('SW_COMP', '002415.SZ', 'batch_20260710_001', now()),
+  ('SW_MED', '300760.SZ', 'batch_20260710_001', now()),
+  ('REG_BEIJING', '688981.SH', 'batch_20260710_001', now()),
+  ('INDEX_HS300', '600519.SH', 'batch_20260710_001', now()),
+  ('INDEX_ZZ500', '300750.SZ', 'batch_20260710_001', now()),
+  ('ETF_50', '510050.SH', 'batch_20260710_001', now());
 ```
 
 Query constituents of one sector:
@@ -147,7 +164,16 @@ Insert sample data:
 ```sql
 INSERT INTO sector_snapshot
 VALUES
-  ('GN_SEMI', 'Semiconductor', ['688981.SH', '603986.SH', '300661.SZ'], now());
+  ('GN_SEMI', 'Semiconductor', ['688981.SH', '603986.SH', '300661.SZ'], now()),
+  ('GN_AI', 'Artificial Intelligence', ['688111.SH'], now()),
+  ('GN_CLOUD', 'Cloud Computing', ['600570.SH'], now()),
+  ('SW_ELEC', 'Electronics', ['002049.SZ'], now()),
+  ('SW_COMP', 'Computer Industry', ['002415.SZ'], now()),
+  ('SW_MED', 'Healthcare', ['300760.SZ'], now()),
+  ('REG_BEIJING', 'Beijing Sector', ['688981.SH'], now()),
+  ('INDEX_HS300', 'CSI 300', ['600519.SH'], now()),
+  ('INDEX_ZZ500', 'CSI 500', ['300750.SZ'], now()),
+  ('ETF_50', 'SSE 50 ETF', ['510050.SH'], now());
 ```
 
 Check whether the list contains a stock:
@@ -218,7 +244,15 @@ INSERT INTO kline_1m (
 )
 VALUES
   ('688981.SH', TIMESTAMP '2026-07-10 09:31:00', 50.1, 50.4, 50.0, 50.2, 120000, 6024000, 'batch_20260710_001', now()),
-  ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now());
+  ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:33:00', 50.3, 50.6, 50.2, 50.5, 110000, 5555000, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:34:00', 50.5, 50.7, 50.3, 50.4, 88000, 4435200, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:35:00', 50.4, 50.8, 50.4, 50.7, 132000, 6692400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:36:00', 50.7, 50.9, 50.5, 50.6, 105000, 5313000, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:37:00', 50.6, 50.8, 50.3, 50.4, 96000, 4838400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:38:00', 50.4, 50.6, 50.2, 50.3, 87000, 4376100, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:39:00', 50.3, 50.5, 50.1, 50.2, 91000, 4568200, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:40:00', 50.2, 50.4, 50.0, 50.1, 102000, 5110200, 'batch_20260710_001', now());
 ```
 
 Query the logical table:
@@ -310,6 +344,16 @@ JOIN sector_constituents c
 
 ## 7. Change Table Structure
 
+### Support Boundary
+
+| Object | Rename column | Change column type | Constraint |
+|---|---|---|---|
+| Ordinary table | Supported | Supported | Reject the operation when an external dependent view exists. DuckDB converts existing data; the transaction rolls back if conversion fails. |
+| Non-partition column of a partitioned table | Supported | Supported | Reject the operation when an external dependent view exists. All active physical partitions change in one transaction; any partition failure rolls back the whole operation. |
+| Partition key column | Supported | Not supported | Rename checks external view dependencies, then refreshes partition-routing metadata and the logical entrypoint view. |
+
+Column rename does not convert historical data. A type change must operate on physical data columns; DuckDB performs the conversion validation during DDL execution, and rsduck does not run a redundant pre-scan. The current version supports adding, dropping, renaming, and type changes within the boundary above.
+
 Add a column:
 
 ```sql
@@ -379,18 +423,17 @@ Insert sample data:
 
 ```sql
 INSERT INTO data_catalog
-VALUES (
-  'sector_constituents',
-  'table',
-  'Sector constituent table',
-  'One row represents one sector constituent stock',
-  'research',
-  'xtquant',
-  'scheduled',
-  '0 30 18 * * 1-5',
-  'medium',
-  now()
-);
+VALUES
+  ('sector_list', 'table', 'Sector master table', 'One row represents one stock sector', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'low', now()),
+  ('sector_constituents', 'table', 'Sector constituent table', 'One row represents one sector constituent stock', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'medium', now()),
+  ('sector_snapshot', 'table', 'Sector snapshot table', 'Display-oriented snapshot of sector constituent lists', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'low', now()),
+  ('kline_1m', 'table', 'One-minute quotes', 'Quote data stored by trading minute', 'market-data', 'xtquant', 'scheduled', '*/1 9-15 * * 1-5', 'medium', now()),
+  ('kline_1d', 'table', 'Daily quotes', 'Unadjusted quote data stored by trading day', 'market-data', 'xtquant', 'scheduled', '0 0 18 * * 1-5', 'medium', now()),
+  ('sector_daily_stats', 'table', 'Sector daily statistics', 'Daily aggregate of sector performance and turnover', 'research', 'rsduck-job', 'scheduled', '0 10 18 * * 1-5', 'low', now()),
+  ('v_sector_constituents', 'view', 'Sector constituent view', 'Common view joining sectors and constituents', 'research', 'rsduck', 'manual', NULL, 'low', now()),
+  ('sql_example_catalog', 'table', 'SQL example catalog', 'Sample definitions used by the Web SQL page', 'platform', 'rsduck', 'manual', NULL, 'low', now()),
+  ('sector_sync_log', 'table', 'Sector synchronization log', 'Records sector constituent synchronization batches and outcomes', 'platform', 'rsduck-job', 'scheduled', '0 30 18 * * 1-5', 'medium', now()),
+  ('sql_audit_log', 'table', 'SQL audit log', 'Records high-risk SQL and system operations', 'platform', 'rsduck', 'realtime', NULL, 'high', now());
 ```
 
 Query the data catalog:
@@ -456,6 +499,12 @@ Show columns:
 DESCRIBE sector_list;
 ```
 
+Show columns with comments:
+
+```sql
+SHOW TABLE sector_list;
+```
+
 Show sample data:
 
 ```sql
@@ -503,15 +552,17 @@ Sample data:
 
 ```sql
 INSERT INTO sql_example_catalog
-VALUES (
-  'Query sector constituents',
-  'query',
-  'low',
-  'Web SQL',
-  'SELECT stock_code FROM sector_constituents WHERE sector_code = $sector_code ORDER BY stock_code',
-  ['sector_code'],
-  now()
-);
+VALUES
+  ('Query sector constituents', 'query', 'low', 'Web SQL', 'SELECT stock_code FROM sector_constituents WHERE sector_code = $sector_code ORDER BY stock_code', ['sector_code'], now()),
+  ('Query sectors for a stock', 'query', 'low', 'Web SQL', 'SELECT sector_code FROM sector_constituents WHERE stock_code = $stock_code ORDER BY sector_code', ['stock_code'], now()),
+  ('View sector master table', 'query', 'low', 'Web SQL', 'SELECT * FROM sector_list ORDER BY sector_code LIMIT $limit', ['limit'], now()),
+  ('View minute quotes', 'query', 'low', 'Web SQL', 'SELECT * FROM kline_1m WHERE stock_code = $stock_code ORDER BY trade_time DESC LIMIT $limit', ['stock_code', 'limit'], now()),
+  ('View partition status', 'query', 'low', 'Web SQL', 'SHOW PARTITIONS FROM kline_1m', [], now()),
+  ('Create sector view', 'create', 'medium', 'Web SQL', 'CREATE OR REPLACE VIEW v_sector_constituents AS SELECT s.sector_code, s.sector_name, c.stock_code FROM sector_list s JOIN sector_constituents c ON s.sector_code = c.sector_code', [], now()),
+  ('Add sector description', 'schema-change', 'medium', 'Web SQL', 'ALTER TABLE sector_list ADD COLUMN description VARCHAR', [], now()),
+  ('Update sector name', 'data-change', 'medium', 'Web SQL', 'UPDATE sector_list SET sector_name = $sector_name WHERE sector_code = $sector_code', ['sector_name', 'sector_code'], now()),
+  ('Delete a sector constituent', 'data-change', 'high', 'Web SQL', 'DELETE FROM sector_constituents WHERE sector_code = $sector_code AND stock_code = $stock_code', ['sector_code', 'stock_code'], now()),
+  ('Run partition maintenance', 'data-engineering', 'medium', 'Web SQL', 'CALL rsduck_run_partition_maintenance()', [], now());
 ```
 
 Page rules:
@@ -571,10 +622,18 @@ WHERE sector_code = 'GN_SEMI';
 INSERT INTO sector_constituents
 VALUES
   ('GN_SEMI', '688981.SH', 'batch_20260710_002', now()),
-  ('GN_SEMI', '603986.SH', 'batch_20260710_002', now());
+  ('GN_SEMI', '603986.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '300661.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '002371.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '002049.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '603501.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688012.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688041.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '300346.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688256.SH', 'batch_20260710_002', now());
 
 UPDATE sector_list
-SET constituent_count = 2,
+SET constituent_count = 10,
     ingest_batch_id = 'batch_20260710_002',
     ingest_at = now()
 WHERE sector_code = 'GN_SEMI';

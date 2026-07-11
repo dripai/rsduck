@@ -11,12 +11,17 @@ pub fn compat_result(sql: &str) -> Option<SqlTypedResult> {
 
 pub fn rewrite_sql(sql: &str, current_schema: &str, username: &str) -> Option<String> {
     show_table_status_sql(sql, current_schema, username)
+        .or_else(|| show_table_detail_sql(sql, current_schema, username))
         .or_else(|| show_tables_sql(sql, current_schema, username))
         .or_else(|| show_columns_sql(sql, current_schema, username))
         .or_else(|| show_index_sql(sql, current_schema, username))
         .or_else(|| show_routine_status_sql(sql, current_schema))
         .or_else(|| rewrite_mysql_system_sql(sql))
         .or_else(|| rewrite_information_schema_sql(sql, username))
+}
+
+pub fn is_show_table_detail(sql: &str) -> bool {
+    parse_show_table_status_query(sql).is_none() && parse_show_table_detail_query(sql).is_some()
 }
 
 pub fn is_mysql_system_projection(sql: &str) -> bool {
@@ -381,6 +386,12 @@ struct ShowColumnsQuery {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct ShowTableDetailQuery {
+    schema: Option<String>,
+    table: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ShowIndexQuery {
     schema: Option<String>,
     table: String,
@@ -453,6 +464,29 @@ fn show_table_status_sql(sql: &str, current_schema: &str, username: &str) -> Opt
     apply_show_filter(&mut out, &parsed.filter, "\"Name\"");
     out.push_str(" ORDER BY \"Name\"");
     Some(out)
+}
+
+fn show_table_detail_sql(sql: &str, current_schema: &str, username: &str) -> Option<String> {
+    let parsed = parse_show_table_detail_query(sql)?;
+    let schema = parsed.schema.as_deref().unwrap_or(current_schema);
+    Some(format!(
+        "SELECT
+            column_name,
+            column_type,
+            is_nullable AS \"null\",
+            column_key AS \"key\",
+            CASE WHEN column_default = '' THEN NULL ELSE column_default END AS \"default\",
+            extra,
+            column_comment AS comment
+         FROM ({}) information_schema_columns
+         WHERE table_catalog = current_database()
+           AND table_schema = {}
+           AND table_name = {}
+         ORDER BY ordinal_position",
+        information_schema_columns_sql(username),
+        sql_literal(schema),
+        sql_literal(&parsed.table)
+    ))
 }
 
 fn show_columns_sql(sql: &str, current_schema: &str, username: &str) -> Option<String> {
@@ -645,6 +679,20 @@ fn parse_show_table_status_query(sql: &str) -> Option<ShowTablesQuery> {
     })
 }
 
+fn parse_show_table_detail_query(sql: &str) -> Option<ShowTableDetailQuery> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut idx = 0;
+    idx = consume_keyword(trimmed, idx, "show")?;
+    idx = skip_mysql_space(trimmed, idx);
+    idx = consume_keyword(trimmed, idx, "table")?;
+    idx = skip_mysql_space(trimmed, idx);
+    let (schema, table, next_idx) = parse_mysql_qualified_identifier(trimmed, idx)?;
+    if skip_mysql_space(trimmed, next_idx) != trimmed.len() {
+        return None;
+    }
+    Some(ShowTableDetailQuery { schema, table })
+}
+
 fn parse_show_columns_query(sql: &str) -> Option<ShowColumnsQuery> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let mut idx = 0;
@@ -830,8 +878,8 @@ fn information_schema_tables_sql(username: &str) -> String {
             CASE WHEN c.relkind = 'v' THEN NULL ELSE 'utf8mb4_general_ci' END AS table_collation,
             CAST(NULL AS BIGINT) AS checksum,
             '' AS create_options,
-            CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE COALESCE(physical.comment, d.description, '') END AS table_comment,
-            COALESCE(physical.comment, d.description, '') AS description,
+            CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE COALESCE(NULLIF(physical.comment, ''), d.description, '') END AS table_comment,
+            COALESCE(NULLIF(physical.comment, ''), d.description, '') AS description,
             c.status AS rsduck_status,
             c.error_message AS rsduck_error_message
         FROM physical_relations physical
@@ -965,7 +1013,7 @@ fn information_schema_columns_sql(username: &str) -> String {
             physical.schema_name AS table_schema,
             physical.table_name AS table_name,
             physical.column_name AS column_name,
-            physical.column_index + 1 AS ordinal_position,
+            physical.column_index AS ordinal_position,
             COALESCE(physical.column_default, '') AS column_default,
             CASE WHEN physical.is_nullable THEN 'YES' ELSE 'NO' END AS is_nullable,
             lower(physical.data_type) AS data_type,
@@ -982,18 +1030,18 @@ fn information_schema_columns_sql(username: &str) -> String {
                 WHEN EXISTS (
                     SELECT 1 FROM rsduck_catalog.rs_constraint con
                     WHERE con.conrelid = c.oid AND con.contype = 'p'
-                      AND COALESCE(list_position(string_split(con.conkey, ','), CAST(physical.column_index + 1 AS VARCHAR)), 0) > 0
+                      AND COALESCE(list_position(string_split(con.conkey, ','), CAST(physical.column_index AS VARCHAR)), 0) > 0
                 ) THEN 'PRI'
                 WHEN EXISTS (
                     SELECT 1 FROM rsduck_catalog.rs_constraint con
                     WHERE con.conrelid = c.oid AND con.contype = 'u'
-                      AND COALESCE(list_position(string_split(con.conkey, ','), CAST(physical.column_index + 1 AS VARCHAR)), 0) > 0
+                      AND COALESCE(list_position(string_split(con.conkey, ','), CAST(physical.column_index AS VARCHAR)), 0) > 0
                 ) THEN 'UNI'
                 ELSE ''
             END AS column_key,
             '' AS extra,
             '' AS privileges,
-            COALESCE(physical.comment, d.description, '') AS column_comment,
+            COALESCE(NULLIF(physical.comment, ''), d.description, '') AS column_comment,
             'NEVER' AS generation_expression,
             'YES' AS is_updatable
         FROM duckdb_columns() physical
@@ -1002,7 +1050,7 @@ fn information_schema_columns_sql(username: &str) -> String {
           ON c.relnamespace = n.oid AND lower(c.relname) = lower(physical.table_name)
         JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = c.oid
         LEFT JOIN rsduck_catalog.rs_comment d
-          ON d.objoid = c.oid AND d.objsubid = physical.column_index + 1
+          ON d.objoid = c.oid AND d.objsubid = physical.column_index
         WHERE physical.internal = FALSE
           AND c.status IN ('active', 'unavailable')
           AND ext.visibility = 'user'
@@ -1326,7 +1374,7 @@ fn mysql_engines_result() -> SqlTypedResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{replace_ignore_ascii_case, rewrite_sql};
+    use super::{is_show_table_detail, replace_ignore_ascii_case, rewrite_sql};
     use duckdb::Connection;
 
     #[test]
@@ -1383,5 +1431,35 @@ mod tests {
                 "value".to_string()
             )
         );
+    }
+
+    #[test]
+    fn show_table_detail_rewrites_to_column_metadata_with_comments() {
+        assert!(is_show_table_detail("SHOW TABLE main.sector_list"));
+        assert!(!is_show_table_detail("SHOW TABLE STATUS"));
+        assert!(!is_show_table_detail("SHOW TABLES"));
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::catalog::bootstrap_fresh(&conn).unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "CREATE TABLE sector_list(sector_code VARCHAR)",
+        )
+        .unwrap();
+        crate::catalog::execute_catalog_aware_write(
+            &conn,
+            "COMMENT ON COLUMN sector_list.sector_code IS 'global sector code'",
+        )
+        .unwrap();
+
+        let sql = rewrite_sql("SHOW TABLE main.sector_list", "main", "admin").unwrap();
+        assert!(sql.contains("column_comment AS comment"));
+        assert!(sql.contains("table_schema = 'main'"));
+        assert!(sql.contains("table_name = 'sector_list'"));
+        let (column_name, comment): (String, String) = conn
+            .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(6)?)))
+            .unwrap();
+        assert_eq!(column_name, "sector_code");
+        assert_eq!(comment, "global sector code");
     }
 }

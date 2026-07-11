@@ -277,6 +277,20 @@ Every catalog-aware mutation must maintain:
 
 The goal is to keep client-visible objects, privilege decisions, snapshot restore, and DuckDB physical state consistent.
 
+### ALTER TABLE Policy
+
+Column rename and type changes cannot update only `rsduck_catalog`: physical data and catalog records must remain consistent in the same transaction.
+
+- Ordinary-table rename: execute DuckDB DDL, then update the matching `rs_column` name. The attribute number, comments, and attribute-number-based dependencies remain stable.
+- Ordinary-table type change: execute DuckDB DDL so it converts existing data, then update `rs_column.atttypid` and related metadata from the resulting physical column definition.
+- Non-partition column of a partitioned table: execute the same DDL on every active physical partition, then synchronize parent and child catalog records and refresh the logical entrypoint view. Any partition failure rolls back the entire transaction.
+- Partition-key rename: in addition to the preceding steps, update `rs_relation_ext.partition_key` and refresh future write routing. Reject the operation when external dependent views exist, avoiding views that retain the old column name.
+- Partition-key type change: not supported, because it affects partition boundaries, routing-value formats, and `partition_unit` semantics.
+
+Type changes do not use a separate pre-scan. DuckDB DDL is the single actual conversion validation. If indexes, constraints, or other DuckDB dependencies block the change, rsduck returns DuckDB's dependency or conversion error.
+
+Before a column rename or type change, rsduck checks for external dependent views. If any exist, the operation is rejected so that no view definition is left invalid after the structural change.
+
 ## 10. Why rsduck Does Not Create MySQL System Tables
 
 Navicat queries many MySQL system tables, for example:

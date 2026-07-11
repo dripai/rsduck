@@ -90,10 +90,326 @@ pub(in crate::catalog) fn alter_table_relation(
                 Ok(0)
             })
         }
-        _ => Err(
-            "only ALTER TABLE ADD COLUMN and DROP COLUMN are implemented by rsduck catalog".into(),
-        ),
+        AlterTableOperation::RenameColumn {
+            old_column_name,
+            new_column_name,
+        } => run_catalog_tx(conn, || {
+            let rel_oid = relation_oid(conn, &schema, &table)?;
+            let journal_id = insert_journal(conn, "alter_table_rename_column", rel_oid, sql)?;
+            alter_table_rename_column(
+                conn,
+                rel_oid,
+                &schema,
+                &table,
+                &old_column_name.value,
+                &new_column_name.value,
+                sql,
+            )?;
+            finish_journal(conn, journal_id)?;
+            Ok(0)
+        }),
+        AlterTableOperation::AlterColumn {
+            column_name,
+            op: AlterColumnOperation::SetDataType { .. },
+        } => run_catalog_tx(conn, || {
+            let rel_oid = relation_oid(conn, &schema, &table)?;
+            let journal_id = insert_journal(conn, "alter_table_set_column_type", rel_oid, sql)?;
+            alter_table_set_column_type(
+                conn,
+                rel_oid,
+                &schema,
+                &table,
+                &column_name.value,
+                &alter_table.operations[0].to_string(),
+                sql,
+            )?;
+            finish_journal(conn, journal_id)?;
+            Ok(0)
+        }),
+        _ => Err("unsupported ALTER TABLE operation for rsduck catalog".into()),
     }
+}
+
+pub(in crate::catalog) fn alter_table_rename_column(
+    conn: &Connection,
+    rel_oid: i64,
+    schema: &str,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+    sql: &str,
+) -> Result<(), String> {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return Err("ALTER TABLE RENAME COLUMN requires distinct column names".into());
+    }
+    let old_attnum = column_attnum(conn, rel_oid, old_name)?
+        .ok_or_else(|| format!("column does not exist in catalog: {schema}.{table}.{old_name}"))?;
+    if column_exists(conn, rel_oid, new_name)? {
+        return Err(format!(
+            "column already exists: {schema}.{table}.{new_name}"
+        ));
+    }
+    ensure_no_dependent_views(conn, rel_oid, schema, table, old_name, "rename")?;
+
+    match relation_kind(conn, rel_oid)?.as_str() {
+        "r" => {
+            conn.execute(sql, [])
+                .map_err(|e| format!("execute DuckDB ALTER TABLE RENAME COLUMN failed: {e}"))?;
+            let column = duckdb_column(conn, schema, table, new_name)?;
+            sync_catalog_column(conn, rel_oid, old_attnum, &column, new_name)
+        }
+        "p" => alter_partitioned_table_rename_column(
+            conn, rel_oid, schema, table, old_name, new_name, old_attnum,
+        ),
+        relkind => Err(format!(
+            "ALTER TABLE RENAME COLUMN only supports ordinary or partitioned tables, got relkind={relkind}"
+        )),
+    }
+}
+
+pub(in crate::catalog) fn alter_table_set_column_type(
+    conn: &Connection,
+    rel_oid: i64,
+    schema: &str,
+    table: &str,
+    column_name: &str,
+    operation_sql: &str,
+    sql: &str,
+) -> Result<(), String> {
+    let attnum = column_attnum(conn, rel_oid, column_name)?.ok_or_else(|| {
+        format!("column does not exist in catalog: {schema}.{table}.{column_name}")
+    })?;
+    ensure_no_dependent_views(conn, rel_oid, schema, table, column_name, "change type")?;
+
+    match relation_kind(conn, rel_oid)?.as_str() {
+        "r" => {
+            conn.execute(sql, [])
+                .map_err(|e| format!("execute DuckDB ALTER TABLE SET DATA TYPE failed: {e}"))?;
+            let column = duckdb_column(conn, schema, table, column_name)?;
+            sync_catalog_column(conn, rel_oid, attnum, &column, column_name)
+        }
+        "p" => alter_partitioned_table_set_column_type(
+            conn,
+            rel_oid,
+            schema,
+            table,
+            column_name,
+            attnum,
+            operation_sql,
+        ),
+        relkind => Err(format!(
+            "ALTER TABLE SET DATA TYPE only supports ordinary or partitioned tables, got relkind={relkind}"
+        )),
+    }
+}
+
+fn alter_partitioned_table_rename_column(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+    parent_attnum: i32,
+) -> Result<(), String> {
+    let partition_key = partition_key_name(conn, parent_oid)?;
+    let children = active_partition_children(conn, parent_oid)?;
+    if children.is_empty() {
+        return Err("partitioned table has no active physical partitions".into());
+    }
+
+    for child in &children {
+        let child_attnum = column_attnum(conn, child.child_oid, old_name)?.ok_or_else(|| {
+            format!(
+                "partition column does not exist in catalog: {}.{}.{}",
+                child.schema, child.relname, old_name
+            )
+        })?;
+        conn.execute(
+            &format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                quote_qualified(&child.schema, &child.relname),
+                quote_ident(old_name),
+                quote_ident(new_name)
+            ),
+            [],
+        )
+        .map_err(|e| {
+            format!(
+                "execute DuckDB ALTER TABLE RENAME COLUMN on partition {}.{} failed: {e}",
+                child.schema, child.relname
+            )
+        })?;
+        let column = duckdb_column(conn, &child.schema, &child.relname, new_name)?;
+        sync_catalog_column(conn, child.child_oid, child_attnum, &column, new_name)?;
+    }
+
+    rename_catalog_column(conn, parent_oid, parent_attnum, new_name)?;
+    if old_name.eq_ignore_ascii_case(&partition_key) {
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.rs_relation_ext \
+                 SET partition_key = '{}', updated_at = CURRENT_TIMESTAMP \
+                 WHERE relid = {parent_oid}",
+                sql_string(new_name)
+            ),
+            [],
+        )
+        .map_err(|e| format!("update renamed partition key metadata failed: {e}"))?;
+    }
+    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+}
+
+fn alter_partitioned_table_set_column_type(
+    conn: &Connection,
+    parent_oid: i64,
+    schema: &str,
+    table: &str,
+    column_name: &str,
+    parent_attnum: i32,
+    operation_sql: &str,
+) -> Result<(), String> {
+    if column_name.eq_ignore_ascii_case(&partition_key_name(conn, parent_oid)?) {
+        return Err("ALTER TABLE SET DATA TYPE does not support a partition key column".into());
+    }
+    let children = active_partition_children(conn, parent_oid)?;
+    if children.is_empty() {
+        return Err("partitioned table has no active physical partitions".into());
+    }
+
+    let mut parent_column = None;
+    for child in &children {
+        let child_attnum = column_attnum(conn, child.child_oid, column_name)?.ok_or_else(|| {
+            format!(
+                "partition column does not exist in catalog: {}.{}.{}",
+                child.schema, child.relname, column_name
+            )
+        })?;
+        conn.execute(
+            &format!(
+                "ALTER TABLE {} {}",
+                quote_qualified(&child.schema, &child.relname),
+                operation_sql
+            ),
+            [],
+        )
+        .map_err(|e| {
+            format!(
+                "execute DuckDB ALTER TABLE SET DATA TYPE on partition {}.{} failed: {e}",
+                child.schema, child.relname
+            )
+        })?;
+        let column = duckdb_column(conn, &child.schema, &child.relname, column_name)?;
+        sync_catalog_column(conn, child.child_oid, child_attnum, &column, column_name)?;
+        if parent_column.is_none() {
+            parent_column = Some(column);
+        }
+    }
+
+    let parent_column = parent_column
+        .ok_or_else(|| "partitioned table has no active physical partitions".to_string())?;
+    sync_catalog_column(conn, parent_oid, parent_attnum, &parent_column, column_name)?;
+    refresh_partition_entrypoint(conn, parent_oid, schema, table)
+}
+
+fn ensure_no_dependent_views(
+    conn: &Connection,
+    rel_oid: i64,
+    schema: &str,
+    table: &str,
+    column_name: &str,
+    operation: &str,
+) -> Result<(), String> {
+    if dependent_relation_oids(conn, rel_oid)?.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot {operation} for column with dependent views: {schema}.{table}.{column_name}"
+    ))
+}
+
+fn partition_key_name(conn: &Connection, parent_oid: i64) -> Result<String, String> {
+    conn.query_row(
+        &format!(
+            "SELECT partition_key FROM rsduck_catalog.rs_relation_ext WHERE relid = {parent_oid}"
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read partition key failed: {e}"))
+}
+
+fn duckdb_column(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    column_name: &str,
+) -> Result<CatalogColumn, String> {
+    load_duckdb_columns(conn, schema, table)?
+        .into_iter()
+        .find(|column| column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| format!("DuckDB did not expose column: {schema}.{table}.{column_name}"))
+}
+
+fn sync_catalog_column(
+    conn: &Connection,
+    rel_oid: i64,
+    attnum: i32,
+    column: &CatalogColumn,
+    name: &str,
+) -> Result<(), String> {
+    let type_id = ensure_type_id_for_duckdb_type(conn, &column.duckdb_type)?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_column \
+             SET attname = '{}', atttypid = {type_id}, attnotnull = {}, atthasdef = {} \
+             WHERE attrelid = {rel_oid} AND attnum = {attnum}",
+            sql_string(name),
+            sql_bool(column.not_null),
+            sql_bool(column.default_expr.is_some())
+        ),
+        [],
+    )
+    .map_err(|e| format!("update altered column metadata failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.rs_column_default \
+             WHERE adrelid = {rel_oid} AND adnum = {attnum}"
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete altered column default failed: {e}"))?;
+    if let Some(default_expr) = &column.default_expr {
+        let default_oid = allocate_oid(conn)?;
+        conn.execute(
+            &format!(
+                "INSERT INTO rsduck_catalog.rs_column_default(oid, adrelid, adnum, adbin) \
+                 VALUES ({default_oid}, {rel_oid}, {attnum}, '{}')",
+                sql_string(default_expr)
+            ),
+            [],
+        )
+        .map_err(|e| format!("write altered column default failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn rename_catalog_column(
+    conn: &Connection,
+    rel_oid: i64,
+    attnum: i32,
+    new_name: &str,
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_column SET attname = '{}' \
+             WHERE attrelid = {rel_oid} AND attnum = {attnum}",
+            sql_string(new_name)
+        ),
+        [],
+    )
+    .map_err(|e| format!("update renamed column metadata failed: {e}"))?;
+    Ok(())
 }
 
 pub(in crate::catalog) fn alter_partitioned_table_add_column(

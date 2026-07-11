@@ -277,6 +277,20 @@ managed partition   -> create_range_partitioned_table
 
 这个过程的目标是保证客户端看到的对象、权限判断、快照恢复和 DuckDB 物理状态一致。
 
+### ALTER TABLE 规则
+
+字段改名和字段类型修改不能只更新 `rsduck_catalog`：物理数据和 catalog 必须在同一事务内保持一致。
+
+- 普通表的字段改名：执行 DuckDB DDL 后更新对应 `rs_column` 字段名；字段序号、字段注释和基于字段序号的依赖保持不变。
+- 普通表的字段类型修改：执行 DuckDB DDL，由 DuckDB 转换现有数据；成功后按实际列定义更新 `rs_column.atttypid` 等字段元数据。
+- 分区表的非分区字段：对所有活跃物理分区执行同一 DDL，再同步父表、子表 catalog 并刷新逻辑入口视图。任一分区失败时整个事务回滚。
+- 分区字段改名：除上述步骤外，更新 `rs_relation_ext.partition_key`，刷新后续写入路由；存在外部依赖视图时拒绝执行，避免遗留引用旧字段名的失效视图。
+- 分区字段类型修改：不支持。该操作会影响分区边界、路由值格式和 `partition_unit` 语义。
+
+字段类型修改不做单独的预扫描；DuckDB DDL 是唯一的实际转换校验。索引、约束或其他 DuckDB 依赖阻止修改时，返回 DuckDB 的依赖或转换错误。
+
+字段改名或字段类型修改前，RSDuck 都会检查外部依赖视图；存在依赖时拒绝操作，不留下结构变化后失效的视图定义。
+
 ## 10. 为什么不创建 MySQL 系统表
 
 Navicat 会查询大量 MySQL 系统表，例如：

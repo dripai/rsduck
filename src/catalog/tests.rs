@@ -790,6 +790,91 @@ fn create_view_and_index_write_catalog_metadata() {
 }
 
 #[test]
+fn create_or_replace_view_updates_catalog_metadata_atomically() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    execute_catalog_aware_write(&conn, "CREATE TABLE quotes(code VARCHAR, close DOUBLE)").unwrap();
+    conn.execute("INSERT INTO quotes VALUES ('000001.SZ', 10.5)", [])
+        .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW quote_view AS SELECT code, close FROM quotes",
+    )
+    .unwrap();
+    let old_oid: i64 = conn
+        .query_row(
+            "SELECT oid FROM rsduck_catalog.rs_relation WHERE relname = 'quote_view'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE OR REPLACE VIEW quote_view AS SELECT code AS symbol FROM quotes",
+    )
+    .unwrap();
+
+    let (view_oid, relnatts, generated_sql): (i64, i32, String) = conn
+        .query_row(
+            "SELECT rel.oid, rel.relnatts, ext.generated_sql \
+             FROM rsduck_catalog.rs_relation rel \
+             JOIN rsduck_catalog.rs_relation_ext ext ON ext.relid = rel.oid \
+             WHERE rel.relname = 'quote_view'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(view_oid, old_oid);
+    assert_eq!(relnatts, 1);
+    assert_eq!(generated_sql, "SELECT code AS symbol FROM quotes");
+
+    let columns: Vec<String> = conn
+        .prepare(
+            "SELECT attname FROM rsduck_catalog.rs_column \
+             WHERE attrelid = ? ORDER BY attnum",
+        )
+        .unwrap()
+        .query_map([view_oid], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(columns, vec!["symbol".to_string()]);
+
+    let journal_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_catalog_journal \
+             WHERE mutation_type = 'replace_view' AND target_oid = ? AND status = 'applied'",
+            [view_oid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(journal_count, 1);
+    validate_after_start(&conn).unwrap();
+
+    let error = execute_catalog_aware_write(
+        &conn,
+        "CREATE OR REPLACE VIEW quote_view AS SELECT missing_column FROM quotes",
+    )
+    .unwrap_err();
+    assert!(error.contains("execute DuckDB CREATE OR REPLACE VIEW failed"));
+
+    let symbol: String = conn
+        .query_row("SELECT symbol FROM quote_view", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(symbol, "000001.SZ");
+    let column_count_after_error: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_column WHERE attrelid = ?",
+            [view_oid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(column_count_after_error, 1);
+    validate_after_start(&conn).unwrap();
+}
+
+#[test]
 fn alter_table_add_column_updates_catalog_and_duckdb() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
@@ -822,6 +907,251 @@ fn alter_table_add_column_updates_catalog_and_duckdb() {
         })
         .unwrap();
     assert_eq!(volume, 0);
+}
+
+#[test]
+fn alter_table_rename_and_set_type_keep_ordinary_table_catalog_in_sync() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    execute_catalog_aware_write(&conn, "CREATE TABLE metrics(code VARCHAR, amount INTEGER)")
+        .unwrap();
+    conn.execute("INSERT INTO metrics VALUES ('000001.SZ', 12)", [])
+        .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "COMMENT ON COLUMN metrics.amount IS 'original amount comment'",
+    )
+    .unwrap();
+
+    execute_catalog_aware_write(&conn, "ALTER TABLE metrics RENAME COLUMN amount TO volume")
+        .unwrap();
+    let volume: i32 = conn
+        .query_row(
+            "SELECT volume FROM metrics WHERE code = '000001.SZ'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(volume, 12);
+    let (attnum, comment): (i32, String) = conn
+        .query_row(
+            "SELECT c.attnum, d.description \
+             FROM rsduck_catalog.rs_column c \
+             JOIN rsduck_catalog.rs_relation r ON r.oid = c.attrelid \
+             JOIN rsduck_catalog.rs_comment d ON d.objoid = r.oid AND d.objsubid = c.attnum \
+             WHERE r.relname = 'metrics' AND c.attname = 'volume'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(attnum, 2);
+    assert_eq!(comment, "original amount comment");
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW metric_volumes AS SELECT volume FROM metrics",
+    )
+    .unwrap();
+    let type_error = execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE metrics ALTER COLUMN volume SET DATA TYPE VARCHAR",
+    )
+    .unwrap_err();
+    assert!(type_error.contains("dependent views"));
+    execute_catalog_aware_write(&conn, "DROP VIEW metric_volumes").unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE metrics ALTER COLUMN volume SET DATA TYPE VARCHAR",
+    )
+    .unwrap();
+    let volume: String = conn
+        .query_row(
+            "SELECT volume FROM metrics WHERE code = '000001.SZ'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(volume, "12");
+    let (duckdb_type, catalog_type): (String, String) = conn
+        .query_row(
+            "SELECT dc.data_type, ty.rsduck_physical_type \
+             FROM duckdb_columns() dc \
+             JOIN rsduck_catalog.rs_relation r ON r.relname = dc.table_name \
+             JOIN rsduck_catalog.rs_column c ON c.attrelid = r.oid AND c.attname = dc.column_name \
+             JOIN rsduck_catalog.rs_type ty ON ty.oid = c.atttypid \
+             WHERE dc.schema_name = 'main' AND dc.table_name = 'metrics' AND dc.column_name = 'volume'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(duckdb_type, "VARCHAR");
+    assert_eq!(catalog_type, "VARCHAR");
+    validate_after_start(&conn).unwrap();
+}
+
+#[test]
+fn partitioned_table_rename_and_non_partition_type_change_are_atomic() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE partitioned_quotes(
+            code VARCHAR,
+            trade_time TIMESTAMP NOT NULL,
+            amount VARCHAR
+         ) PARTITION BY RANGE (trade_time)
+           WITH (partition_unit = 'day', retention = '30')",
+    )
+    .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "INSERT INTO partitioned_quotes VALUES
+         ('000001.SZ', TIMESTAMP '2026-07-10 09:30:00', '12'),
+         ('000002.SZ', TIMESTAMP '2026-07-11 09:30:00', '34')",
+    )
+    .unwrap();
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW partitioned_quote_times AS SELECT trade_time FROM partitioned_quotes",
+    )
+    .unwrap();
+    let rename_error = execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes RENAME COLUMN trade_time TO event_time",
+    )
+    .unwrap_err();
+    assert!(rename_error.contains("dependent views"));
+    execute_catalog_aware_write(&conn, "DROP VIEW partitioned_quote_times").unwrap();
+
+    execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes RENAME COLUMN amount TO volume",
+    )
+    .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE VIEW partitioned_quote_volumes AS SELECT volume FROM partitioned_quotes",
+    )
+    .unwrap();
+    let type_error = execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes ALTER COLUMN volume SET DATA TYPE BIGINT",
+    )
+    .unwrap_err();
+    assert!(type_error.contains("dependent views"));
+    execute_catalog_aware_write(&conn, "DROP VIEW partitioned_quote_volumes").unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes ALTER COLUMN volume SET DATA TYPE BIGINT",
+    )
+    .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes RENAME COLUMN trade_time TO event_time",
+    )
+    .unwrap();
+
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM partitioned_quotes WHERE volume IN (12, 34)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
+    let partition_key: String = conn
+        .query_row(
+            "SELECT ext.partition_key FROM rsduck_catalog.rs_relation_ext ext \
+             JOIN rsduck_catalog.rs_relation rel ON rel.oid = ext.relid \
+             WHERE rel.relname = 'partitioned_quotes'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(partition_key, "event_time");
+    let physical_bigint_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM duckdb_columns() \
+             WHERE schema_name = 'rsduck_internal' \
+               AND table_name LIKE 'partitioned_quotes_%' \
+               AND column_name = 'volume' AND data_type = 'BIGINT'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(physical_bigint_columns, 2);
+
+    execute_catalog_aware_write(
+        &conn,
+        "INSERT INTO partitioned_quotes VALUES ('000003.SZ', TIMESTAMP '2026-07-12 09:30:00', 56)",
+    )
+    .unwrap();
+    let inserted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM partitioned_quotes WHERE code = '000003.SZ' AND event_time = TIMESTAMP '2026-07-12 09:30:00'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+
+    let type_error = execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_quotes ALTER COLUMN event_time SET DATA TYPE DATE",
+    )
+    .unwrap_err();
+    assert!(type_error.contains("partition key column"));
+    validate_after_start(&conn).unwrap();
+}
+
+#[test]
+fn partitioned_column_type_failure_rolls_back_all_physical_partitions() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE partitioned_values(
+            trade_time TIMESTAMP NOT NULL,
+            raw_value VARCHAR
+         ) PARTITION BY RANGE (trade_time)
+           WITH (partition_unit = 'day', retention = '30')",
+    )
+    .unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "INSERT INTO partitioned_values VALUES
+         (TIMESTAMP '2026-07-10 09:30:00', '12'),
+         (TIMESTAMP '2026-07-11 09:30:00', 'not-a-number')",
+    )
+    .unwrap();
+
+    let error = execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE partitioned_values ALTER COLUMN raw_value SET DATA TYPE BIGINT",
+    )
+    .unwrap_err();
+    assert!(error.contains("SET DATA TYPE on partition"));
+    let physical_varchar_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM duckdb_columns() \
+             WHERE schema_name = 'rsduck_internal' \
+               AND table_name LIKE 'partitioned_values_%' \
+               AND column_name = 'raw_value' AND data_type = 'VARCHAR'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(physical_varchar_columns, 2);
+    let value: String = conn
+        .query_row(
+            "SELECT raw_value FROM partitioned_values WHERE raw_value = '12'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, "12");
+    validate_after_start(&conn).unwrap();
 }
 
 #[test]

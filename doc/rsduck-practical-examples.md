@@ -60,7 +60,15 @@ CREATE TABLE sector_list (
 INSERT INTO sector_list
 VALUES
   ('GN_SEMI', '半导体', 'concept', 3, 'xtquant', 'batch_20260710_001', now()),
-  ('SW_ELEC', '电子', 'sw_industry', 2, 'xtquant', 'batch_20260710_001', now());
+  ('GN_AI', '人工智能', 'concept', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('GN_CLOUD', '云计算', 'concept', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_ELEC', '电子', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_COMP', '计算机', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('SW_MED', '医药生物', 'sw_industry', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('REG_BEIJING', '北京板块', 'region', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('INDEX_HS300', '沪深300', 'index', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('INDEX_ZZ500', '中证500', 'index', 1, 'xtquant', 'batch_20260710_001', now()),
+  ('ETF_50', '上证50ETF', 'fund_etf', 1, 'xtquant', 'batch_20260710_001', now());
 ```
 
 检查写入结果：
@@ -91,7 +99,16 @@ INSERT INTO sector_constituents
 VALUES
   ('GN_SEMI', '688981.SH', 'batch_20260710_001', now()),
   ('GN_SEMI', '603986.SH', 'batch_20260710_001', now()),
-  ('GN_SEMI', '300661.SZ', 'batch_20260710_001', now());
+  ('GN_SEMI', '300661.SZ', 'batch_20260710_001', now()),
+  ('GN_AI', '688111.SH', 'batch_20260710_001', now()),
+  ('GN_CLOUD', '600570.SH', 'batch_20260710_001', now()),
+  ('SW_ELEC', '002049.SZ', 'batch_20260710_001', now()),
+  ('SW_COMP', '002415.SZ', 'batch_20260710_001', now()),
+  ('SW_MED', '300760.SZ', 'batch_20260710_001', now()),
+  ('REG_BEIJING', '688981.SH', 'batch_20260710_001', now()),
+  ('INDEX_HS300', '600519.SH', 'batch_20260710_001', now()),
+  ('INDEX_ZZ500', '300750.SZ', 'batch_20260710_001', now()),
+  ('ETF_50', '510050.SH', 'batch_20260710_001', now());
 ```
 
 查询某个板块的成分股：
@@ -147,7 +164,16 @@ CREATE TABLE sector_snapshot (
 ```sql
 INSERT INTO sector_snapshot
 VALUES
-  ('GN_SEMI', '半导体', ['688981.SH', '603986.SH', '300661.SZ'], now());
+  ('GN_SEMI', '半导体', ['688981.SH', '603986.SH', '300661.SZ'], now()),
+  ('GN_AI', '人工智能', ['688111.SH'], now()),
+  ('GN_CLOUD', '云计算', ['600570.SH'], now()),
+  ('SW_ELEC', '电子', ['002049.SZ'], now()),
+  ('SW_COMP', '计算机', ['002415.SZ'], now()),
+  ('SW_MED', '医药生物', ['300760.SZ'], now()),
+  ('REG_BEIJING', '北京板块', ['688981.SH'], now()),
+  ('INDEX_HS300', '沪深300', ['600519.SH'], now()),
+  ('INDEX_ZZ500', '中证500', ['300750.SZ'], now()),
+  ('ETF_50', '上证50ETF', ['510050.SH'], now());
 ```
 
 判断列表中是否包含某只股票：
@@ -218,7 +244,15 @@ INSERT INTO kline_1m (
 )
 VALUES
   ('688981.SH', TIMESTAMP '2026-07-10 09:31:00', 50.1, 50.4, 50.0, 50.2, 120000, 6024000, 'batch_20260710_001', now()),
-  ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now());
+  ('688981.SH', TIMESTAMP '2026-07-10 09:32:00', 50.2, 50.5, 50.1, 50.3, 98000, 4929400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:33:00', 50.3, 50.6, 50.2, 50.5, 110000, 5555000, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:34:00', 50.5, 50.7, 50.3, 50.4, 88000, 4435200, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:35:00', 50.4, 50.8, 50.4, 50.7, 132000, 6692400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:36:00', 50.7, 50.9, 50.5, 50.6, 105000, 5313000, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:37:00', 50.6, 50.8, 50.3, 50.4, 96000, 4838400, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:38:00', 50.4, 50.6, 50.2, 50.3, 87000, 4376100, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:39:00', 50.3, 50.5, 50.1, 50.2, 91000, 4568200, 'batch_20260710_001', now()),
+  ('688981.SH', TIMESTAMP '2026-07-10 09:40:00', 50.2, 50.4, 50.0, 50.1, 102000, 5110200, 'batch_20260710_001', now());
 ```
 
 查询仍然查询逻辑表：
@@ -310,6 +344,16 @@ JOIN sector_constituents c
 
 ## 7. 修改表结构
 
+### 支持边界
+
+| 对象 | 修改字段名 | 修改字段类型 | 约束 |
+|---|---|---|---|
+| 普通表 | 支持 | 支持 | 存在外部视图依赖则拒绝；类型修改由 DuckDB 转换现有数据，转换失败则回滚。 |
+| 分区表的非分区字段 | 支持 | 支持 | 存在外部视图依赖则拒绝；所有活跃物理分区在同一事务内变更，任一分区失败则整体回滚。 |
+| 分区字段 | 支持 | 不支持 | 改名前检查外部视图依赖；成功后刷新分区路由元数据和逻辑入口视图。 |
+
+字段改名不转换历史数据。字段类型修改必须实际作用于数据列，DuckDB 在执行 DDL 时完成转换校验；RSDuck 不额外做重复预扫描。当前版本支持增加、删除、改名和符合上述边界的字段类型修改。
+
 增加字段：
 
 ```sql
@@ -379,18 +423,17 @@ CREATE TABLE data_catalog (
 
 ```sql
 INSERT INTO data_catalog
-VALUES (
-  'sector_constituents',
-  'table',
-  '板块成分股表',
-  '一行代表一个板块成分股',
-  'research',
-  'xtquant',
-  'scheduled',
-  '0 30 18 * * 1-5',
-  'medium',
-  now()
-);
+VALUES
+  ('sector_list', 'table', '板块主表', '一行代表一个股票板块', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'low', now()),
+  ('sector_constituents', 'table', '板块成分股表', '一行代表一个板块成分股', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'medium', now()),
+  ('sector_snapshot', 'table', '板块快照表', '用于页面展示的板块成分列表快照', 'research', 'xtquant', 'scheduled', '0 30 18 * * 1-5', 'low', now()),
+  ('kline_1m', 'table', '一分钟行情', '按交易分钟保存的行情数据', 'market-data', 'xtquant', 'scheduled', '*/1 9-15 * * 1-5', 'medium', now()),
+  ('kline_1d', 'table', '日线行情', '按交易日保存的复权前行情数据', 'market-data', 'xtquant', 'scheduled', '0 0 18 * * 1-5', 'medium', now()),
+  ('sector_daily_stats', 'table', '板块日统计', '按交易日聚合板块涨跌和成交额', 'research', 'rsduck-job', 'scheduled', '0 10 18 * * 1-5', 'low', now()),
+  ('v_sector_constituents', 'view', '板块成分股视图', '关联板块和成分股的常用查询视图', 'research', 'rsduck', 'manual', NULL, 'low', now()),
+  ('sql_example_catalog', 'table', 'SQL 样例库', 'Web SQL 页面使用的样例定义', 'platform', 'rsduck', 'manual', NULL, 'low', now()),
+  ('sector_sync_log', 'table', '板块同步日志', '记录板块成分同步批次及执行结果', 'platform', 'rsduck-job', 'scheduled', '0 30 18 * * 1-5', 'medium', now()),
+  ('sql_audit_log', 'table', 'SQL 审计日志', '记录高风险 SQL 和系统操作', 'platform', 'rsduck', 'realtime', NULL, 'high', now());
 ```
 
 查询数据目录：
@@ -456,6 +499,12 @@ SHOW TABLES;
 DESCRIBE sector_list;
 ```
 
+查看字段及字段说明：
+
+```sql
+SHOW TABLE sector_list;
+```
+
 查看样例数据：
 
 ```sql
@@ -503,15 +552,17 @@ CREATE TABLE sql_example_catalog (
 
 ```sql
 INSERT INTO sql_example_catalog
-VALUES (
-  '查询板块成分股',
-  '查询',
-  'low',
-  'Web SQL',
-  'SELECT stock_code FROM sector_constituents WHERE sector_code = $sector_code ORDER BY stock_code',
-  ['sector_code'],
-  now()
-);
+VALUES
+  ('查询板块成分股', '查询', 'low', 'Web SQL', 'SELECT stock_code FROM sector_constituents WHERE sector_code = $sector_code ORDER BY stock_code', ['sector_code'], now()),
+  ('查询股票所属板块', '查询', 'low', 'Web SQL', 'SELECT sector_code FROM sector_constituents WHERE stock_code = $stock_code ORDER BY sector_code', ['stock_code'], now()),
+  ('查看板块主表', '查询', 'low', 'Web SQL', 'SELECT * FROM sector_list ORDER BY sector_code LIMIT $limit', ['limit'], now()),
+  ('查看分钟行情', '查询', 'low', 'Web SQL', 'SELECT * FROM kline_1m WHERE stock_code = $stock_code ORDER BY trade_time DESC LIMIT $limit', ['stock_code', 'limit'], now()),
+  ('查看分区状态', '查询', 'low', 'Web SQL', 'SHOW PARTITIONS FROM kline_1m', [], now()),
+  ('创建板块视图', '建表', 'medium', 'Web SQL', 'CREATE OR REPLACE VIEW v_sector_constituents AS SELECT s.sector_code, s.sector_name, c.stock_code FROM sector_list s JOIN sector_constituents c ON s.sector_code = c.sector_code', [], now()),
+  ('增加板块说明字段', '结构变更', 'medium', 'Web SQL', 'ALTER TABLE sector_list ADD COLUMN description VARCHAR', [], now()),
+  ('修改板块名称', '数据修改', 'medium', 'Web SQL', 'UPDATE sector_list SET sector_name = $sector_name WHERE sector_code = $sector_code', ['sector_name', 'sector_code'], now()),
+  ('删除板块成分股', '数据修改', 'high', 'Web SQL', 'DELETE FROM sector_constituents WHERE sector_code = $sector_code AND stock_code = $stock_code', ['sector_code', 'stock_code'], now()),
+  ('执行分区维护', '数据工程', 'medium', 'Web SQL', 'CALL rsduck_run_partition_maintenance()', [], now());
 ```
 
 页面规则：
@@ -571,10 +622,18 @@ WHERE sector_code = 'GN_SEMI';
 INSERT INTO sector_constituents
 VALUES
   ('GN_SEMI', '688981.SH', 'batch_20260710_002', now()),
-  ('GN_SEMI', '603986.SH', 'batch_20260710_002', now());
+  ('GN_SEMI', '603986.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '300661.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '002371.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '002049.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '603501.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688012.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688041.SH', 'batch_20260710_002', now()),
+  ('GN_SEMI', '300346.SZ', 'batch_20260710_002', now()),
+  ('GN_SEMI', '688256.SH', 'batch_20260710_002', now());
 
 UPDATE sector_list
-SET constituent_count = 2,
+SET constituent_count = 10,
     ingest_batch_id = 'batch_20260710_002',
     ingest_at = now()
 WHERE sector_code = 'GN_SEMI';

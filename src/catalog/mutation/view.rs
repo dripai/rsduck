@@ -6,9 +6,6 @@ pub(in crate::catalog) fn create_view_relation(
     sql: &str,
     owner_user_id: i64,
 ) -> Result<usize, String> {
-    if create_view.or_replace {
-        return Err("CREATE OR REPLACE VIEW is not supported by catalog mutation yet".into());
-    }
     if create_view.temporary {
         return Err("temporary view is not supported by rsduck catalog".into());
     }
@@ -17,7 +14,10 @@ pub(in crate::catalog) fn create_view_relation(
     reject_reserved_schema(&schema)?;
 
     run_catalog_tx(conn, || {
-        if relation_exists(conn, &schema, &view)? {
+        if let Some(meta) = find_relation_meta(conn, &schema, &view)? {
+            if create_view.or_replace {
+                return replace_view_relation(conn, &meta, &schema, &view, create_view, sql);
+            }
             if create_view.if_not_exists {
                 return Ok(0);
             }
@@ -50,6 +50,91 @@ pub(in crate::catalog) fn create_view_relation(
         finish_journal(conn, journal_id)?;
         Ok(0)
     })
+}
+
+fn replace_view_relation(
+    conn: &Connection,
+    meta: &RelationMeta,
+    schema: &str,
+    view: &str,
+    create_view: &CreateView,
+    sql: &str,
+) -> Result<usize, String> {
+    if meta.relkind != "v" {
+        return Err(format!(
+            "CREATE OR REPLACE VIEW cannot replace relation with relkind={}",
+            meta.relkind
+        ));
+    }
+
+    let journal_id = insert_journal(conn, "replace_view", meta.oid, sql)?;
+    conn.execute(sql, [])
+        .map_err(|e| format!("execute DuckDB CREATE OR REPLACE VIEW failed: {e}"))?;
+
+    let columns = load_duckdb_columns(conn, schema, view)?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.rs_column_default WHERE adrelid = {}",
+            meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete replaced view column defaults failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.rs_column WHERE attrelid = {}",
+            meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete replaced view columns failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.rs_comment \
+             WHERE objoid = {} AND classoid = {} AND objsubid > 0",
+            meta.oid, OBJECT_RELATION_KIND
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete replaced view column comments failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "DELETE FROM rsduck_catalog.rs_dependency \
+             WHERE classid = {} AND objid = {}",
+            OBJECT_RELATION_KIND, meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("delete replaced view dependencies failed: {e}"))?;
+
+    for column in &columns {
+        insert_attribute_row(conn, meta.oid, column)?;
+    }
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_relation \
+             SET relnatts = {}, status = 'active', error_message = '' \
+             WHERE oid = {}",
+            columns.len(),
+            meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("update replaced view relation metadata failed: {e}"))?;
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_relation_ext \
+             SET generated_sql = '{}', updated_at = CURRENT_TIMESTAMP \
+             WHERE relid = {}",
+            sql_string(&create_view.query.to_string()),
+            meta.oid
+        ),
+        [],
+    )
+    .map_err(|e| format!("update replaced view definition failed: {e}"))?;
+    insert_view_dependencies(conn, meta.oid, sql)?;
+    finish_journal(conn, journal_id)?;
+    Ok(0)
 }
 
 pub(in crate::catalog) fn insert_view_dependencies(
