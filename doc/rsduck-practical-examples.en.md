@@ -846,6 +846,36 @@ Record scope:
 - DML: `INSERT`, `UPDATE`, `DELETE`
 - System operations: import, snapshot, restore, privilege changes
 
+### 4.8 Continuous Writes
+
+Runnable code:
+
+- HTTP: [4_8_http_continuous_write.py](../demo/python/4_8_http_continuous_write.py)
+- MySQL wire: [4_8_mysql_continuous_write.py](../demo/python/4_8_mysql_continuous_write.py)
+
+The two scripts use the same table shape, generated data, batch size, write interval, and metrics to validate continuous writes through HTTP and MySQL wire. HTTP uses `demo_4_8_http_quote_ticks` and MySQL wire uses `demo_4_8_mysql_quote_ticks`, so they can run together. Run them separately when comparing performance to avoid contention for the same write worker.
+
+The HTTP variant sends multi-row `INSERT` statements through the Web API:
+
+```powershell
+python demo/python/4_8_http_continuous_write.py
+```
+
+The MySQL wire variant uses one PyMySQL connection and parameterized `executemany` batches:
+
+```powershell
+pip install PyMySQL
+python demo/python/4_8_mysql_continuous_write.py
+```
+
+Shared options:
+
+- `--batch-size 100`: write 100 rows in each `INSERT`.
+- `--interval-ms 100`: submit one batch every 100 milliseconds.
+- `--duration 0`: run until manually stopped.
+
+The MySQL variant also accepts `--host`, `--port`, and `--database`; it connects to `127.0.0.1:13306` and `main` by default. Both scripts run for 60 seconds by default, create their table only when it does not exist, and never delete accumulated data. They report both batch rows and total table rows at completion. Drop the corresponding table manually when cleanup is required.
+
 ## 5. Web Implementation
 
 ### 5.1 Web Console API Verification

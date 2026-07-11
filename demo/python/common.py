@@ -6,6 +6,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
+DEMO_PASSWORD = "admin"
+
+
 class DemoError(RuntimeError):
     pass
 
@@ -37,8 +40,9 @@ class DemoClient:
         if not result.get("success"):
             raise DemoError("login failed: %s" % result.get("msg", "unknown error"))
 
-    def sql(self, statement, page_size=1000):
-        print("SQL> %s" % statement)
+    def sql(self, statement, page_size=1000, echo=True):
+        if echo:
+            print("SQL> %s" % statement)
         result = self.request("/sql", {"sql": statement, "page": 0, "page_size": page_size})
         if not result.get("success"):
             raise DemoError("SQL failed: %s" % result.get("msg", "unknown error"))
@@ -84,22 +88,32 @@ class DemoClient:
         return result
 
 
-def add_connection_args(parser):
+def add_connection_args(parser, include_cleanup=True):
     parser.add_argument("--url", default="http://127.0.0.1:13307")
     parser.add_argument("--username", default="admin")
-    parser.add_argument("--password", required=True)
     parser.add_argument("--timeout", type=float, default=15.0)
-    parser.add_argument("--cleanup", action="store_true")
+    if include_cleanup:
+        parser.add_argument("--cleanup", action="store_true")
 
 
-def build_parser(description):
+def add_mysql_connection_args(parser, include_cleanup=True):
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=13306)
+    parser.add_argument("--database", default="main")
+    parser.add_argument("--username", default="admin")
+    parser.add_argument("--timeout", type=float, default=15.0)
+    if include_cleanup:
+        parser.add_argument("--cleanup", action="store_true")
+
+
+def build_parser(description, include_cleanup=True):
     parser = argparse.ArgumentParser(description=description)
-    add_connection_args(parser)
+    add_connection_args(parser, include_cleanup=include_cleanup)
     return parser
 
 
 def client_from_args(args):
-    return DemoClient(args.url, args.username, args.password, args.timeout)
+    return DemoClient(args.url, args.username, DEMO_PASSWORD, args.timeout)
 
 
 def assert_equal(actual, expected, label):

@@ -6,7 +6,7 @@ use super::codec::{read_packet, write_packet};
 use super::handshake::parse_handshake_response;
 use super::listener::serve_mysql_listener;
 use super::types::{
-    CLIENT_CONNECT_ATTRS, CLIENT_LONG_PASSWORD, CLIENT_PLUGIN_AUTH,
+    CLIENT_CONNECT_ATTRS, CLIENT_CONNECT_WITH_DB, CLIENT_LONG_PASSWORD, CLIENT_PLUGIN_AUTH,
     CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA, CLIENT_PROTOCOL_41, CLIENT_SECURE_CONNECTION,
     MYSQL_TYPE_JSON, MYSQL_TYPE_LONG,
 };
@@ -529,7 +529,8 @@ fn client_handshake_response(username: &str, password: &str, nonce: &[u8]) -> Ve
         | CLIENT_SECURE_CONNECTION
         | CLIENT_PLUGIN_AUTH
         | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-        | CLIENT_CONNECT_ATTRS;
+        | CLIENT_CONNECT_ATTRS
+        | CLIENT_CONNECT_WITH_DB;
     let mut out = Vec::new();
     put_u32_le(&mut out, capabilities);
     put_u32_le(&mut out, 16 * 1024 * 1024);
@@ -537,6 +538,7 @@ fn client_handshake_response(username: &str, password: &str, nonce: &[u8]) -> Ve
     out.extend_from_slice(&[0_u8; 23]);
     put_null_str(&mut out, username);
     put_lenenc_bytes(&mut out, &caching_sha2_token(password, nonce));
+    put_null_str(&mut out, "main");
     put_null_str(&mut out, crate::auth::MYSQL_DEFAULT_AUTH_PLUGIN);
     let mut attrs = Vec::new();
     put_lenenc_bytes(&mut attrs, b"_client_name");
@@ -545,6 +547,7 @@ fn client_handshake_response(username: &str, password: &str, nonce: &[u8]) -> Ve
     out.extend_from_slice(&attrs);
     let parsed = parse_handshake_response(&out).unwrap();
     assert_eq!(parsed.username, username);
+    assert_eq!(parsed.database.as_deref(), Some("main"));
     out
 }
 

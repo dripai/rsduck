@@ -1,4 +1,4 @@
-from common import DemoClient, DemoError, assert_equal, build_parser, client_from_args
+from common import DEMO_PASSWORD, DemoClient, DemoError, assert_equal, build_parser, client_from_args
 
 
 ROLE = "demo_4_7_reader"
@@ -22,18 +22,16 @@ def cleanup(client):
 
 
 def main():
-    parser = build_parser("Section 4.7: role, privilege, and audit workflow")
-    parser.add_argument("--demo-user-password", default="demo_4_7_password")
-    args = parser.parse_args()
+    args = build_parser("Section 4.7: role, privilege, and audit workflow").parse_args()
     admin = client_from_args(args)
     cleanup(admin)
     admin.sql("CREATE TABLE %s(code VARCHAR, close DOUBLE)" % TABLE)
     admin.sql("INSERT INTO %s VALUES ('688981.SH', 50.2)" % TABLE)
     admin.sql("CREATE ROLE %s" % ROLE)
-    admin.sql("CREATE USER %s PASSWORD='%s'" % (USER, args.demo_user_password.replace("'", "''")))
+    admin.sql("CREATE USER %s PASSWORD='%s'" % (USER, DEMO_PASSWORD))
     admin.sql("GRANT SELECT ON TABLE %s TO ROLE %s" % (TABLE, ROLE))
     admin.sql("GRANT ROLE %s TO %s" % (ROLE, USER))
-    reader = DemoClient(args.url, USER, args.demo_user_password, args.timeout)
+    reader = DemoClient(args.url, USER, DEMO_PASSWORD, args.timeout)
     assert_equal(reader.scalar_int("SELECT COUNT(*) FROM %s" % TABLE), 1, "reader_select_rows")
     reader.expect_sql_failure("INSERT INTO %s VALUES ('603986.SH', 100)" % TABLE, "permission denied")
     if args.cleanup:

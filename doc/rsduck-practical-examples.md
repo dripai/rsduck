@@ -846,6 +846,36 @@ CREATE TABLE sql_audit_log (
 - DML：`INSERT`、`UPDATE`、`DELETE`
 - 系统操作：导入、快照、恢复、权限变更
 
+### 4.8 持续写入
+
+对应代码：
+
+- HTTP：[4_8_http_continuous_write.py](../demo/python/4_8_http_continuous_write.py)
+- MySQL wire：[4_8_mysql_continuous_write.py](../demo/python/4_8_mysql_continuous_write.py)
+
+两个脚本使用相同的表结构、模拟数据、批大小、写入间隔和统计指标，分别验证 HTTP 与 MySQL wire 的持续写入链路。HTTP 使用 `demo_4_8_http_quote_ticks`，MySQL wire 使用 `demo_4_8_mysql_quote_ticks`，可以同时运行；如需比较性能，应分别运行，避免竞争同一个写 worker。
+
+HTTP 版通过 Web API 发送多行 `INSERT`：
+
+```powershell
+python demo/python/4_8_http_continuous_write.py
+```
+
+MySQL wire 版使用 PyMySQL 的单个长连接和参数化批量 `executemany`：
+
+```powershell
+pip install PyMySQL
+python demo/python/4_8_mysql_continuous_write.py
+```
+
+两者共用参数：
+
+- `--batch-size 100`：每次 `INSERT` 写入 100 行。
+- `--interval-ms 100`：每 100 毫秒提交一批。
+- `--duration 0`：持续运行直到手动停止。
+
+MySQL 版额外支持 `--host`、`--port`、`--database`，默认连接 `127.0.0.1:13306` 的 `main`。两个脚本默认运行 60 秒，启动时只在表不存在时创建，绝不删除已有数据；结束时输出本批次和表累计行数。需要清理时手工执行对应表的 `DROP TABLE`。
+
 ## 5. Web 页面落地
 
 ### 5.1 Web Console API 验证

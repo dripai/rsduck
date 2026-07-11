@@ -49,6 +49,7 @@ pub(super) const MYSQL_FLAG_NUM: u16 = 0x8000;
 pub(super) fn server_capabilities() -> u32 {
     CLIENT_LONG_PASSWORD
         | CLIENT_LONG_FLAG
+        | CLIENT_CONNECT_WITH_DB
         | CLIENT_PROTOCOL_41
         | CLIENT_SECURE_CONNECTION
         | CLIENT_TRANSACTIONS
