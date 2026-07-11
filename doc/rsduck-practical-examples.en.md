@@ -2,14 +2,15 @@
 
 Language: English | [中文](rsduck-practical-examples.md)
 
-This document is organized around two types of usage:
+This document is organized into three content groups:
 
-- Single SQL statements: executed directly in Navicat, a MySQL client, or the RSDuck Web SQL page.
+- DDL: create, change, and document tables, views, partitioned tables, and other objects.
+- DML and queries: write, update, and delete records, then inspect objects and data.
 - Programmatic tasks: executed by backend APIs, scheduled jobs, or data synchronization workflows.
 
 Conventions: sample stock codes use `688981.SH`, `603986.SH`, and `300661.SZ`; batch ids use a format such as `batch_20260710_001`.
 
-## 1. Operation Boundary
+## 1. Usage Boundary
 
 Single SQL statements:
 
@@ -28,7 +29,9 @@ Programmatic tasks:
 
 The Web SQL page should mark `ALTER`, `UPDATE`, `DELETE`, and `DROP` as high-risk operations. `UPDATE` / `DELETE` without `WHERE` should be rejected or require administrator confirmation.
 
-## 2. Ordinary Table
+## 2. DDL: Object Definition and Structure Management
+
+### 2.1 Ordinary Table
 
 The sector master table stores only sector-level information.
 
@@ -79,7 +82,7 @@ FROM sector_list
 ORDER BY sector_code;
 ```
 
-## 3. Constituent Table
+### 2.2 Constituent Table
 
 Sectors and stocks are many-to-many. Store one sector constituent per row. This makes reverse lookup, quote joins, and aggregation straightforward.
 
@@ -146,7 +149,7 @@ GROUP BY sector_code, stock_code
 HAVING count(*) > 1;
 ```
 
-## 4. LIST Columns
+### 2.3 LIST Columns
 
 DuckDB supports `LIST` columns. The common syntax is `VARCHAR[]`. Use LIST columns for display snapshots, not as a replacement for detail relation tables.
 
@@ -200,7 +203,7 @@ Usage rules:
 - Query "which sectors contain this stock": use `sector_constituents`.
 - Join K-line data, compute returns, or aggregate by sector: use `sector_constituents`.
 
-## 5. Partitioned Table
+### 2.4 Partitioned Table
 
 RSDuck partitioned tables use range partition syntax. They do not expose DuckDB Hive directory partition datasets directly. Business code operates on the logical table; physical partitions are created and maintained by RSDuck under `rsduck_internal`.
 
@@ -301,7 +304,7 @@ Usage rules:
 - External SQL should not directly operate on physical partitions under `rsduck_internal`.
 - Use the Web Parquet import entry point for external Parquet files. Do not mix it with the partitioned-table example.
 
-## 6. Views
+### 2.5 Views
 
 Views are used to persist common queries.
 
@@ -342,9 +345,9 @@ JOIN sector_constituents c
   ON s.sector_code = c.sector_code;
 ```
 
-## 7. Change Table Structure
+### 2.6 Change Table Structure
 
-### Support Boundary
+#### Support Boundary
 
 | Object | Rename column | Change column type | Constraint |
 |---|---|---|---|
@@ -390,7 +393,7 @@ Notes:
 - Before changing a column type, check whether existing data can be converted.
 - Structural changes should be written to an operation log.
 
-## 8. Change Metadata
+### 2.7 Change Metadata
 
 Use `COMMENT ON` for table and column descriptions.
 
@@ -444,7 +447,9 @@ FROM data_catalog
 WHERE object_name = 'sector_constituents';
 ```
 
-## 9. Change Records
+## 3. DML and Queries
+
+### 3.1 Change Records
 
 Change a sector name:
 
@@ -485,7 +490,7 @@ Execution rules:
 - Batch changes should preferably run as programmatic tasks.
 - High-risk changes should record executor, SQL digest, and affected row count.
 
-## 10. Inspect Objects and Structure
+### 3.2 Inspect Objects and Structure
 
 Show tables:
 
@@ -523,7 +528,7 @@ LIMIT 20;
 
 These examples belong on the Web SQL example library home page with low risk.
 
-## 11. SQL Example Catalog
+### 3.3 SQL Example Catalog
 
 Example fields:
 
@@ -571,7 +576,13 @@ Page rules:
 - Medium-risk examples show a confirmation dialog.
 - High-risk examples require administrator permission and second confirmation.
 
-## 12. Programmatic Scenario: Full Sector Constituent Sync
+## 4. Programmatic Scenarios and Code
+
+Runnable Python scripts for this chapter are mapped in [`demo/README.md`](../demo/README.md). Each script uses its own `demo_4_1_` through `demo_5_1_` objects and never changes the tables used in this document.
+
+### 4.1 Full Sector Constituent Sync
+
+Runnable code: [4_1_sector_full_sync.py](../demo/python/4_1_sector_full_sync.py)
 
 Flow:
 
@@ -603,7 +614,9 @@ Core requirements:
 - Every sync must be traceable by batch id.
 - Write failure details to `message`.
 
-## 13. Programmatic Scenario: Incremental Refresh for One Sector
+### 4.2 Incremental Refresh for One Sector
+
+Runnable code: [4_2_sector_incremental_refresh.py](../demo/python/4_2_sector_incremental_refresh.py)
 
 Input parameters:
 
@@ -647,7 +660,9 @@ Failure handling:
 - Validation failure: return an error and do not modify official tables.
 - Write failure: roll back the transaction.
 
-## 14. Programmatic Scenario: Sector Quote Aggregation
+### 4.3 Sector Quote Aggregation
+
+Runnable code: [4_3_sector_daily_aggregation.py](../demo/python/4_3_sector_daily_aggregation.py)
 
 Result table:
 
@@ -696,7 +711,9 @@ ORDER BY avg_pct_chg DESC
 LIMIT 20;
 ```
 
-## 15. Programmatic Scenario: Parquet Import
+### 4.4 Parquet Import
+
+Runnable code: [4_4_parquet_import.py](../demo/python/4_4_parquet_import.py). Fixture generator: [4_4_make_parquet_fixture.py](../demo/python/4_4_make_parquet_fixture.py)
 
 Single-file import shape:
 
@@ -721,7 +738,9 @@ The import page should:
 - Roll back the whole batch if any file fails.
 - Write `data_catalog` after successful import.
 
-## 16. Programmatic Scenario: Data Quality Checks
+### 4.5 Data Quality Checks
+
+Runnable code: [4_5_data_quality_check.py](../demo/python/4_5_data_quality_check.py)
 
 Check sectors without constituents:
 
@@ -764,7 +783,9 @@ Result levels:
 - warning: allow publishing but show on page.
 - info: log only.
 
-## 17. Programmatic Scenario: Snapshot and Restore
+### 4.6 Snapshot and Restore
+
+Runnable code: [4_6_snapshot_restore.py](../demo/python/4_6_snapshot_restore.py)
 
 Snapshot entry points:
 
@@ -787,7 +808,9 @@ Permission requirements:
 - Administrator operations require audit logs.
 - Show target snapshot manifest information before restore.
 
-## 18. Programmatic Scenario: Privilege and Audit
+### 4.7 Privilege and Audit
+
+Runnable code: [4_7_permission_audit.py](../demo/python/4_7_permission_audit.py)
 
 Create an analyst role:
 
@@ -823,7 +846,11 @@ Record scope:
 - DML: `INSERT`, `UPDATE`, `DELETE`
 - System operations: import, snapshot, restore, privilege changes
 
-## 19. Web Implementation
+## 5. Web Implementation
+
+### 5.1 Web Console API Verification
+
+Runnable code: [5_1_web_console_api_smoke.py](../demo/python/5_1_web_console_api_smoke.py)
 
 SQL example library:
 
@@ -847,7 +874,7 @@ Data tasks:
 
 Each task should at least show: status, start time, finish time, batch id, affected row count, and failure reason.
 
-## 20. References
+## 6. References
 
 - DuckDB `CREATE TABLE`: https://duckdb.org/docs/current/sql/statements/create_table
 - DuckDB `ALTER TABLE`: https://duckdb.org/docs/current/sql/statements/alter_table

@@ -2,14 +2,15 @@
 
 语言：中文 | [English](rsduck-practical-examples.en.md)
 
-本文按两类场景组织：
+本文按三类内容组织：
 
-- 单条 SQL：在 Navicat、MySQL 客户端、RSDuck Web SQL 页面直接执行。
+- DDL：创建、修改和说明表、视图、分区表等对象。
+- DML 与查询：写入、更新、删除记录，以及查看对象和数据。
 - 程序化任务：由后端接口、定时任务或数据同步流程执行。
 
 约定：示例股票代码格式为 `688981.SH`、`603986.SH`、`300661.SZ`；批次号格式为 `batch_20260710_001`。
 
-## 1. 操作边界
+## 1. 使用边界
 
 单条 SQL：
 
@@ -28,7 +29,9 @@
 
 Web SQL 页面应对 `ALTER`、`UPDATE`、`DELETE`、`DROP` 标记高风险；没有 `WHERE` 的 `UPDATE` / `DELETE` 应拒绝或要求管理员确认。
 
-## 2. 普通表
+## 2. DDL：对象定义与结构管理
+
+### 2.1 普通表
 
 板块主表只保存板块自身信息。
 
@@ -79,7 +82,7 @@ FROM sector_list
 ORDER BY sector_code;
 ```
 
-## 3. 成分股表
+### 2.2 成分股表
 
 板块和股票是多对多关系。一行保存一个板块成分，便于反查、关联行情和聚合统计。
 
@@ -146,7 +149,7 @@ GROUP BY sector_code, stock_code
 HAVING count(*) > 1;
 ```
 
-## 4. LIST 字段
+### 2.3 LIST 字段
 
 DuckDB 支持 `LIST` 类型，常用写法是 `VARCHAR[]`。用于展示型快照，不替代明细关系表。
 
@@ -200,7 +203,7 @@ FROM sector_snapshot;
 - 查询“某股票属于哪些板块”：用 `sector_constituents`。
 - 关联 K 线、统计涨跌幅、做板块聚合：用 `sector_constituents`。
 
-## 5. 分区表
+### 2.4 分区表
 
 RSDuck 的分区表使用范围分区语法，不直接暴露 DuckDB 的 Hive 目录分区数据集。业务侧只操作逻辑表，物理分区由 RSDuck 在 `rsduck_internal` 下创建和维护。
 
@@ -301,7 +304,7 @@ CALL rsduck_repair_partition('kline_1m', '20260710');
 - 外部不要直接操作 `rsduck_internal` 下的物理分区。
 - 需要导入外部 Parquet 文件时，使用 Web 的 Parquet 导入入口，不把它和分区表混在一个示例里。
 
-## 6. 视图
+### 2.5 视图
 
 视图用于固化常用查询。
 
@@ -342,9 +345,9 @@ JOIN sector_constituents c
   ON s.sector_code = c.sector_code;
 ```
 
-## 7. 修改表结构
+### 2.6 修改表结构
 
-### 支持边界
+#### 支持边界
 
 | 对象 | 修改字段名 | 修改字段类型 | 约束 |
 |---|---|---|---|
@@ -390,7 +393,7 @@ DESCRIBE sector_list;
 - 修改字段类型前先检查现有数据能否转换。
 - 结构变更应写入操作日志。
 
-## 8. 修改元数据
+### 2.7 修改元数据
 
 表和字段说明用 `COMMENT ON`。
 
@@ -444,7 +447,9 @@ FROM data_catalog
 WHERE object_name = 'sector_constituents';
 ```
 
-## 9. 修改记录
+## 3. DML 与查询
+
+### 3.1 修改记录
 
 修改板块名称：
 
@@ -485,7 +490,7 @@ ORDER BY stock_code;
 - 批量修改优先走程序化任务。
 - 高风险修改记录执行人、SQL 摘要、影响行数。
 
-## 10. 查看对象和结构
+### 3.2 查看对象和结构
 
 查看表：
 
@@ -523,7 +528,7 @@ LIMIT 20;
 
 放在 Web SQL 样例库首页，风险等级标记为低。
 
-## 11. SQL 样例库
+### 3.3 SQL 样例库
 
 样例字段：
 
@@ -571,7 +576,13 @@ VALUES
 - 中风险样例显示确认弹窗。
 - 高风险样例要求管理员权限和二次确认。
 
-## 12. 程序化场景：板块成分全量同步
+## 4. 程序化场景与代码
+
+本章各场景的可运行 Python 脚本见 [`demo/README.md`](../demo/README.md)。每个脚本使用独立的 `demo_4_1_` 至 `demo_5_1_` 对象，不会操作本文的示例表。
+
+### 4.1 板块成分全量同步
+
+对应代码：[4_1_sector_full_sync.py](../demo/python/4_1_sector_full_sync.py)
 
 流程：
 
@@ -603,7 +614,9 @@ CREATE TABLE sector_sync_log (
 - 每次同步必须能按批次追踪。
 - 失败信息写入 `message`。
 
-## 13. 程序化场景：单个板块增量刷新
+### 4.2 单个板块增量刷新
+
+对应代码：[4_2_sector_incremental_refresh.py](../demo/python/4_2_sector_incremental_refresh.py)
 
 输入参数：
 
@@ -647,7 +660,9 @@ COMMIT;
 - 校验失败：返回错误，不改正式表。
 - 写入失败：回滚事务。
 
-## 14. 程序化场景：板块行情聚合
+### 4.3 板块行情聚合
+
+对应代码：[4_3_sector_daily_aggregation.py](../demo/python/4_3_sector_daily_aggregation.py)
 
 结果表：
 
@@ -696,7 +711,9 @@ ORDER BY avg_pct_chg DESC
 LIMIT 20;
 ```
 
-## 15. 程序化场景：Parquet 导入
+### 4.4 Parquet 导入
+
+对应代码：[4_4_parquet_import.py](../demo/python/4_4_parquet_import.py)。测试数据生成脚本：[4_4_make_parquet_fixture.py](../demo/python/4_4_make_parquet_fixture.py)
 
 单文件导入：
 
@@ -721,7 +738,9 @@ FROM read_parquet('snapshot/import/daily_quote/*.parquet');
 - 批量导入失败时整体回滚。
 - 导入成功后写入 `data_catalog`。
 
-## 16. 程序化场景：数据质量检查
+### 4.5 数据质量检查
+
+对应代码：[4_5_data_quality_check.py](../demo/python/4_5_data_quality_check.py)
 
 检查没有成分股的板块：
 
@@ -764,7 +783,9 @@ WHERE NOT regexp_matches(stock_code, '^[0-9]{6}\\.(SH|SZ|BJ)$');
 - warning：允许发布，但页面展示。
 - info：只写日志。
 
-## 17. 程序化场景：快照与恢复
+### 4.6 快照与恢复
+
+对应代码：[4_6_snapshot_restore.py](../demo/python/4_6_snapshot_restore.py)
 
 快照入口：
 
@@ -787,7 +808,9 @@ WHERE NOT regexp_matches(stock_code, '^[0-9]{6}\\.(SH|SZ|BJ)$');
 - 管理员操作需要审计日志。
 - 恢复前展示目标快照的 manifest 信息。
 
-## 18. 程序化场景：权限和审计
+### 4.7 权限和审计
+
+对应代码：[4_7_permission_audit.py](../demo/python/4_7_permission_audit.py)
 
 创建分析角色：
 
@@ -823,7 +846,11 @@ CREATE TABLE sql_audit_log (
 - DML：`INSERT`、`UPDATE`、`DELETE`
 - 系统操作：导入、快照、恢复、权限变更
 
-## 19. 页面落地
+## 5. Web 页面落地
+
+### 5.1 Web Console API 验证
+
+对应代码：[5_1_web_console_api_smoke.py](../demo/python/5_1_web_console_api_smoke.py)
 
 SQL 样例库：
 
@@ -847,7 +874,7 @@ SQL 样例库：
 
 每个任务至少展示：状态、开始时间、结束时间、批次号、影响行数、失败原因。
 
-## 20. 参考
+## 6. 参考
 
 - DuckDB `CREATE TABLE`: https://duckdb.org/docs/current/sql/statements/create_table
 - DuckDB `ALTER TABLE`: https://duckdb.org/docs/current/sql/statements/alter_table

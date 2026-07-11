@@ -3,7 +3,7 @@ level = "info"
 dir = "logs"
 file_prefix = "rsduck"
 retain_files = 3
-console = false
+console = true
 
 [db]
 init_sql = "init.sql"

@@ -397,8 +397,7 @@ fn role_management_mutations_update_user_role_catalog() {
 
     let drop_err = execute_catalog_aware_write(&conn, "DROP ROLE analyst").unwrap_err();
     assert!(drop_err.contains("revoke grants first"));
-    execute_catalog_aware_write(&conn, "REVOKE SELECT ON TABLE quotes FROM ROLE analyst").unwrap();
-    execute_catalog_aware_write(&conn, "DROP ROLE analyst").unwrap();
+    execute_catalog_aware_write(&conn, "DROP ROLE analyst CASCADE").unwrap();
 
     let remaining: i64 = conn
         .query_row(

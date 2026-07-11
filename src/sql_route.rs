@@ -29,6 +29,13 @@ pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
         });
     }
 
+    if looks_like_drop_role_cascade(sql) {
+        return Ok(SqlRouteDecision {
+            route: SqlRoute::Write,
+            command: "DROP".to_string(),
+        });
+    }
+
     if crate::catalog::looks_like_show_partitions(sql) {
         return Ok(SqlRouteDecision {
             route: SqlRoute::Read,
@@ -64,6 +71,22 @@ pub fn route_sql(sql: &str) -> Result<SqlRouteDecision, String> {
 fn looks_like_comment_on(sql: &str) -> bool {
     let normalized = sql.trim_start().to_ascii_lowercase();
     normalized.starts_with("comment on ")
+}
+
+fn looks_like_drop_role_cascade(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut words = trimmed.split_ascii_whitespace();
+    matches!(
+        (
+            words.next(),
+            words.next(),
+            trimmed.split_ascii_whitespace().last(),
+        ),
+        (Some(drop), Some(role), Some(cascade))
+            if drop.eq_ignore_ascii_case("drop")
+                && role.eq_ignore_ascii_case("role")
+                && cascade.eq_ignore_ascii_case("cascade")
+    )
 }
 
 pub fn is_pageable_sql(sql: &str) -> Result<bool, String> {
@@ -302,6 +325,10 @@ mod tests {
                 .unwrap()
                 .command,
             "ALTER"
+        );
+        assert_eq!(
+            route_sql("DROP ROLE analyst CASCADE").unwrap().route,
+            SqlRoute::Write
         );
         assert_eq!(
             route_sql(

@@ -378,13 +378,54 @@ pub(in crate::catalog) fn parse_one_statement(sql: &str) -> Result<(Statement, S
 
 fn parse_custom_statement(sql: &str) -> Result<Option<(Statement, String)>, String> {
     let normalized = sql.trim_start().to_ascii_lowercase();
-    if !normalized.starts_with("comment on ") {
-        return Ok(None);
+    if normalized.starts_with("comment on ") {
+        let statement = parse_comment_on_statement(sql)?;
+        let normalized_sql = statement.to_string();
+        return Ok(Some((statement, normalized_sql)));
     }
 
-    let statement = parse_comment_on_statement(sql)?;
-    let normalized_sql = statement.to_string();
-    Ok(Some((statement, normalized_sql)))
+    let Some(sql_without_cascade) = strip_drop_role_cascade(sql) else {
+        return Ok(None);
+    };
+    let dialect = DuckDbDialect {};
+    let statements = Parser::parse_sql(&dialect, sql_without_cascade)
+        .map_err(|e| format!("catalog sql parse failed: {e}"))?;
+    if statements.len() != 1 {
+        return Err(format!(
+            "only one SQL statement is supported, got {}",
+            statements.len()
+        ));
+    }
+    let mut statement = statements.into_iter().next().expect("statement exists");
+    let Statement::Drop {
+        object_type,
+        cascade,
+        ..
+    } = &mut statement
+    else {
+        return Err("DROP ROLE CASCADE requires a DROP ROLE statement".into());
+    };
+    if *object_type != ObjectType::Role {
+        return Err("CASCADE is only supported here for DROP ROLE".into());
+    }
+    *cascade = true;
+    Ok(Some((
+        statement,
+        sql.trim().trim_end_matches(';').trim().to_string(),
+    )))
+}
+
+fn strip_drop_role_cascade(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("drop role") || !lower.ends_with("cascade") {
+        return None;
+    }
+    let cascade_start = trimmed.len().checked_sub("cascade".len())?;
+    if cascade_start == 0 || !trimmed.as_bytes()[cascade_start - 1].is_ascii_whitespace() {
+        return None;
+    }
+    Some(trimmed[..cascade_start].trim_end())
 }
 
 fn parse_comment_on_statement(sql: &str) -> Result<Statement, String> {
