@@ -142,7 +142,8 @@ jobs:
           cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
           cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
           chmod +x packaging/macos/scripts/postinstall
-          pkgbuild --root "$root" --scripts packaging/macos/scripts --identifier com.dripai.rsduck --version "$version" "dist/${{ matrix.service_asset_name }}"
+          ls -l packaging/macos/scripts/postinstall
+          pkgbuild --root "$root" --scripts packaging/macos/scripts --identifier com.dripai.rsduck --version "$version" --install-location / "dist/${{ matrix.service_asset_name }}"
 
       - name: Upload macOS launchd service installer artifact
         if: runner.os == 'macOS'
