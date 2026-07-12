@@ -84,6 +84,10 @@ body.resizing { cursor: row-resize; user-select: none; }
 .pager input { width: 96px; height: 28px; padding: 4px 7px; border: 1px solid #c8d0dc; border-radius: 4px; }
 .status { min-width: 0; margin-left: auto; color: #66758a; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .result { min-width: 0; min-height: 0; overflow: auto; background: #fff; }
+.explain-result { padding: 12px; }
+.explain-card { border: 1px solid #d8dde6; border-radius: 5px; overflow: auto; }
+.explain-label { padding: 7px 10px; border-bottom: 1px solid #d8dde6; color: #475569; background: #f8fafc; font-size: 12px; font-weight: 700; }
+.explain-plan { margin: 0; padding: 12px; color: #1f2937; background: #fff; font: 12px/1.45 Consolas, "Courier New", monospace; white-space: pre; tab-size: 2; }
 table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-right: 1px solid #e1e5eb; border-bottom: 1px solid #e1e5eb; padding: 6px 9px; text-align: left; white-space: nowrap; }
 th { position: sticky; top: 0; background: #f3f5f7; color: #111827; z-index: 1; }
@@ -192,6 +196,7 @@ tbody tr:nth-child(even) { background: #fafbfc; }
       <span id="msg" class="status"></span>
     </div>
     <section class="result">
+      <div id="explainResult" class="explain-result" hidden></div>
       <table id="tbl"></table>
     </section>
   </main>
@@ -593,6 +598,7 @@ async function run(resetPage = true) {
 }
 
 function renderBatchResult(items) {
+  hideExplainResult();
   const tbl = document.getElementById('tbl');
   let html = '<thead><tr><th>#</th><th>Status</th><th>SQL</th><th>Message</th><th>ms</th></tr></thead><tbody>';
   for (const item of items) {
@@ -606,6 +612,33 @@ function renderBatchResult(items) {
   }
   html += '</tbody>';
   tbl.innerHTML = html;
+}
+
+function isExplainResult(data) {
+  return data.columns.length === 2 &&
+    data.columns[0].name.toLowerCase() === 'explain_key' &&
+    data.columns[1].name.toLowerCase() === 'explain_value';
+}
+
+function hideExplainResult() {
+  document.getElementById('explainResult').hidden = true;
+  document.getElementById('tbl').style.display = '';
+}
+
+function renderExplainResult(data) {
+  const explainResult = document.getElementById('explainResult');
+  let html = '';
+  for (const row of data.rows) {
+    const label = row[0] || 'plan';
+    const plan = row[1] || '';
+    html += '<section class="explain-card">';
+    html += '<div class="explain-label">' + escapeHtml(label) + '</div>';
+    html += '<pre class="explain-plan">' + escapeHtml(plan) + '</pre>';
+    html += '</section>';
+  }
+  explainResult.innerHTML = html;
+  explainResult.hidden = false;
+  document.getElementById('tbl').style.display = 'none';
 }
 
 async function runSqlBatch(statements, pageSize) {
@@ -669,10 +702,17 @@ async function runSqlText(sql, resetPage = true, options = {}) {
   msg.innerText = data.msg + ' in ' + ms + 'ms';
   const tbl = document.getElementById('tbl');
   if (!data.columns.length) {
+    hideExplainResult();
     tbl.innerHTML = '';
     if (refreshTables) loadTables(false);
     return;
   }
+  if (isExplainResult(data)) {
+    renderExplainResult(data);
+    if (refreshTables) loadTables(false);
+    return;
+  }
+  hideExplainResult();
   let html = '<thead><tr>' + data.columns.map(c => '<th>' + escapeHtml(c.name) + '</th>').join('') + '</tr></thead><tbody>';
   for (const row of data.rows) {
     html += '<tr>' + row.map(v => '<td>' + escapeHtml(v) + '</td>').join('') + '</tr>';
