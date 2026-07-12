@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR="/Library/Application Support/rsduck"
+DAEMON_PLIST="/Library/LaunchDaemons/com.dripai.rsduck.plist"
+
+mkdir -p "$STATE_DIR/logs" "$STATE_DIR/snapshot"
+if [ ! -f "$STATE_DIR/rsduck.toml" ]; then
+  cp "$STATE_DIR/rsduck.toml.default" "$STATE_DIR/rsduck.toml"
+fi
+if [ ! -f "$STATE_DIR/init.sql" ]; then
+  cp "$STATE_DIR/init.sql.default" "$STATE_DIR/init.sql"
+fi
+chmod 755 "$STATE_DIR/rsduck" "$STATE_DIR/rsduck-tray"
+chmod 755 "$STATE_DIR/uninstall-service.sh"
+chmod 644 "$DAEMON_PLIST" /Library/LaunchAgents/com.dripai.rsduck-tray.plist
+
+launchctl bootout system/com.dripai.rsduck >/dev/null 2>&1 || true
+launchctl enable system/com.dripai.rsduck
+launchctl bootstrap system "$DAEMON_PLIST"
+launchctl kickstart -k system/com.dripai.rsduck

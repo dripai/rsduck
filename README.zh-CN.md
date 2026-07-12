@@ -895,7 +895,7 @@ cargo test
 - 更新 manifest 校验、恢复顺序和篡改测试。
 - catalog 文件继续保持单文件，业务表数据继续按 relation 分离。
 
-## 17. Windows 服务和发布
+## 17. 服务、托盘和发布
 
 相关文件：
 
@@ -904,6 +904,10 @@ packaging/windows-service/install-service.ps1
 packaging/windows-service/uninstall-service.ps1
 packaging/windows-service/rsduck-service.xml
 packaging/windows-installer/rsduck.iss
+packaging/linux/systemd/rsduck.service
+packaging/linux/install-service.sh
+packaging/macos/launchd/com.dripai.rsduck.plist
+packaging/macos/scripts/postinstall
 .github/workflows/ci.yml
 ```
 
@@ -923,6 +927,26 @@ cargo build --release
 - `snapshot/` 和 `logs/` 的读写权限。
 - MySQL/Web 监听地址是否只暴露到预期网络。
 - 初始管理员密码已经修改。
+
+### 17.1 服务包和登录后托盘
+
+- Windows 的正式服务包是 `rsduck-windows-service-setup-x64.exe`；安装后服务随机器启动，`rsduck-tray.exe` 在任意用户登录后启动。
+- Linux 的正式服务包是 `rsduck-linux-x64-service.tar.gz`；以 root 执行其中的 `install-service.sh` 后，会安装并启用 system-level `systemd` 服务。`rsduck-tray.desktop` 在图形用户登录后启动托盘。
+- macOS 的正式服务包是 `rsduck-macos-<arch>-service.pkg`；安装后会加载 system-level `launchd` daemon，并通过 LaunchAgent 在 Aqua 用户会话中启动菜单栏程序。
+- 三个平台的服务和托盘进程独立：服务不依赖用户登录，托盘退出或用户注销不会停止数据库服务。
+
+### 17.2 托盘功能和升级
+
+- `rsduck-tray` 分别显示服务管理器状态和 Web `/healthz` 可用性，并提供启动、停止、重启、打开 Web SQL、打开日志目录和退出菜单。
+- 服务控制按平台请求管理员授权：Windows 使用 UAC 与 Service Control Manager，Linux 使用 `pkexec systemctl`，macOS 使用管理员授权的 `launchctl`。
+- 发布工作流会生成 `rsduck-update.json`，其中包含版本、目标平台、安装包地址和 SHA-256。托盘只在下载文件校验通过后启动安装程序。
+- Windows 和 macOS 升级程序由系统安装器请求管理员权限；Linux 升级会解压服务包后通过 `pkexec` 执行安装脚本。更新前托盘会退出，避免占用自身可执行文件。
+
+### 17.3 发布验证边界
+
+- CI 会编译三平台的服务包；Linux 托盘构建依赖 GTK、libxdo 和 libappindicator 开发库。
+- 每个 Release 仍需在对应真实系统执行一次安装、重启且不登录用户的验证，确认服务可启动、`/healthz` 可用且 MySQL 端口可连接。
+- macOS 服务包当前尚未完成代码签名和公证；在具备 Apple 发布凭据前，不应将其描述为已公证发行包。
 
 ## 18. 当前边界总结
 

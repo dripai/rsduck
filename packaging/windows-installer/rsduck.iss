@@ -38,6 +38,7 @@ Name: "{app}\snapshot"
 
 [Files]
 Source: "{#SourceDir}\rsduck.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\rsduck-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\rsduck-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\rsduck-service.xml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\install-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -52,6 +53,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "{group}\rsduck Web Console"; Filename: "{#WebConsoleUrl}"
 Name: "{autodesktop}\rsduck"; Filename: "{#WebConsoleUrl}"; Tasks: desktopicon
 Name: "{group}\Uninstall rsduck"; Filename: "{uninstallexe}"
+
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "rsduck-tray"; ValueData: """{app}\rsduck-tray.exe"""; Flags: uninsdeletevalue
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-service.ps1"""; WorkingDir: "{app}"; StatusMsg: "Installing and starting rsduck service..."; Flags: runhidden waituntilterminated

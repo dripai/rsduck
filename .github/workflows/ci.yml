@@ -22,21 +22,25 @@ jobs:
             binary_path: target/release/rsduck.exe
             binary_name: rsduck.exe
             asset_name: rsduck-windows-x64.zip
+            service_asset_name: rsduck-windows-service-setup-x64.exe
           - name: Linux x64
             os: ubuntu-latest
             binary_path: target/release/rsduck
             binary_name: rsduck
             asset_name: rsduck-linux-x64.tar.gz
+            service_asset_name: rsduck-linux-x64-service.tar.gz
           - name: macOS arm64
             os: macos-latest
             binary_path: target/release/rsduck
             binary_name: rsduck
             asset_name: rsduck-macos-arm64.tar.gz
+            service_asset_name: rsduck-macos-arm64-service.pkg
           - name: macOS x64
             os: macos-15-intel
             binary_path: target/release/rsduck
             binary_name: rsduck
             asset_name: rsduck-macos-x64.tar.gz
+            service_asset_name: rsduck-macos-x64-service.pkg
 
     env:
       CARGO_TERM_COLOR: always
@@ -53,6 +57,12 @@ jobs:
 
       - name: Install Rust formatter
         run: rustup component add rustfmt
+
+      - name: Install Linux tray build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libappindicator3-dev
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -92,6 +102,56 @@ jobs:
           path: dist/${{ matrix.asset_name }}
           if-no-files-found: error
 
+      - name: Package Linux system service bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p service
+          cp target/release/rsduck service/rsduck
+          cp target/release/rsduck-tray service/rsduck-tray
+          cp rsduck.toml service/rsduck.toml.default
+          cp init.sql service/init.sql.default
+          cp packaging/linux/systemd/rsduck.service service/rsduck.service
+          cp packaging/linux/install-service.sh service/install-service.sh
+          cp packaging/linux/uninstall-service.sh service/uninstall-service.sh
+          cp packaging/linux/rsduck-tray.desktop service/rsduck-tray.desktop
+          chmod +x service/rsduck service/rsduck-tray service/install-service.sh service/uninstall-service.sh
+          tar -czf dist/${{ matrix.service_asset_name }} -C service .
+
+      - name: Upload Linux system service bundle artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service_asset_name }}
+          path: dist/${{ matrix.service_asset_name }}
+          if-no-files-found: error
+
+      - name: Package macOS launchd service installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p' Cargo.toml | head -n 1)
+          root=service-root
+          state_dir="$root/Library/Application Support/rsduck"
+          mkdir -p "$state_dir" "$root/Library/LaunchDaemons" "$root/Library/LaunchAgents"
+          cp target/release/rsduck "$state_dir/rsduck"
+          cp target/release/rsduck-tray "$state_dir/rsduck-tray"
+          cp rsduck.toml "$state_dir/rsduck.toml.default"
+          cp init.sql "$state_dir/init.sql.default"
+          cp packaging/macos/uninstall-service.sh "$state_dir/uninstall-service.sh"
+          cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
+          cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
+          chmod +x packaging/macos/scripts/postinstall
+          pkgbuild --root "$root" --scripts packaging/macos/scripts --identifier com.dripai.rsduck --version "$version" "dist/${{ matrix.service_asset_name }}"
+
+      - name: Upload macOS launchd service installer artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service_asset_name }}
+          path: dist/${{ matrix.service_asset_name }}
+          if-no-files-found: error
+
       - name: Download WinSW
         if: runner.os == 'Windows'
         shell: pwsh
@@ -108,6 +168,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path service\logs | Out-Null
           New-Item -ItemType Directory -Force -Path service\snapshot | Out-Null
           Copy-Item target\release\rsduck.exe service\rsduck.exe
+          Copy-Item target\release\rsduck-tray.exe service\rsduck-tray.exe
           Copy-Item rsduck.toml service\rsduck.toml
           Copy-Item init.sql service\init.sql
           Copy-Item dist\rsduck-service.exe service\rsduck-service.exe
@@ -153,6 +214,37 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Generate release asset manifest
+        shell: bash
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          sha256() {
+            sha256sum "dist/$1" | awk '{print $1}'
+          }
+          cat > dist/rsduck-update.json <<EOF
+          {
+            "version": "${GITHUB_REF_NAME#v}",
+            "assets": {
+              "windows-x64": {
+                "url": "${base}/rsduck-windows-service-setup-x64.exe",
+                "sha256": "$(sha256 rsduck-windows-service-setup-x64.exe)"
+              },
+              "linux-x64": {
+                "url": "${base}/rsduck-linux-x64-service.tar.gz",
+                "sha256": "$(sha256 rsduck-linux-x64-service.tar.gz)"
+              },
+              "macos-arm64": {
+                "url": "${base}/rsduck-macos-arm64-service.pkg",
+                "sha256": "$(sha256 rsduck-macos-arm64-service.pkg)"
+              },
+              "macos-x64": {
+                "url": "${base}/rsduck-macos-x64-service.pkg",
+                "sha256": "$(sha256 rsduck-macos-x64-service.pkg)"
+              }
+            }
+          }
+          EOF
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2

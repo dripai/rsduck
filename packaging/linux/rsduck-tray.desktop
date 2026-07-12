@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RSDuck Tray
+Comment=RSDuck service management tray
+Exec=/usr/bin/env RSDUCK_RUNTIME_DIR=/var/lib/rsduck /opt/rsduck/rsduck-tray
+Path=/var/lib/rsduck
+Terminal=false
+X-GNOME-Autostart-enabled=true

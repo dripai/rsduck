@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dripai.rsduck-tray</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/rsduck/rsduck-tray</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/rsduck</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RSDUCK_RUNTIME_DIR</key>
+    <string>/Library/Application Support/rsduck</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+  </array>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+[Unit]
+Description=RSDuck in-memory DuckDB middleware service
+After=network.target
+
+[Service]
+Type=simple
+User=rsduck
+Group=rsduck
+WorkingDirectory=/var/lib/rsduck
+ExecStart=/opt/rsduck/rsduck
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

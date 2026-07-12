@@ -895,7 +895,7 @@ For scheduler pre-SQL or temporary-table workflows, do not expose an arbitrary m
 - Update manifest validation, restore order, and tamper tests.
 - Keep catalog as a single file and keep business table data separated by relation.
 
-## 17. Windows Service And Release
+## 17. Services, Tray, And Release
 
 Related files:
 
@@ -904,6 +904,10 @@ packaging/windows-service/install-service.ps1
 packaging/windows-service/uninstall-service.ps1
 packaging/windows-service/rsduck-service.xml
 packaging/windows-installer/rsduck.iss
+packaging/linux/systemd/rsduck.service
+packaging/linux/install-service.sh
+packaging/macos/launchd/com.dripai.rsduck.plist
+packaging/macos/scripts/postinstall
 .github/workflows/ci.yml
 ```
 
@@ -923,6 +927,26 @@ Service deployment must also verify:
 - Read/write permissions for `snapshot/` and `logs/`.
 - Whether MySQL/Web bind addresses are exposed only to the intended network.
 - The initial administrator password has been changed.
+
+### 17.1 Service Packages And Login Tray
+
+- The Windows production service package is `rsduck-windows-service-setup-x64.exe`. The service starts at machine boot and `rsduck-tray.exe` starts after any user signs in.
+- The Linux production service package is `rsduck-linux-x64-service.tar.gz`. Running its `install-service.sh` as root installs and enables the system-level `systemd` service. `rsduck-tray.desktop` starts the tray after a graphical user signs in.
+- The macOS production service package is `rsduck-macos-<arch>-service.pkg`. It loads a system-level `launchd` daemon and starts the menu bar process through a LaunchAgent in Aqua user sessions.
+- The service and tray are independent on every platform: the service does not depend on user login, and exiting the tray or logging out does not stop the database service.
+
+### 17.2 Tray Features And Updates
+
+- `rsduck-tray` reports service-manager state separately from Web `/healthz` availability, and provides start, stop, restart, open Web SQL, open log directory, and quit actions.
+- Service control requests elevation per platform: UAC and Service Control Manager on Windows, `pkexec systemctl` on Linux, and administrator-authorized `launchctl` on macOS.
+- The release workflow generates `rsduck-update.json` with version, target platform, installer URL, and SHA-256. The tray launches an installer only after the downloaded file verifies successfully.
+- Windows and macOS installers request elevation through the operating system. Linux updates extract the service package and run its installer through `pkexec`. The tray exits before the update so its executable is not held open.
+
+### 17.3 Release Verification Boundary
+
+- CI builds service packages for all three platforms; the Linux tray build requires GTK, libxdo, and libappindicator development libraries.
+- Each Release still requires an installation test on the real target OS: install, reboot without logging in, then verify service startup, `/healthz`, and the MySQL port.
+- The macOS service package is not yet code-signed or notarized. Do not describe it as a notarized release until Apple release credentials are configured.
 
 ## 18. Current Product Boundaries
 

@@ -59,6 +59,12 @@ pub struct SessionResp {
     pub username: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HealthResp {
+    pub status: &'static str,
+    pub version: &'static str,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ParquetImportReq {
     pub source: String,
@@ -173,6 +179,13 @@ fn sql_values_to_resp_rows(rows: Vec<Vec<SqlValue>>) -> Vec<Vec<Option<String>>>
 
 async fn index_page() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn health_handler() -> Json<HealthResp> {
+    Json(HealthResp {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 async fn login_handler(State(state): State<WebState>, Json(req): Json<LoginReq>) -> Response {
@@ -471,6 +484,7 @@ pub fn web_router(
 ) -> Router {
     Router::new()
         .route("/", get(index_page))
+        .route("/healthz", get(health_handler))
         .route("/assets/codemirror.bundle.js", get(codemirror_js))
         .route("/login", post(login_handler))
         .route("/logout", post(logout_handler))
@@ -516,8 +530,14 @@ fn new_session_token() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{paged_sql, parse_session_token, resolve_parquet_import_sources, ParquetImportReq};
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use super::{
+        health_handler, paged_sql, parse_session_token, resolve_parquet_import_sources,
+        ParquetImportReq,
+    };
+    use axum::{
+        http::{header, HeaderMap, HeaderValue},
+        Json,
+    };
     use std::fs;
 
     #[test]
@@ -529,6 +549,13 @@ mod tests {
         );
 
         assert_eq!(parse_session_token(&headers), Some("abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_reports_running_version() {
+        let Json(response) = health_handler().await;
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
