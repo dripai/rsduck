@@ -1,0 +1,138 @@
+name: macOS Package Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: macOS architecture to build
+        required: true
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - x64
+
+permissions:
+  contents: read
+
+jobs:
+  package-debug:
+    name: Debug macOS ${{ inputs.architecture }} package
+    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || 'macos-latest' }}
+    env:
+      CARGO_TERM_COLOR: always
+      ASSET_NAME: ${{ inputs.architecture == 'x64' && 'rsduck-macos-x64-service.pkg' || 'rsduck-macos-arm64-service.pkg' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Use stable Rust
+        run: rustup default stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ inputs.architecture }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-${{ inputs.architecture }}-cargo-
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Prepare package payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version=$(awk -F '"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          test -n "$version" || {
+            echo "::error::Failed to read package version from Cargo.toml"
+            exit 1
+          }
+          echo "$version" > package-version.txt
+          echo "Packaging version: $version"
+
+          root=service-root
+          state_dir="$root/Library/Application Support/rsduck"
+          mkdir -p dist "$state_dir" "$root/Library/LaunchDaemons" "$root/Library/LaunchAgents"
+          cp target/release/rsduck "$state_dir/rsduck"
+          cp target/release/rsduck-tray "$state_dir/rsduck-tray"
+          cp rsduck.toml "$state_dir/rsduck.toml.default"
+          cp init.sql "$state_dir/init.sql.default"
+          cp packaging/macos/uninstall-service.sh "$state_dir/uninstall-service.sh"
+          cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
+          cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
+          chmod +x packaging/macos/scripts/postinstall
+
+      - name: Validate package inputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          sh -n packaging/macos/scripts/postinstall
+          plutil -lint packaging/macos/launchd/com.dripai.rsduck.plist
+          plutil -lint packaging/macos/launchd/com.dripai.rsduck-tray.plist
+          file packaging/macos/scripts/postinstall
+          stat -f '%Sp %Su:%Sg %z %N' packaging/macos/scripts/postinstall
+          xattr -lr packaging/macos/scripts || true
+          find service-root -print
+
+      - name: Build payload-only probe package
+        shell: bash
+        run: |
+          set -o pipefail
+          version=$(cat package-version.txt)
+          pkgbuild \
+            --root service-root \
+            --identifier com.dripai.rsduck.payload-test \
+            --version "$version" \
+            --install-location / \
+            dist/payload-only.pkg 2>&1 | tee dist/pkgbuild-payload.log
+
+      - name: Build service installer package
+        shell: bash
+        run: |
+          set -o pipefail
+          version=$(cat package-version.txt)
+          pkgbuild \
+            --root service-root \
+            --scripts packaging/macos/scripts \
+            --identifier com.dripai.rsduck \
+            --version "$version" \
+            --install-location / \
+            "dist/$ASSET_NAME" 2>&1 | tee dist/pkgbuild-service.log
+
+      - name: Inspect generated package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          pkgutil --expand "dist/$ASSET_NAME" expanded-package
+          find expanded-package -print
+          pkgutil --payload-files "dist/$ASSET_NAME"
+
+      - name: Collect macOS diagnostic logs
+        if: failure()
+        shell: bash
+        run: |
+          log show --last 10m --style compact \
+            --predicate 'process == "pkgbuild" OR process == "package_script_service"' \
+            > dist/macos-package-system.log 2>&1 || true
+
+      - name: Upload package and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ inputs.architecture }}-package-debug
+          path: |
+            dist/*
+            package-version.txt
+          if-no-files-found: warn

@@ -130,7 +130,13 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          version=$(sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p' Cargo.toml | head -n 1)
+          set -euxo pipefail
+          version=$(awk -F '"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          test -n "$version" || {
+            echo "::error::Failed to read package version from Cargo.toml"
+            exit 1
+          }
+          echo "Packaging version: $version"
           root=service-root
           state_dir="$root/Library/Application Support/rsduck"
           mkdir -p "$state_dir" "$root/Library/LaunchDaemons" "$root/Library/LaunchAgents"
@@ -142,7 +148,11 @@ jobs:
           cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
           cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
           chmod +x packaging/macos/scripts/postinstall
-          ls -l packaging/macos/scripts/postinstall
+          sh -n packaging/macos/scripts/postinstall
+          plutil -lint packaging/macos/launchd/com.dripai.rsduck.plist
+          plutil -lint packaging/macos/launchd/com.dripai.rsduck-tray.plist
+          file packaging/macos/scripts/postinstall
+          stat -f '%Sp %Su:%Sg %z %N' packaging/macos/scripts/postinstall
           pkgbuild --root "$root" --scripts packaging/macos/scripts --identifier com.dripai.rsduck --version "$version" --install-location / "dist/${{ matrix.service_asset_name }}"
 
       - name: Upload macOS launchd service installer artifact
