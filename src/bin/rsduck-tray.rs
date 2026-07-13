@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use rsduck::config::{self, RsduckConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
