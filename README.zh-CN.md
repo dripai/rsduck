@@ -38,6 +38,7 @@
 - [总体架构设计](doc/architecture-overview.md)
 - [catalog 和权限设计](doc/mysql-compat-auth-catalog-design.md)
 - [实战案例](doc/rsduck-practical-examples.md)
+- [Agent 向量记忆检索与索引接入规范](doc/agent-vector-memory.md)
 
 本文面向需要运行、接入、维护或继续开发 rsduck 的工程人员。内容以当前代码行为为准，重点说明可以做什么、不能做什么、失败时如何处理，以及新增能力时必须保持的约束。
 
@@ -49,7 +50,9 @@ rsduck 是一个基于 DuckDB 的内存数据库服务，对外提供：
 - Web SQL 控制台，支持查询、分页、快照和 Parquet 表导入。
 - `rsduck_catalog.rs_*` 元数据与权限体系。
 - 普通表、视图、索引、用户、角色和受管范围分区表。
-- Snapshot v2 持久化与恢复。
+- `FLOAT[N]` 固定维度向量、受管 VSS/HNSW 索引和专用 Vector API。
+- Windows、Linux、macOS 系统服务包、登录后托盘控制和校验升级。
+- Snapshot v3 持久化与恢复。
 
 rsduck 不是 MySQL，也不是将 DuckDB 的所有原生能力直接透传出去的代理。它采用以下原则：
 
@@ -170,6 +173,8 @@ write_queue_size = 100000
 read_queue_size = 1024
 snapshot_queue_size = 16
 max_result_rows = 100000
+extension_dir = "extensions"
+vss_enabled = true
 
 [snapshot]
 restore_on_startup = true
@@ -191,6 +196,13 @@ bind = "127.0.0.1:13306"
 enabled = true
 bind = "127.0.0.1:13307"
 parquet_import_root = "."
+
+[web.vector_api_limits]
+max_body_bytes = 33554432
+max_concurrent_requests = 64
+search_timeout_ms = 5000
+write_timeout_ms = 30000
+maintenance_timeout_ms = 300000
 ```
 
 ### 4.1 配置规则
@@ -202,13 +214,15 @@ parquet_import_root = "."
 - `max_result_rows` 是单次服务端结果上限，不等同于 Web 页大小。
 - `snapshot.prefix` 只允许安全的快照目录前缀；非法前缀会阻止启动。
 - `parquet_import_root` 是 Web Parquet 导入允许访问的根目录。导入请求只能使用该目录下的相对路径。
+- `vss_enabled = true` 时，启动前必须在 `extension_dir` 中准备匹配当前 DuckDB 和平台的 VSS；缺失或加载失败会明确报错，不会隐式回退到精确扫描。
+- Vector API Token 通过 `[[web.vector_api_tokens]]` 配置，并按操作、租户、Agent 和向量空间限制；不要把真实 Token 提交到仓库。
 
 ### 4.2 启动数据来源
 
 启动顺序如下：
 
 1. 获取 `.rsduck.lock`，防止同一工作目录启动多个实例。
-2. 如果 `restore_on_startup = true`，查找最新的有效 Snapshot v2。
+2. 如果 `restore_on_startup = true`，查找最新的有效 Snapshot v3。
 3. 找到快照时，从快照恢复 catalog 和业务对象。
 4. 没有快照时，创建全新的 rsduck catalog。
 5. 新库且 `db.init_sql` 非空时，执行初始化 SQL。
@@ -233,6 +247,7 @@ rs_column            列
 rs_column_default    默认值
 rs_constraint        主键、唯一、外键、检查约束
 rs_index             索引
+rs_vector_index      向量空间、HNSW 定义、物理代次和运行状态
 rs_dependency        对象依赖
 rs_comment           注释
 rs_relation_ext      rsduck 扩展属性
@@ -374,6 +389,7 @@ SELECT * FROM prepared WHERE avg_close > 10;
 | `ALTER TABLE DROP COLUMN` | 支持 | 受约束、索引、外键、分区键依赖保护 |
 | `CREATE VIEW` | 支持 | 不支持 temporary 和 `OR REPLACE` |
 | `CREATE INDEX` | 支持 | 必须显式命名；不支持 partial、INCLUDE、表达式索引 |
+| Catalog 管理的 HNSW | 支持 | 仅通过 Vector API 管理；首版支持普通非分区表上的单列 `FLOAT[N]` |
 | `COMMENT ON` | 支持 | schema、table、view、index、column |
 | `CREATE USER/ROLE` | 支持 | 用户必须设置密码 |
 | `GRANT/REVOKE` | 支持 | 使用 rsduck 映射后的 read/write/ddl/system 权限 |
@@ -397,6 +413,14 @@ TIME
 TIMESTAMP
 ```
 
+固定维度向量类型：
+
+```text
+FLOAT[N]
+```
+
+`FLOAT[N]` 在 DDL、参数绑定、MySQL/Web 查询结果、JSON、Parquet 快照和恢复中保持固定维度约束。Vector API 可以在普通非分区表的单个 `FLOAT[N]` 列上创建 Catalog 管理的 HNSW，支持 `cosine`、`l2sq` 和 `ip` 距离。
+
 复杂列类型支持：
 
 ```text
@@ -407,7 +431,7 @@ MAP(<simple_type>, <simple_type>)
 
 rsduck 支持 DuckDB 原生复杂列类型，但不允许复杂类型嵌套复杂类型。复杂列内部只能使用简单标量类型，查询结果统一序列化为 JSON。
 
-复杂列可以作为普通数据列使用，但暂不支持作为主键、唯一键、索引列、外键、分区键，也不支持非 `NULL` 默认值。DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 导入会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
+泛型复杂列（数组、STRUCT、MAP）可以作为普通数据列使用，但暂不支持作为主键、唯一键、索引列、外键、分区键，也不支持非 `NULL` 默认值。`FLOAT[N]` 的受管 HNSW 是专用例外，不等同于开放任意复杂列索引。DuckDB 还支持更多类型，但如果 rsduck catalog 没有类型映射，DDL 或 Parquet 导入会失败并回滚。不要依赖原生 DuckDB 能创建某类型，就假设 rsduck 受管表也支持。
 
 ## 8. 普通表开发案例
 
@@ -625,7 +649,7 @@ batch_20260710
 
 导入完成后，根据业务需要单独创建索引、约束、注释和权限。
 
-## 12. Snapshot v2
+## 12. Snapshot v3
 
 快照目录结构：
 
@@ -691,7 +715,7 @@ rsduck reset-admin-password --password <new_password>
 rsduck reset-admin-password
 ```
 
-命令会基于现有 Snapshot v2 生成一份新快照，不直接修改正在运行的内存实例。
+命令会基于现有 Snapshot v3 生成一份新快照，不直接修改正在运行的内存实例。
 
 ## 13. MySQL/Navicat 接入
 
@@ -781,6 +805,31 @@ POST /parquet-import         执行 Parquet 表导入
 
 Web 只对顶层没有 `LIMIT/OFFSET` 的 `SELECT/WITH` 自动增加分页包装。已经显式分页的 SQL 保持原样。
 
+### 14.1 Agent 向量记忆 API
+
+正式向量路径固定为 `FLOAT[N] + Catalog 管理的 HNSW + Vector API`。RSDuck 保存可重建的向量记录、索引定义和运行状态，检索返回有序的 `memory_id + distance`；记忆正文和业务状态仍应保存在关系型事实源中。
+
+主要端点：
+
+```text
+POST /api/vector/indexes                         创建受管 HNSW
+GET  /api/vector/indexes/{vector_space}/status   查询索引状态
+POST /api/vector/indexes/{vector_space}/rebuild  重建索引
+POST /api/vector/indexes/{vector_space}/compact  压缩索引
+POST /api/vector/upsert-batch                    幂等批量写入
+POST /api/vector/delete-batch                    幂等批量删除
+POST /api/vector/search                          ANN 或显式精确检索
+```
+
+- Agent 使用 Bearer Token 调用搜索和写入接口；索引管理使用浏览器登录会话，并继续执行 RSDuck 权限检查。
+- Token 按 `search/write`、租户、Agent 和向量空间隔离，服务端始终强制租户与 Agent 边界。
+- 向量记录以 `(tenant_id, agent_id, memory_id)` 唯一，并使用单调递增的 `source_version` 保证 Outbox 至少一次投递下的幂等性。
+- 索引状态包括 `pending`、`building`、`active`、`rebuilding`、`compacting`、`stale`、`failed`、`unavailable`；ANN 只允许使用 `active` 索引。
+- ANN 失败不会隐式执行全表扫描；只有调用方明确指定 `mode=exact` 才运行精确检索。
+- HNSW 是派生数据。Snapshot v3 保存向量数据、Catalog 和索引定义，恢复时重建物理索引。
+
+完整的表结构、认证配置、请求响应、错误码、超时重试和模型升级规则见 [Agent 向量记忆检索与索引接入规范](doc/agent-vector-memory.md)。
+
 ## 15. 常见错误与处理
 
 ### `relation does not exist in catalog`
@@ -844,10 +893,12 @@ cargo test
 - 用户、角色、权限
 - 普通表、约束、视图、索引、注释
 - 分区创建、写入、保留、修复
-- Snapshot v2 保存和恢复
+- Snapshot v3 保存和恢复
 - MySQL 协议和 metadata 投影
 - Web 分页和 Parquet 导入
 - 批量 Parquet 导入失败时整批回滚
+- `FLOAT[N]` 全链路、VSS/HNSW 生命周期和故障恢复
+- Vector API 认证、租户边界、幂等写删、并发和超时契约
 
 ### 16.1 新增 DDL 的检查清单
 
@@ -863,7 +914,7 @@ cargo test
 [ ] journal、epoch、checksum 更新
 [ ] 失败无物理/catalog 残留
 [ ] information_schema/Navicat 投影正确
-[ ] Snapshot v2 可保存和恢复
+[ ] Snapshot v3 可保存和恢复
 [ ] 普通、权限拒绝、回滚测试完整
 ```
 
@@ -944,7 +995,7 @@ cargo build --release
 
 ### 17.3 发布验证边界
 
-- CI 会编译三平台的服务包；Linux 托盘构建依赖 GTK、libxdo 和 libappindicator 开发库。
+- CI 为 Windows x64、Linux x64、macOS arm64/x64 构建服务包，并在各 Runner 执行真实 VSS 加载、HNSW 创建和检索测试；Linux 托盘构建依赖 GTK、libxdo 和 libappindicator 开发库。
 - 每个 Release 仍需在对应真实系统执行一次安装、重启且不登录用户的验证，确认服务可启动、`/healthz` 可用且 MySQL 端口可连接。
 - macOS 服务包当前尚未完成代码签名和公证；在具备 Apple 发布凭据前，不应将其描述为已公证发行包。
 
@@ -961,6 +1012,8 @@ cargo build --release
 - 单个 Parquet 文件对应一张逻辑表。
 - 不支持的 catalog relation、类型或 DDL 直接报错。
 - 缺失依赖不自动回退到旧路径。
-- 所有可恢复状态必须进入 Snapshot v2。
+- 正式向量路径固定为 `FLOAT[N] + Catalog 管理的 HNSW + Vector API`，ANN 不可用时不隐式执行精确扫描。
+- HNSW 是可重建派生数据，向量数据和索引定义必须进入 Snapshot v3。
+- 所有可恢复状态必须进入 Snapshot v3。
 
 继续开发时，如果一个方案会绕过这些边界，应先修改产品设计和测试契约，而不是在局部代码中增加兼容分支。

@@ -38,6 +38,7 @@ Related documents:
 - [Architecture overview](doc/architecture-overview.en.md)
 - [Catalog and permission design](doc/mysql-compat-auth-catalog-design.en.md)
 - [Practical examples](doc/rsduck-practical-examples.en.md)
+- [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.md)
 
 This document is for engineers who need to run, integrate, maintain, or continue developing rsduck. It describes the current code behavior, with emphasis on what is supported, what is not supported, how failures should be handled, and which constraints must be preserved when adding new capabilities.
 
@@ -49,7 +50,9 @@ rsduck is an in-memory database service built on DuckDB. It exposes:
 - A Web SQL console with query, pagination, snapshot, and Parquet table import features.
 - The `rsduck_catalog.rs_*` metadata and privilege system.
 - Ordinary tables, views, indexes, users, roles, and managed range-partitioned tables.
-- Snapshot v2 persistence and restore.
+- Fixed-dimension `FLOAT[N]` vectors, catalog-managed VSS/HNSW indexes, and a dedicated Vector API.
+- Windows, Linux, and macOS system-service packages, login-session tray controls, and verified updates.
+- Snapshot v3 persistence and restore.
 
 rsduck is not MySQL, and it is not a transparent proxy that exposes every native DuckDB capability. It follows these principles:
 
@@ -170,6 +173,8 @@ write_queue_size = 100000
 read_queue_size = 1024
 snapshot_queue_size = 16
 max_result_rows = 100000
+extension_dir = "extensions"
+vss_enabled = true
 
 [snapshot]
 restore_on_startup = true
@@ -191,6 +196,13 @@ bind = "127.0.0.1:13306"
 enabled = true
 bind = "127.0.0.1:13307"
 parquet_import_root = "."
+
+[web.vector_api_limits]
+max_body_bytes = 33554432
+max_concurrent_requests = 64
+search_timeout_ms = 5000
+write_timeout_ms = 30000
+maintenance_timeout_ms = 300000
 ```
 
 ### 4.1 Configuration Rules
@@ -202,13 +214,15 @@ parquet_import_root = "."
 - `max_result_rows` is the server-side maximum result size for one request. It is not the same as the Web page size.
 - `snapshot.prefix` only accepts safe snapshot directory prefixes. An unsafe prefix prevents startup.
 - `parquet_import_root` is the root directory allowed for Web Parquet import. Import requests may only use relative paths under this directory.
+- When `vss_enabled = true`, a VSS build matching the current DuckDB version and platform must exist under `extension_dir` before startup. Missing or unloadable VSS files produce a clear error and never trigger an implicit exact-scan fallback.
+- Configure Vector API tokens through `[[web.vector_api_tokens]]`, scoped by operation, tenant, agent, and vector space. Never commit real tokens to the repository.
 
 ### 4.2 Startup Data Sources
 
 Startup order:
 
 1. Acquire `.rsduck.lock` to prevent multiple instances from using the same working directory.
-2. If `restore_on_startup = true`, find the latest valid Snapshot v2.
+2. If `restore_on_startup = true`, find the latest valid Snapshot v3.
 3. If a snapshot is found, restore catalog and business objects from it.
 4. If no snapshot exists, create a fresh rsduck catalog.
 5. For a fresh database, execute initialization SQL when `db.init_sql` is not empty.
@@ -233,6 +247,7 @@ rs_column            columns
 rs_column_default    column defaults
 rs_constraint        primary keys, unique constraints, foreign keys, check constraints
 rs_index             indexes
+rs_vector_index      vector spaces, HNSW definitions, physical generations, and runtime state
 rs_dependency        object dependencies
 rs_comment           comments
 rs_relation_ext      rsduck extension attributes
@@ -374,6 +389,7 @@ Queries go to read workers. Write operations go to the serialized write worker.
 | `ALTER TABLE DROP COLUMN` | Supported | Protected by dependencies from constraints, indexes, foreign keys, and partition keys |
 | `CREATE VIEW` | Supported | Temporary views and `OR REPLACE` are not supported |
 | `CREATE INDEX` | Supported | Must be explicitly named. Partial, INCLUDE, and expression indexes are not supported |
+| Catalog-managed HNSW | Supported | Managed only through the Vector API; the first release supports one `FLOAT[N]` column on an ordinary non-partitioned table |
 | `COMMENT ON` | Supported | Schemas, tables, views, indexes, and columns |
 | `CREATE USER/ROLE` | Supported | Users must have passwords |
 | `GRANT/REVOKE` | Supported | Uses rsduck-mapped read/write/ddl/system privileges |
@@ -397,6 +413,14 @@ TIME
 TIMESTAMP
 ```
 
+Fixed-dimension vector type:
+
+```text
+FLOAT[N]
+```
+
+`FLOAT[N]` preserves its dimension contract through DDL, parameter binding, MySQL/Web query results, JSON, Parquet snapshots, and restore. The Vector API can create a catalog-managed HNSW index on one `FLOAT[N]` column of an ordinary non-partitioned table, using `cosine`, `l2sq`, or `ip` distance.
+
 Complex column types:
 
 ```text
@@ -407,7 +431,7 @@ MAP(<simple_type>, <simple_type>)
 
 rsduck supports DuckDB native complex column types, but complex types may not nest other complex types. Complex type internals may only use simple scalar types. Query results serialize complex values as JSON.
 
-Complex columns may be used as ordinary data columns, but are not supported as primary keys, unique keys, index columns, foreign keys, partition keys, or non-`NULL` default values. DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet import fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
+Generic complex columns (arrays, STRUCT, and MAP) may be used as ordinary data columns, but are not supported as primary keys, unique keys, index columns, foreign keys, partition keys, or non-`NULL` default values. Managed HNSW on `FLOAT[N]` is a dedicated exception and does not enable arbitrary complex-column indexes. DuckDB supports more types, but if rsduck has no catalog mapping for a physical type, DDL or Parquet import fails and rolls back. Do not assume that a type is supported in rsduck-managed tables only because native DuckDB can create it.
 
 ## 8. Ordinary Table Examples
 
@@ -625,7 +649,7 @@ Absolute paths are not allowed. `..` and symbolic-link escapes from the root are
 
 After import, create indexes, constraints, comments, and privileges separately as needed.
 
-## 12. Snapshot v2
+## 12. Snapshot v3
 
 Snapshot directory structure:
 
@@ -691,7 +715,7 @@ When `--password` is omitted, the password is reset to `admin`. Use this only fo
 rsduck reset-admin-password
 ```
 
-The command generates a new Snapshot v2 from the existing one. It does not modify a running in-memory instance.
+The command generates a new Snapshot v3 from the existing one. It does not modify a running in-memory instance.
 
 ## 13. MySQL/Navicat Access
 
@@ -781,6 +805,31 @@ Response:
 
 The Web console only adds automatic pagination wrapping for top-level `SELECT/WITH` statements that do not already have `LIMIT/OFFSET`. SQL with explicit pagination is left unchanged.
 
+### 14.1 Agent Vector Memory API
+
+The production vector path is fixed to `FLOAT[N] + catalog-managed HNSW + Vector API`. RSDuck stores rebuildable vector records, index definitions, and runtime state, and returns ordered `memory_id + distance` results. Memory content and business state remain in the relational source of truth.
+
+Main endpoints:
+
+```text
+POST /api/vector/indexes                         Create a managed HNSW index
+GET  /api/vector/indexes/{vector_space}/status   Read index status
+POST /api/vector/indexes/{vector_space}/rebuild  Rebuild an index
+POST /api/vector/indexes/{vector_space}/compact  Compact an index
+POST /api/vector/upsert-batch                    Idempotent batch upsert
+POST /api/vector/delete-batch                    Idempotent batch delete
+POST /api/vector/search                          ANN or explicit exact search
+```
+
+- Agents use Bearer tokens for search and write endpoints. Index management uses an authenticated browser session and still enforces RSDuck privileges.
+- Tokens are scoped by `search/write`, tenant, agent, and vector space. Tenant and agent boundaries are always applied by the server.
+- Vector records are unique by `(tenant_id, agent_id, memory_id)` and use a monotonically increasing `source_version` for idempotent at-least-once Outbox delivery.
+- Index states are `pending`, `building`, `active`, `rebuilding`, `compacting`, `stale`, `failed`, and `unavailable`. ANN search accepts only an `active` index.
+- ANN failures never trigger an implicit full scan. Exact search runs only when the caller explicitly requests `mode=exact`.
+- HNSW is derived data. Snapshot v3 stores vector data, catalog metadata, and index definitions, then rebuilds the physical index during restore.
+
+See the [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.md) for table definitions, authentication configuration, request and response formats, error codes, timeout retry behavior, and model-upgrade rules.
+
 ## 15. Common Errors And Handling
 
 ### `relation does not exist in catalog`
@@ -844,10 +893,12 @@ Current test coverage focuses on:
 - Users, roles, and privileges
 - Ordinary tables, constraints, views, indexes, and comments
 - Partition creation, writes, retention, and repair
-- Snapshot v2 save and restore
+- Snapshot v3 save and restore
 - MySQL protocol and metadata projections
 - Web pagination and Parquet import
 - Full rollback when a batch Parquet import fails
+- End-to-end `FLOAT[N]`, VSS/HNSW lifecycle, and fault recovery
+- Vector API authentication, tenant boundaries, idempotent writes/deletes, concurrency, and timeout contracts
 
 ### 16.1 Checklist For New DDL
 
@@ -863,7 +914,7 @@ When adding or extending DDL, check at least:
 [ ] journal, epoch, and checksum are updated
 [ ] failure leaves no physical/catalog residue
 [ ] information_schema/Navicat projection is correct
-[ ] Snapshot v2 can save and restore it
+[ ] Snapshot v3 can save and restore it
 [ ] success, authorization denial, and rollback tests are complete
 ```
 
@@ -944,7 +995,7 @@ Service deployment must also verify:
 
 ### 17.3 Release Verification Boundary
 
-- CI builds service packages for all three platforms; the Linux tray build requires GTK, libxdo, and libappindicator development libraries.
+- CI builds service packages for Windows x64, Linux x64, and macOS arm64/x64, and runs real VSS load, HNSW creation, and search tests on every runner. The Linux tray build requires GTK, libxdo, and libappindicator development libraries.
 - Each Release still requires an installation test on the real target OS: install, reboot without logging in, then verify service startup, `/healthz`, and the MySQL port.
 - The macOS service package is not yet code-signed or notarized. Do not describe it as a notarized release until Apple release credentials are configured.
 
@@ -961,6 +1012,8 @@ The following behaviors are explicit current product boundaries:
 - One Parquet file corresponds to one logical table.
 - Unsupported catalog relations, types, or DDL return clear errors.
 - Missing dependencies do not automatically fall back to old paths.
-- All recoverable state must enter Snapshot v2.
+- The production vector path is fixed to `FLOAT[N] + catalog-managed HNSW + Vector API`; unavailable ANN never triggers an implicit exact scan.
+- HNSW is rebuildable derived data. Vector data and index definitions must be captured by Snapshot v3.
+- All recoverable state must enter Snapshot v3.
 
 When continuing development, if a design would bypass these boundaries, update the product design and test contract first instead of adding local compatibility branches in code.
