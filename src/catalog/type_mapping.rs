@@ -124,6 +124,9 @@ fn validate_supported_complex_type(duckdb_type: &str) -> Result<(), String> {
         return validate_scalar_type_part(element)
             .map_err(|_| format!("unsupported DuckDB type for rsduck catalog: {duckdb_type}"));
     }
+    if trimmed.ends_with(']') {
+        return validate_fixed_float_array_type(trimmed);
+    }
     if lower.starts_with("struct(") && trimmed.ends_with(')') {
         let inner = &trimmed["STRUCT".len() + 1..trimmed.len() - 1];
         let fields = split_top_level(inner, ',')?;
@@ -168,6 +171,44 @@ fn validate_supported_complex_type(duckdb_type: &str) -> Result<(), String> {
     ))
 }
 
+fn validate_fixed_float_array_type(duckdb_type: &str) -> Result<(), String> {
+    fixed_float_array_dimension(duckdb_type).map(|_| ())
+}
+
+pub(super) fn fixed_float_array_dimension(duckdb_type: &str) -> Result<usize, String> {
+    let Some(open_bracket) = duckdb_type.rfind('[') else {
+        return Err(format!(
+            "invalid fixed array DuckDB type syntax: {duckdb_type}"
+        ));
+    };
+    let element = duckdb_type[..open_bracket].trim();
+    let dimension_text = duckdb_type[open_bracket + 1..duckdb_type.len() - 1].trim();
+    if element.is_empty()
+        || element.contains('[')
+        || element.contains(']')
+        || dimension_text.is_empty()
+        || !dimension_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid fixed array DuckDB type syntax: {duckdb_type}"
+        ));
+    }
+    if scalar_type_id_for_duckdb_type(element) != Some(TYPE_FLOAT4) {
+        return Err(format!(
+            "fixed array DuckDB type only supports FLOAT elements: {duckdb_type}"
+        ));
+    }
+    let dimension = dimension_text
+        .parse::<usize>()
+        .map_err(|_| format!("invalid fixed array dimension: {duckdb_type}"))?;
+    if dimension == 0 {
+        return Err(format!(
+            "fixed array dimension must be greater than zero: {duckdb_type}"
+        ));
+    }
+    Ok(dimension)
+}
+
 fn validate_scalar_type_part(type_text: &str) -> Result<(), String> {
     if scalar_type_id_for_duckdb_type(type_text.trim()).is_some() {
         Ok(())
@@ -179,6 +220,7 @@ fn validate_scalar_type_part(type_text: &str) -> Result<(), String> {
 fn contains_complex_type_marker(type_text: &str) -> bool {
     let lower = type_text.trim().to_ascii_lowercase();
     lower.ends_with("[]")
+        || (lower.ends_with(']') && lower.contains('['))
         || lower.starts_with("struct(")
         || lower.starts_with("map(")
         || lower.starts_with("list(")

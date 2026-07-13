@@ -81,6 +81,11 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Run VSS and HNSW runtime tests
+        run: |
+          cargo test db::extensions::tests::configured_vss_installs_loads_and_builds_hnsw -- --ignored --exact --nocapture
+          cargo test catalog::tests::catalog_manages_hnsw_vector_index_metadata -- --ignored --exact --nocapture
+
       - name: Build release
         run: cargo build --release
 
@@ -115,6 +120,7 @@ jobs:
           cp packaging/linux/install-service.sh service/install-service.sh
           cp packaging/linux/uninstall-service.sh service/uninstall-service.sh
           cp packaging/linux/rsduck-tray.desktop service/rsduck-tray.desktop
+          target/release/rsduck prepare-vss-extension --dir service/extensions
           chmod +x service/rsduck service/rsduck-tray service/install-service.sh service/uninstall-service.sh
           tar -czf dist/${{ matrix.service_asset_name }} -C service .
 
@@ -147,6 +153,7 @@ jobs:
           cp packaging/macos/uninstall-service.sh "$state_dir/uninstall-service.sh"
           cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
           cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
+          target/release/rsduck prepare-vss-extension --dir "$state_dir/extensions"
           chmod +x packaging/macos/scripts/postinstall
           sh -n packaging/macos/scripts/postinstall
           plutil -lint packaging/macos/launchd/com.dripai.rsduck.plist
@@ -186,6 +193,7 @@ jobs:
           Copy-Item packaging\windows-service\rsduck-service.xml service\rsduck-service.xml
           Copy-Item packaging\windows-service\install-service.ps1 service\install-service.ps1
           Copy-Item packaging\windows-service\uninstall-service.ps1 service\uninstall-service.ps1
+          & target\release\rsduck.exe prepare-vss-extension --dir service\extensions
 
       - name: Install Inno Setup
         if: runner.os == 'Windows'

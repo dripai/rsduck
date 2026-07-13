@@ -22,8 +22,10 @@ pub(super) fn insert_bootstrap_rows(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("write oid allocator failed: {e}"))?;
 
         conn.execute(
-            "INSERT INTO rsduck_catalog.rs_catalog_version(id, schema_version, snapshot_format_version, catalog_epoch, catalog_checksum, status, created_at, updated_at) \
-             VALUES (1, 1, 2, 0, '', 'ready', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            &format!(
+                "INSERT INTO rsduck_catalog.rs_catalog_version(id, schema_version, snapshot_format_version, catalog_epoch, catalog_checksum, status, created_at, updated_at) \
+                 VALUES (1, {CATALOG_VERSION}, {SNAPSHOT_FORMAT_VERSION}, 0, '', 'ready', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
             [],
         )
         .map_err(|e| format!("write catalog version failed: {e}"))?;

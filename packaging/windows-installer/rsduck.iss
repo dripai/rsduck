@@ -45,6 +45,7 @@ Source: "{#SourceDir}\install-service.ps1"; DestDir: "{app}"; Flags: ignoreversi
 Source: "{#SourceDir}\uninstall-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\rsduck.toml"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "{#SourceDir}\init.sql"; DestDir: "{app}"; Flags: onlyifdoesntexist
+Source: "{#SourceDir}\extensions\*"; DestDir: "{app}\extensions"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked

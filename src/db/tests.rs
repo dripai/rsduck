@@ -38,7 +38,7 @@ fn find_latest_snapshot_dir_uses_newest_final_snapshot_dir() {
         std::fs::create_dir_all(dir.join(dir_name)).unwrap();
         if !dir_name.ends_with(".tmp") {
             let manifest = serde_json::json!({
-                "snapshot_format_version": 2,
+                "snapshot_format_version": 3,
                 "snapshot_name": dir_name,
                 "created_at": "2026-07-10T00:00:00+08:00",
                 "catalog_epoch": 0,
@@ -296,6 +296,29 @@ fn typed_query_preserves_complex_values_as_json() {
 }
 
 #[test]
+fn typed_query_preserves_fixed_float_array_as_json() {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+
+    let sql = "SELECT [0.125, 0.25, 0.5]::FLOAT[3] AS embedding";
+    let decision = route_sql(sql).unwrap();
+    let result =
+        execute_typed_sql_blocking(&conn, "admin", sql, decision.route, &decision.command, 100)
+            .unwrap();
+
+    let SqlTypedResult::Query { columns, rows } = result else {
+        panic!("expected typed query result");
+    };
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].name, "embedding");
+    assert_eq!(columns[0].data_type, SqlType::Json);
+    assert_eq!(
+        rows,
+        vec![vec![SqlValue::Json(serde_json::json!([0.125, 0.25, 0.5]))]]
+    );
+}
+
+#[test]
 fn shallow_complex_columns_query_and_restore_as_json() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
@@ -484,6 +507,26 @@ fn bind_sql_params_rewrites_numbered_params_outside_literals() {
 }
 
 #[test]
+fn bind_sql_params_supports_finite_float_arrays() {
+    let bound = super::bind_sql_params(
+        "SELECT $1::FLOAT[3] AS embedding",
+        &[SqlParam::FloatArray(vec![0.12, 0.35, 0.78])],
+    )
+    .unwrap();
+    assert_eq!(
+        bound,
+        "SELECT [0.12,0.35,0.78]::FLOAT[]::FLOAT[3] AS embedding"
+    );
+
+    let empty =
+        super::bind_sql_params("SELECT $1", &[SqlParam::FloatArray(Vec::new())]).unwrap_err();
+    assert_eq!(empty, "FLOAT array SQL parameter cannot be empty");
+    let non_finite =
+        super::bind_sql_params("SELECT $1", &[SqlParam::FloatArray(vec![f32::NAN])]).unwrap_err();
+    assert!(non_finite.contains("non-finite FLOAT array"));
+}
+
+#[test]
 fn internal_catalog_query_requires_catalog_diagnostic_privilege() {
     let conn = Connection::open_in_memory().unwrap();
     crate::catalog::bootstrap_fresh(&conn).unwrap();
@@ -636,7 +679,7 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
     let manifest_path = snapshot_path.join(SNAPSHOT_MANIFEST_FILE);
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest["snapshot_format_version"], 2);
+    assert_eq!(manifest["snapshot_format_version"], 3);
     assert_eq!(manifest["catalog_epoch"], catalog_epoch);
     assert_eq!(manifest["catalog_checksum"], catalog_checksum);
     assert_eq!(
@@ -667,6 +710,74 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
         .unwrap();
     assert_eq!(table_a_count, 2);
     assert_eq!(table_b_count, 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_round_trip_preserves_fixed_float_array_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_fixed_array_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE agent_memory_vector(memory_id BIGINT, embedding FLOAT[3])",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_memory_vector VALUES (1, [0.12, 0.35, 0.78]::FLOAT[3])",
+        [],
+    )
+    .unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+
+    let physical_type: String = restored
+        .query_row(
+            "SELECT typeof(embedding) FROM agent_memory_vector LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(physical_type, "FLOAT[3]");
+    let decision = route_sql("SELECT embedding FROM agent_memory_vector").unwrap();
+    let restored_result = execute_typed_sql_blocking(
+        &restored,
+        "admin",
+        "SELECT embedding FROM agent_memory_vector",
+        decision.route,
+        &decision.command,
+        100,
+    )
+    .unwrap();
+    let SqlTypedResult::Query { columns, rows } = restored_result else {
+        panic!("expected restored vector query result");
+    };
+    assert_eq!(columns[0].data_type, SqlType::Json);
+    assert_eq!(
+        rows,
+        vec![vec![SqlValue::Json(serde_json::json!([
+            0.12_f32, 0.35_f32, 0.78_f32
+        ]))]]
+    );
+    let distance: f32 = restored
+        .query_row(
+            "SELECT array_cosine_distance(embedding, [0.12, 0.35, 0.78]::FLOAT[3])
+             FROM agent_memory_vector WHERE memory_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(distance.abs() < f32::EPSILON);
 
     let _ = std::fs::remove_dir_all(dir);
 }

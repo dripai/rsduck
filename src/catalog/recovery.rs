@@ -30,9 +30,9 @@ pub fn validate_after_start(conn: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(|e| format!("read catalog snapshot format version failed: {e}"))?;
-    if snapshot_format_version != 2 {
+    if snapshot_format_version != SNAPSHOT_FORMAT_VERSION {
         return Err(format!(
-            "unsupported rsduck catalog snapshot format version: {snapshot_format_version}"
+            "unsupported rsduck catalog snapshot format version: {snapshot_format_version}, expected {SNAPSHOT_FORMAT_VERSION}"
         ));
     }
 
@@ -143,6 +143,22 @@ pub(super) fn validate_catalog_integrity(conn: &Connection) -> Result<(), String
          LEFT JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid \
          WHERE t.oid IS NULL",
         "rs_column.atttypid must reference rs_type",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*)
+         FROM rsduck_catalog.rs_vector_index v
+         LEFT JOIN rsduck_catalog.rs_index i ON i.indexrelid = v.indexrelid
+         WHERE i.indexrelid IS NULL",
+        "rs_vector_index.indexrelid must reference rs_index",
+    )?;
+    ensure_catalog_count_zero(
+        conn,
+        "SELECT COUNT(*) FROM rsduck_catalog.rs_vector_index
+         WHERE dimension <= 0
+            OR metric NOT IN ('cosine', 'l2sq', 'ip')
+            OR build_status NOT IN ('pending', 'building', 'active', 'rebuilding', 'compacting', 'stale', 'failed', 'unavailable')",
+        "rs_vector_index definition and status must be valid",
     )?;
     ensure_catalog_count_zero(
         conn,
@@ -288,9 +304,83 @@ pub(super) fn validate_physical_relations(conn: &Connection) -> Result<(), Strin
                 schema, relname, reason
             );
             mark_relation_unavailable(conn, rel_oid, &reason)?;
+            if relkind == "i" {
+                mark_vector_index_recovery_status(conn, rel_oid, "unavailable", &reason)?;
+            }
+        } else if relkind == "i" {
+            reconcile_vector_index_runtime_status(conn, rel_oid)?;
         }
     }
 
+    Ok(())
+}
+
+fn reconcile_vector_index_runtime_status(conn: &Connection, index_oid: i64) -> Result<(), String> {
+    let vector_index = conn.query_row(
+        &format!(
+            "SELECT build_status, extension_version
+             FROM rsduck_catalog.rs_vector_index WHERE indexrelid = {index_oid}"
+        ),
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    );
+    let (build_status, stored_extension_version) = match vector_index {
+        Ok(value) => value,
+        Err(duckdb::Error::QueryReturnedNoRows) => return Ok(()),
+        Err(error) => return Err(format!("read vector index startup status failed: {error}")),
+    };
+    if matches!(
+        build_status.as_str(),
+        "pending" | "building" | "rebuilding" | "compacting"
+    ) {
+        return mark_vector_index_recovery_status(
+            conn,
+            index_oid,
+            "unavailable",
+            &format!("interrupted vector index operation: {build_status}"),
+        );
+    }
+    if build_status != "active" {
+        return Ok(());
+    }
+    let loaded_extension_version = conn
+        .query_row(
+            "SELECT COALESCE(extension_version, '') FROM duckdb_extensions()
+             WHERE extension_name = 'vss' AND loaded",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| format!("read loaded VSS version at startup failed: {error}"))?;
+    if loaded_extension_version != stored_extension_version {
+        return mark_vector_index_recovery_status(
+            conn,
+            index_oid,
+            "stale",
+            &format!(
+                "VSS extension version changed: stored={stored_extension_version}, loaded={loaded_extension_version}"
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn mark_vector_index_recovery_status(
+    conn: &Connection,
+    index_oid: i64,
+    status: &str,
+    reason: &str,
+) -> Result<(), String> {
+    conn.execute(
+        &format!(
+            "UPDATE rsduck_catalog.rs_vector_index
+             SET build_status = '{}', updated_at = CURRENT_TIMESTAMP, error_message = '{}'
+             WHERE indexrelid = {index_oid}",
+            sql_string(status),
+            sql_string(reason)
+        ),
+        [],
+    )
+    .map_err(|error| format!("mark vector index startup status failed: {error}"))?;
     Ok(())
 }
 

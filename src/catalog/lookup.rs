@@ -621,6 +621,10 @@ pub(super) fn delete_relation_catalog(
             meta.oid, meta.oid
         ),
         format!(
+            "DELETE FROM rsduck_catalog.rs_vector_index WHERE indexrelid = {} OR indexrelid IN (SELECT indexrelid FROM rsduck_catalog.rs_index WHERE indrelid = {})",
+            meta.oid, meta.oid
+        ),
+        format!(
             "DELETE FROM rsduck_catalog.rs_index WHERE indexrelid = {} OR indrelid = {}",
             meta.oid, meta.oid
         ),

@@ -2,7 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SNAPSHOT_FORMAT_VERSION: i64 = 2;
+const SNAPSHOT_FORMAT_VERSION: i64 = crate::catalog::SNAPSHOT_FORMAT_VERSION;
 const CATALOG_SNAPSHOT_FILE: &str = "catalog.duckdb";
 const CATALOG_TABLES: &[&str] = &[
     "rs_catalog_version",
@@ -15,6 +15,7 @@ const CATALOG_TABLES: &[&str] = &[
     "rs_column_default",
     "rs_constraint",
     "rs_index",
+    "rs_vector_index",
     "rs_dependency",
     "rs_comment",
     "rs_relation_ext",
@@ -75,7 +76,7 @@ struct SnapshotMacro {
     checksum: String,
 }
 
-pub(super) fn save_snapshot_blocking(
+pub(crate) fn save_snapshot_blocking(
     conn: &Connection,
     snapshot_dir: &str,
     snapshot_prefix: &str,
@@ -508,8 +509,19 @@ fn restore_snapshot_table(
         return Ok(());
     }
     let qualified = quote_qualified(&table.schema, &table.relation);
+    let columns = snapshot_table_columns(conn, table.relation_id)?;
     conn.execute_batch(&format!(
-        "CREATE TABLE {qualified} AS SELECT * FROM read_parquet('{}');",
+        "CREATE TABLE {qualified} ({});",
+        columns.join(", ")
+    ))
+    .map_err(|e| {
+        format!(
+            "create snapshot table {}.{} from catalog failed: {e}",
+            table.schema, table.relation
+        )
+    })?;
+    conn.execute_batch(&format!(
+        "INSERT INTO {qualified} SELECT * FROM read_parquet('{}');",
         escape_sql_string(&file_path.display().to_string())
     ))
     .map_err(|e| {
@@ -535,6 +547,44 @@ fn restore_snapshot_table(
         ));
     }
     Ok(())
+}
+
+fn snapshot_table_columns(conn: &Connection, relation_id: i64) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT a.attname, t.rsduck_physical_type, a.attnotnull
+             FROM rsduck_catalog.rs_column a
+             JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid
+             WHERE a.attrelid = {relation_id} AND NOT a.attisdropped
+             ORDER BY a.attnum"
+        ))
+        .map_err(|e| format!("prepare snapshot table columns failed: {e}"))?;
+    let columns = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query snapshot table columns failed: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read snapshot table columns failed: {e}"))?;
+    if columns.is_empty() {
+        return Err(format!(
+            "snapshot table relation {relation_id} has no catalog columns"
+        ));
+    }
+    Ok(columns
+        .into_iter()
+        .map(|(name, physical_type, not_null)| {
+            format!(
+                "{} {physical_type}{}",
+                quote_ident(&name),
+                if not_null { " NOT NULL" } else { "" }
+            )
+        })
+        .collect())
 }
 
 fn restore_snapshot_views(conn: &Connection, views: &[SnapshotView]) -> Result<(), String> {
@@ -597,6 +647,7 @@ fn restore_snapshot_indexes(conn: &Connection) -> Result<(), String> {
              JOIN rsduck_catalog.rs_relation tc ON tc.oid = i.indrelid
              JOIN rsduck_catalog.rs_schema tn ON tn.oid = tc.relnamespace
              WHERE ix.status = 'active' AND tc.status = 'active'
+               AND NOT EXISTS (SELECT 1 FROM rsduck_catalog.rs_vector_index v WHERE v.indexrelid = i.indexrelid)
              ORDER BY i.indexrelid",
         )
         .map_err(|e| format!("prepare snapshot index restore failed: {e}"))?;
@@ -630,6 +681,92 @@ fn restore_snapshot_indexes(conn: &Connection) -> Result<(), String> {
             ))
             .map_err(|e| format!("restore snapshot index {schema}.{index_name} failed: {e}"))?;
         }
+    }
+    restore_snapshot_vector_indexes(conn)
+}
+
+fn restore_snapshot_vector_indexes(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT v.indexrelid, v.vector_space, tn.nspname, tc.relname, a.attname, ix.relname,
+                    v.embedding_model, v.model_version, v.metric, v.m, v.m0,
+                    v.ef_construction, v.default_ef_search
+             FROM rsduck_catalog.rs_vector_index v
+             JOIN rsduck_catalog.rs_index i ON i.indexrelid = v.indexrelid
+             JOIN rsduck_catalog.rs_relation ix ON ix.oid = v.indexrelid
+             JOIN rsduck_catalog.rs_relation tc ON tc.oid = i.indrelid
+             JOIN rsduck_catalog.rs_schema tn ON tn.oid = tc.relnamespace
+             JOIN rsduck_catalog.rs_column a ON a.attrelid = tc.oid AND CAST(a.attnum AS VARCHAR) = i.indkey
+             WHERE ix.status = 'active' AND tc.status = 'active'
+             ORDER BY v.indexrelid",
+        )
+        .map_err(|e| format!("prepare snapshot vector index restore failed: {e}"))?;
+    let indexes = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                crate::catalog::VectorIndexCreateRequest {
+                    vector_space: row.get(1)?,
+                    schema: row.get(2)?,
+                    table: row.get(3)?,
+                    column: row.get(4)?,
+                    index_name: row.get(5)?,
+                    embedding_model: row.get(6)?,
+                    model_version: row.get(7)?,
+                    metric: row.get(8)?,
+                    m: row.get(9)?,
+                    m0: row.get(10)?,
+                    ef_construction: row.get(11)?,
+                    default_ef_search: row.get(12)?,
+                },
+            ))
+        })
+        .map_err(|e| format!("query snapshot vector indexes failed: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read snapshot vector indexes failed: {e}"))?;
+    drop(stmt);
+
+    for (index_oid, request) in indexes {
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.rs_vector_index SET build_status = 'rebuilding', updated_at = CURRENT_TIMESTAMP, error_message = '' WHERE indexrelid = {index_oid}"
+            ),
+            [],
+        )
+        .map_err(|e| format!("mark snapshot vector index rebuilding failed: {e}"))?;
+        let create_sql = crate::catalog::vector_index_create_sql(&request);
+        if let Err(error) = conn.execute_batch(&create_sql) {
+            let reason = format!("restore HNSW index failed: {error}");
+            conn.execute(
+                &format!(
+                    "UPDATE rsduck_catalog.rs_vector_index SET build_status = 'failed', updated_at = CURRENT_TIMESTAMP, error_message = '{}' WHERE indexrelid = {index_oid}",
+                    escape_sql_string(&reason)
+                ),
+                [],
+            )
+            .map_err(|e| format!("record snapshot vector index failure failed: {e}"))?;
+            return Err(reason);
+        }
+        let vector_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE {} IS NOT NULL",
+                    quote_qualified(&request.schema, &request.table),
+                    quote_ident(&request.column)
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count restored vector rows failed: {e}"))?;
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.rs_vector_index
+                 SET build_status = 'active', generation = generation + 1, vector_count = {vector_count}, built_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error_message = ''
+                 WHERE indexrelid = {index_oid}"
+            ),
+            [],
+        )
+        .map_err(|e| format!("mark restored vector index active failed: {e}"))?;
     }
     Ok(())
 }

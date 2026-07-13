@@ -5,6 +5,8 @@ use std::sync::Arc;
 impl DbHandle {
     pub fn open(snapshot_dir: Option<&str>, cfg: &DbConfig) -> Self {
         let base_conn = Connection::open_in_memory().expect("open in-memory duckdb failed");
+        prepare_configured_extensions(&base_conn, cfg)
+            .unwrap_or_else(|e| panic!("prepare DuckDB extensions failed: {e}"));
         restore_or_initialize(&base_conn, snapshot_dir, &cfg.init_sql)
             .unwrap_or_else(|e| panic!("initialize DuckDB failed: {e}"));
 
@@ -17,6 +19,8 @@ impl DbHandle {
         let write_conn = base_conn
             .try_clone()
             .expect("clone write connection failed");
+        load_configured_extensions(&write_conn, cfg)
+            .unwrap_or_else(|e| panic!("load DuckDB extensions on write connection failed: {e}"));
         let (write_tx, write_rx) = sync_channel(cfg.write_queue_size.max(1));
         workers.push(spawn_sql_worker(
             "duckdb-write",
@@ -30,6 +34,9 @@ impl DbHandle {
             let read_conn = base_conn
                 .try_clone()
                 .unwrap_or_else(|e| panic!("clone read connection {idx} failed: {e}"));
+            load_configured_extensions(&read_conn, cfg).unwrap_or_else(|e| {
+                panic!("load DuckDB extensions on read connection {idx} failed: {e}")
+            });
             let (read_tx, read_rx) = sync_channel(cfg.read_queue_size.max(1));
             workers.push(spawn_sql_worker(
                 format!("duckdb-read-{idx}"),
@@ -44,6 +51,9 @@ impl DbHandle {
         let snapshot_conn = base_conn
             .try_clone()
             .expect("clone snapshot connection failed");
+        load_configured_extensions(&snapshot_conn, cfg).unwrap_or_else(|e| {
+            panic!("load DuckDB extensions on snapshot connection failed: {e}")
+        });
         let (snapshot_tx, snapshot_rx) = sync_channel(cfg.snapshot_queue_size.max(1));
         workers.push(spawn_snapshot_worker(
             "duckdb-snapshot",
@@ -156,6 +166,155 @@ impl DbHandle {
             sources,
             resp: resp_tx,
         }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("write")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("write")),
+        }
+    }
+
+    pub async fn create_vector_index_as(
+        &self,
+        username: String,
+        request: VectorIndexCreate,
+    ) -> DbResult<VectorIndexInfo> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self
+            .engine
+            .write_tx
+            .try_send(SqlCommand::CreateVectorIndex {
+                username,
+                request,
+                resp: resp_tx,
+            }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("write")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("write")),
+        }
+    }
+
+    pub async fn vector_index_status_as(
+        &self,
+        username: String,
+        vector_space: String,
+    ) -> DbResult<VectorIndexInfo> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let idx =
+            self.engine.next_read.fetch_add(1, Ordering::Relaxed) % self.engine.read_txs.len();
+        match self.engine.read_txs[idx].try_send(SqlCommand::VectorIndexStatus {
+            username,
+            vector_space,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("read"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("read")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("read")),
+        }
+    }
+
+    pub async fn vector_search_as(
+        &self,
+        username: String,
+        request: VectorSearchRequest,
+    ) -> DbResult<VectorSearchResult> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let idx =
+            self.engine.next_read.fetch_add(1, Ordering::Relaxed) % self.engine.read_txs.len();
+        match self.engine.read_txs[idx].try_send(SqlCommand::VectorSearch {
+            username,
+            request,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("read"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("read")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("read")),
+        }
+    }
+
+    pub async fn vector_upsert_as(
+        &self,
+        username: String,
+        request: VectorUpsertRequest,
+    ) -> DbResult<VectorMutationResult> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self.engine.write_tx.try_send(SqlCommand::VectorUpsert {
+            username,
+            request,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("write")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("write")),
+        }
+    }
+
+    pub async fn vector_delete_as(
+        &self,
+        username: String,
+        request: VectorDeleteRequest,
+    ) -> DbResult<VectorMutationResult> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        match self.engine.write_tx.try_send(SqlCommand::VectorDelete {
+            username,
+            request,
+            resp: resp_tx,
+        }) {
+            Ok(()) => resp_rx
+                .await
+                .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),
+            Err(TrySendError::Full(_)) => Err(DbError::queue_full("write")),
+            Err(TrySendError::Disconnected(_)) => Err(DbError::worker_stopped("write")),
+        }
+    }
+
+    pub async fn rebuild_vector_index_as(
+        &self,
+        username: String,
+        vector_space: String,
+    ) -> DbResult<VectorIndexInfo> {
+        self.vector_index_maintenance(username, vector_space, true)
+            .await
+    }
+
+    pub async fn compact_vector_index_as(
+        &self,
+        username: String,
+        vector_space: String,
+    ) -> DbResult<VectorIndexInfo> {
+        self.vector_index_maintenance(username, vector_space, false)
+            .await
+    }
+
+    async fn vector_index_maintenance(
+        &self,
+        username: String,
+        vector_space: String,
+        rebuild: bool,
+    ) -> DbResult<VectorIndexInfo> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let command = if rebuild {
+            SqlCommand::RebuildVectorIndex {
+                username,
+                vector_space,
+                resp: resp_tx,
+            }
+        } else {
+            SqlCommand::CompactVectorIndex {
+                username,
+                vector_space,
+                resp: resp_tx,
+            }
+        };
+        match self.engine.write_tx.try_send(command) {
             Ok(()) => resp_rx
                 .await
                 .unwrap_or_else(|_| Err(DbError::worker_stopped("write"))),

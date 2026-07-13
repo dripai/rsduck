@@ -121,6 +121,156 @@ where
                         .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
                         let _ = resp.send(result.map_err(DbError::execution));
                     }
+                    SqlCommand::CreateVectorIndex {
+                        username,
+                        request,
+                        resp,
+                    } => {
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let owner_user_id = crate::catalog::authorize_vector_index_management(
+                                &conn, &username,
+                            )?;
+                            let request = crate::catalog::VectorIndexCreateRequest {
+                                vector_space: request.vector_space,
+                                schema: request.schema,
+                                table: request.table,
+                                column: request.column,
+                                index_name: request.index_name,
+                                embedding_model: request.embedding_model,
+                                model_version: request.model_version,
+                                metric: request.metric,
+                                m: request.m,
+                                m0: request.m0,
+                                ef_construction: request.ef_construction,
+                                default_ef_search: request.default_ef_search,
+                            };
+                            crate::catalog::create_vector_index(&conn, &request, owner_user_id)
+                                .map(VectorIndexInfo::from)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::VectorIndexStatus {
+                        username,
+                        vector_space,
+                        resp,
+                    } => {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            crate::catalog::authorize_vector_index_management(&conn, &username)?;
+                            crate::catalog::vector_index_status(&conn, &vector_space)
+                                .map(VectorIndexInfo::from)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::VectorSearch {
+                        username,
+                        request,
+                        resp,
+                    } => {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let index =
+                                crate::catalog::vector_index_status(&conn, &request.vector_space)?;
+                            crate::catalog::authorize_vector_search(
+                                &conn,
+                                &username,
+                                &index.schema,
+                                &index.table,
+                            )?;
+                            search_vectors_blocking(&conn, &request)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::VectorUpsert {
+                        username,
+                        request,
+                        resp,
+                    } => {
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let index =
+                                crate::catalog::vector_index_status(&conn, &request.vector_space)?;
+                            crate::catalog::authorize_vector_write(
+                                &conn,
+                                &username,
+                                &index.schema,
+                                &index.table,
+                            )?;
+                            upsert_vectors_blocking(&conn, &request)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::VectorDelete {
+                        username,
+                        request,
+                        resp,
+                    } => {
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            let index =
+                                crate::catalog::vector_index_status(&conn, &request.vector_space)?;
+                            crate::catalog::authorize_vector_write(
+                                &conn,
+                                &username,
+                                &index.schema,
+                                &index.table,
+                            )?;
+                            delete_vectors_blocking(&conn, &request)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::RebuildVectorIndex {
+                        username,
+                        vector_space,
+                        resp,
+                    } => {
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            crate::catalog::authorize_vector_index_management(&conn, &username)?;
+                            crate::catalog::rebuild_vector_index(&conn, &vector_space)
+                                .map(VectorIndexInfo::from)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
+                    SqlCommand::CompactVectorIndex {
+                        username,
+                        vector_space,
+                        resp,
+                    } => {
+                        let _write_guard = lock_snapshot_gate(
+                            write_gate
+                                .as_ref()
+                                .expect("write workers require a snapshot gate"),
+                        );
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            crate::catalog::authorize_vector_index_management(&conn, &username)?;
+                            crate::catalog::compact_vector_index(&conn, &vector_space)
+                                .map(VectorIndexInfo::from)
+                        }))
+                        .unwrap_or_else(|e| Err(format!("duckdb worker panicked: {e:?}")));
+                        let _ = resp.send(result.map_err(DbError::execution));
+                    }
                     SqlCommand::Shutdown => break,
                 }
             }

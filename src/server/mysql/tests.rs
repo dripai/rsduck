@@ -19,6 +19,7 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
         read_queue_size: 8,
         snapshot_queue_size: 1,
         max_result_rows: 100,
+        vss_enabled: false,
         ..crate::config::DbConfig::default()
     };
     let db = crate::db::DbHandle::open(None, &cfg);
@@ -376,6 +377,19 @@ async fn mysql_protocol_handles_auth_query_and_prepared_execute() {
             "[1,null,3]",
         ]
     );
+    let _eof = read_packet(&mut stream).await.unwrap();
+
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT [0.125, 0.25, 0.5]::FLOAT[3] AS embedding");
+    let mut seq = 0_u8;
+    write_packet(&mut stream, &mut seq, &query).await.unwrap();
+    let column_count = read_packet(&mut stream).await.unwrap();
+    assert_eq!(column_count.payload, vec![1]);
+    let column = read_packet(&mut stream).await.unwrap();
+    assert_eq!(column_type(&column.payload), MYSQL_TYPE_JSON);
+    let _eof = read_packet(&mut stream).await.unwrap();
+    let row = read_packet(&mut stream).await.unwrap();
+    assert_eq!(text_cells(&row.payload), vec!["[0.125,0.25,0.5]"]);
     let _eof = read_packet(&mut stream).await.unwrap();
 
     let mut prepare = vec![0x16];

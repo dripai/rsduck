@@ -58,8 +58,28 @@ async fn main() {
     let _log_guard = logging::init_tracing(&cfg.log);
 
     if let Some(command) = args.first() {
+        if command == "prepare-vss-extension" {
+            if args.len() != 3 || args[1] != "--dir" || args[2].trim().is_empty() {
+                eprintln!("usage: rsduck prepare-vss-extension --dir <directory>");
+                std::process::exit(2);
+            }
+            match db::install_vss_extension(&args[2]) {
+                Ok(status) => {
+                    println!(
+                        "VSS extension prepared: version={}, source={}, mode={}",
+                        status.version, status.installed_from, status.install_mode
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("prepare VSS extension failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         if command != "reset-admin-password" {
             eprintln!("usage: rsduck reset-admin-password [--password <password>]");
+            eprintln!("       rsduck prepare-vss-extension --dir <directory>");
             std::process::exit(2);
         }
         let password = match parse_reset_admin_password_args(&args[1..]) {
@@ -143,6 +163,8 @@ async fn main() {
             cfg.snapshot.dir.clone(),
             cfg.snapshot.prefix.clone(),
             cfg.web.parquet_import_root.clone(),
+            cfg.web.vector_api_tokens.clone(),
+            cfg.web.vector_api_limits.clone(),
         );
         let shutdown_snapshot_dir = cfg.snapshot.dir.clone();
         let shutdown_snapshot_prefix = cfg.snapshot.prefix.clone();

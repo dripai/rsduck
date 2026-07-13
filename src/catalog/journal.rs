@@ -1,8 +1,8 @@
 use super::*;
 
-pub(super) fn run_catalog_tx<F>(conn: &Connection, f: F) -> Result<usize, String>
+pub(super) fn run_catalog_tx<T, F>(conn: &Connection, f: F) -> Result<T, String>
 where
-    F: FnOnce() -> Result<usize, String>,
+    F: FnOnce() -> Result<T, String>,
 {
     conn.execute_batch("BEGIN TRANSACTION")
         .map_err(|e| format!("begin catalog mutation failed: {e}"))?;

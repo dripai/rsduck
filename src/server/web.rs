@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, State},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Json, Path as AxumPath, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -7,14 +7,23 @@ use axum::{
 };
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time;
 
 use crate::auth::{AuthProtocol, AuthRequest};
-use crate::db::{DbHandle, ParquetImportSource, SqlTypedResult, SqlValue};
+use crate::config::{VectorApiLimitsConfig, VectorApiTokenConfig};
+use crate::db::{
+    DbHandle, ParquetImportSource, SqlTypedResult, SqlValue, VectorDeleteRequest,
+    VectorIndexCreate, VectorIndexInfo, VectorMutationResult, VectorSearchRequest,
+    VectorSearchResult, VectorUpsertRequest,
+};
 
 use super::web_assets::{CODEMIRROR_JS, INDEX_HTML};
 
@@ -87,6 +96,33 @@ pub struct ParquetImportInfoResp {
     pub msg: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct VectorIndexResp {
+    pub success: bool,
+    pub error_code: Option<String>,
+    pub trace_id: String,
+    pub msg: String,
+    pub index: Option<VectorIndexInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorSearchResp {
+    pub success: bool,
+    pub error_code: Option<String>,
+    pub trace_id: String,
+    pub msg: String,
+    pub result: Option<VectorSearchResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorMutationResp {
+    pub success: bool,
+    pub error_code: Option<String>,
+    pub trace_id: String,
+    pub msg: String,
+    pub result: Option<VectorMutationResult>,
+}
+
 #[derive(Clone)]
 pub struct WebState {
     pub db: DbHandle,
@@ -94,6 +130,18 @@ pub struct WebState {
     pub snapshot_prefix: Arc<String>,
     pub parquet_import_root: Arc<PathBuf>,
     pub sessions: Arc<Mutex<HashMap<String, String>>>,
+    vector_api_tokens: Arc<HashMap<String, VectorServiceIdentity>>,
+    vector_api_limits: Arc<VectorApiLimitsConfig>,
+    vector_api_semaphore: Arc<Semaphore>,
+}
+
+#[derive(Debug, Clone)]
+struct VectorServiceIdentity {
+    username: String,
+    tenant_ids: Vec<i64>,
+    agent_ids: Vec<i64>,
+    vector_spaces: Vec<String>,
+    permissions: Vec<String>,
 }
 
 async fn sql_handler(
@@ -387,6 +435,407 @@ async fn parquet_import_handler(
     }
 }
 
+async fn vector_index_create_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    payload: Result<Json<VectorIndexCreate>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => return vector_index_error(vector_json_rejection(&rejection)),
+    };
+    let Some(username) = session_username(&state, &headers) else {
+        return vector_index_error("AUTHENTICATION_FAILED: authentication required".into());
+    };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_index_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.maintenance_timeout_ms,
+        permit,
+        async move { db.create_vector_index_as(username, request).await },
+    )
+    .await
+    {
+        Ok(index) => Json(VectorIndexResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            index: Some(index),
+        })
+        .into_response(),
+        Err(error) => vector_index_error(error.to_string()),
+    }
+}
+
+async fn vector_index_status_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(vector_space): AxumPath<String>,
+) -> Response {
+    let Some(username) = session_username(&state, &headers) else {
+        return vector_index_error("AUTHENTICATION_FAILED: authentication required".into());
+    };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_index_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.search_timeout_ms,
+        permit,
+        async move { db.vector_index_status_as(username, vector_space).await },
+    )
+    .await
+    {
+        Ok(index) => Json(VectorIndexResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            index: Some(index),
+        })
+        .into_response(),
+        Err(error) => vector_index_error(error.to_string()),
+    }
+}
+
+async fn vector_search_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    payload: Result<Json<VectorSearchRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => return vector_search_error(vector_json_rejection(&rejection)),
+    };
+    let username = match vector_api_username(
+        &state,
+        &headers,
+        &request.vector_space,
+        "search",
+        &[(request.tenant_id, request.agent_id)],
+    ) {
+        Ok(username) => username,
+        Err(msg) => {
+            return vector_search_error(msg);
+        }
+    };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_search_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.search_timeout_ms,
+        permit,
+        async move { db.vector_search_as(username, request).await },
+    )
+    .await
+    {
+        Ok(result) => Json(VectorSearchResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            result: Some(result),
+        })
+        .into_response(),
+        Err(error) => vector_search_error(error.to_string()),
+    }
+}
+
+async fn vector_upsert_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    payload: Result<Json<VectorUpsertRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => return vector_mutation_error(vector_json_rejection(&rejection)),
+    };
+    let scopes = request
+        .items
+        .iter()
+        .map(|item| (item.tenant_id, item.agent_id))
+        .collect::<Vec<_>>();
+    let username =
+        match vector_api_username(&state, &headers, &request.vector_space, "write", &scopes) {
+            Ok(username) => username,
+            Err(msg) => {
+                return vector_mutation_error(msg);
+            }
+        };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_mutation_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.write_timeout_ms,
+        permit,
+        async move { db.vector_upsert_as(username, request).await },
+    )
+    .await
+    {
+        Ok(result) => Json(VectorMutationResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            result: Some(result),
+        })
+        .into_response(),
+        Err(error) => vector_mutation_error(error.to_string()),
+    }
+}
+
+async fn vector_delete_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    payload: Result<Json<VectorDeleteRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => return vector_mutation_error(vector_json_rejection(&rejection)),
+    };
+    let scopes = request
+        .items
+        .iter()
+        .map(|item| (item.tenant_id, item.agent_id))
+        .collect::<Vec<_>>();
+    let username =
+        match vector_api_username(&state, &headers, &request.vector_space, "write", &scopes) {
+            Ok(username) => username,
+            Err(msg) => {
+                return vector_mutation_error(msg);
+            }
+        };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_mutation_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.write_timeout_ms,
+        permit,
+        async move { db.vector_delete_as(username, request).await },
+    )
+    .await
+    {
+        Ok(result) => Json(VectorMutationResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            result: Some(result),
+        })
+        .into_response(),
+        Err(error) => vector_mutation_error(error.to_string()),
+    }
+}
+
+async fn vector_index_rebuild_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(vector_space): AxumPath<String>,
+) -> Response {
+    let Some(username) = session_username(&state, &headers) else {
+        return vector_index_error("AUTHENTICATION_FAILED: authentication required".into());
+    };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_index_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.maintenance_timeout_ms,
+        permit,
+        async move { db.rebuild_vector_index_as(username, vector_space).await },
+    )
+    .await
+    {
+        Ok(index) => Json(VectorIndexResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            index: Some(index),
+        })
+        .into_response(),
+        Err(error) => vector_index_error(error.to_string()),
+    }
+}
+
+async fn vector_index_compact_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(vector_space): AxumPath<String>,
+) -> Response {
+    let Some(username) = session_username(&state, &headers) else {
+        return vector_index_error("AUTHENTICATION_FAILED: authentication required".into());
+    };
+    let permit = match acquire_vector_api_permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return vector_index_error(error),
+    };
+    let db = state.db.clone();
+    match run_vector_request(
+        state.vector_api_limits.maintenance_timeout_ms,
+        permit,
+        async move { db.compact_vector_index_as(username, vector_space).await },
+    )
+    .await
+    {
+        Ok(index) => Json(VectorIndexResp {
+            success: true,
+            error_code: None,
+            trace_id: new_trace_id(),
+            msg: "ok".into(),
+            index: Some(index),
+        })
+        .into_response(),
+        Err(error) => vector_index_error(error.to_string()),
+    }
+}
+
+fn vector_index_error(msg: String) -> Response {
+    let (status, error_code) = vector_error_contract(&msg);
+    (
+        status,
+        Json(VectorIndexResp {
+            success: false,
+            error_code: Some(error_code),
+            trace_id: new_trace_id(),
+            msg,
+            index: None,
+        }),
+    )
+        .into_response()
+}
+
+fn vector_search_error(msg: String) -> Response {
+    let (status, error_code) = vector_error_contract(&msg);
+    (
+        status,
+        Json(VectorSearchResp {
+            success: false,
+            error_code: Some(error_code),
+            trace_id: new_trace_id(),
+            msg,
+            result: None,
+        }),
+    )
+        .into_response()
+}
+
+fn vector_mutation_error(msg: String) -> Response {
+    let (status, error_code) = vector_error_contract(&msg);
+    (
+        status,
+        Json(VectorMutationResp {
+            success: false,
+            error_code: Some(error_code),
+            trace_id: new_trace_id(),
+            msg,
+            result: None,
+        }),
+    )
+        .into_response()
+}
+
+fn acquire_vector_api_permit(state: &WebState) -> Result<OwnedSemaphorePermit, String> {
+    state
+        .vector_api_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "RATE_LIMITED: vector API concurrency limit reached".to_string())
+}
+
+async fn run_vector_request<T>(
+    timeout_ms: u64,
+    permit: OwnedSemaphorePermit,
+    request: impl Future<Output = crate::db::DbResult<T>> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    let mut request = Box::pin(request);
+    tokio::select! {
+        result = &mut request => result.map_err(|error| error.to_string()),
+        _ = time::sleep(Duration::from_millis(timeout_ms)) => {
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _ = request.await;
+            });
+            Err(format!(
+                "REQUEST_TIMEOUT: vector API request exceeded {timeout_ms}ms; operation completion is unknown"
+            ))
+        }
+    }
+}
+
+fn vector_json_rejection(rejection: &JsonRejection) -> String {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        "REQUEST_BODY_TOO_LARGE: vector API request body exceeds configured limit".into()
+    } else {
+        format!("INVALID_JSON: {}", rejection.body_text())
+    }
+}
+
+fn vector_error_contract(msg: &str) -> (StatusCode, String) {
+    let explicit = msg
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| {
+            !prefix.is_empty()
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    let code = explicit.unwrap_or_else(|| {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("permission denied") || lower.contains("not authorized") {
+            "AUTHORIZATION_FAILED"
+        } else if lower.contains("not found") || lower.contains("does not exist") {
+            "VECTOR_SPACE_NOT_FOUND"
+        } else if lower.contains("already exists") || lower.contains("duplicate") {
+            "VECTOR_SPACE_ALREADY_EXISTS"
+        } else if lower.contains("vss") || lower.contains("hnsw") {
+            "VSS_UNAVAILABLE"
+        } else if lower.contains("queue is full") {
+            "RATE_LIMITED"
+        } else if lower.contains("worker stopped") {
+            "SERVICE_UNAVAILABLE"
+        } else {
+            "VECTOR_OPERATION_FAILED"
+        }
+    });
+    let status = match code {
+        "AUTHENTICATION_FAILED" => StatusCode::UNAUTHORIZED,
+        "AUTHORIZATION_FAILED" | "TENANT_SCOPE_DENIED" => StatusCode::FORBIDDEN,
+        "VECTOR_SPACE_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "VECTOR_SPACE_ALREADY_EXISTS"
+        | "SOURCE_VERSION_CONFLICT"
+        | "STALE_SOURCE_VERSION"
+        | "DUPLICATE_VECTOR_KEY" => StatusCode::CONFLICT,
+        "INDEX_BUILDING"
+        | "INDEX_STALE"
+        | "INDEX_UNAVAILABLE"
+        | "VSS_UNAVAILABLE"
+        | "SERVICE_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+        "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
+        "REQUEST_BODY_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
+        "REQUEST_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+        "VECTOR_OPERATION_FAILED" => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, code.to_string())
+}
+
 fn resolve_parquet_import_sources(
     parquet_import_root: &Path,
     req: &ParquetImportReq,
@@ -481,7 +930,15 @@ pub fn web_router(
     snapshot_dir: String,
     snapshot_prefix: String,
     parquet_import_root: String,
+    vector_api_tokens: Vec<VectorApiTokenConfig>,
+    vector_api_limits: VectorApiLimitsConfig,
 ) -> Router {
+    validate_vector_api_limits(&vector_api_limits)
+        .unwrap_or_else(|error| panic!("invalid web.vector_api_limits: {error}"));
+    let vector_api_semaphore = Arc::new(Semaphore::new(vector_api_limits.max_concurrent_requests));
+    let vector_body_limit = vector_api_limits.max_body_bytes;
+    let vector_api_tokens = build_vector_service_tokens(vector_api_tokens)
+        .unwrap_or_else(|error| panic!("invalid web.vector_api_tokens: {error}"));
     Router::new()
         .route("/", get(index_page))
         .route("/healthz", get(health_handler))
@@ -492,6 +949,34 @@ pub fn web_router(
         .route("/sql", post(sql_handler))
         .route("/snapshot", post(snapshot_handler))
         .route(
+            "/api/vector/indexes",
+            post(vector_index_create_handler).layer(DefaultBodyLimit::max(vector_body_limit)),
+        )
+        .route(
+            "/api/vector/search",
+            post(vector_search_handler).layer(DefaultBodyLimit::max(vector_body_limit)),
+        )
+        .route(
+            "/api/vector/upsert-batch",
+            post(vector_upsert_handler).layer(DefaultBodyLimit::max(vector_body_limit)),
+        )
+        .route(
+            "/api/vector/delete-batch",
+            post(vector_delete_handler).layer(DefaultBodyLimit::max(vector_body_limit)),
+        )
+        .route(
+            "/api/vector/indexes/{vector_space}/rebuild",
+            post(vector_index_rebuild_handler),
+        )
+        .route(
+            "/api/vector/indexes/{vector_space}/compact",
+            post(vector_index_compact_handler),
+        )
+        .route(
+            "/api/vector/indexes/{vector_space}/status",
+            get(vector_index_status_handler),
+        )
+        .route(
             "/parquet-import",
             get(parquet_import_info_handler).post(parquet_import_handler),
         )
@@ -501,7 +986,124 @@ pub fn web_router(
             snapshot_prefix: Arc::new(snapshot_prefix),
             parquet_import_root: Arc::new(PathBuf::from(parquet_import_root)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            vector_api_tokens: Arc::new(vector_api_tokens),
+            vector_api_limits: Arc::new(vector_api_limits),
+            vector_api_semaphore,
         })
+}
+
+fn validate_vector_api_limits(config: &VectorApiLimitsConfig) -> Result<(), String> {
+    if config.max_body_bytes == 0 {
+        return Err("max_body_bytes must be greater than zero".into());
+    }
+    if config.max_concurrent_requests == 0 {
+        return Err("max_concurrent_requests must be greater than zero".into());
+    }
+    if config.search_timeout_ms == 0
+        || config.write_timeout_ms == 0
+        || config.maintenance_timeout_ms == 0
+    {
+        return Err("all vector API timeouts must be greater than zero".into());
+    }
+    Ok(())
+}
+
+fn build_vector_service_tokens(
+    configs: Vec<VectorApiTokenConfig>,
+) -> Result<HashMap<String, VectorServiceIdentity>, String> {
+    let mut tokens = HashMap::new();
+    for config in configs {
+        let token = config.token.trim();
+        if token.len() < 32 {
+            return Err("vector API token must contain at least 32 characters".into());
+        }
+        if config.username.trim().is_empty() {
+            return Err("vector API token username cannot be empty".into());
+        }
+        if config.tenant_ids.is_empty() {
+            return Err("vector API token must allow at least one tenant_id".into());
+        }
+        if config.vector_spaces.is_empty()
+            || config
+                .vector_spaces
+                .iter()
+                .any(|vector_space| vector_space.trim().is_empty())
+        {
+            return Err("vector API token must allow at least one non-empty vector_space".into());
+        }
+        if config.permissions.is_empty()
+            || config
+                .permissions
+                .iter()
+                .any(|permission| !matches!(permission.as_str(), "search" | "write"))
+        {
+            return Err("vector API token permissions must contain search and/or write".into());
+        }
+        let digest = format!("{:x}", Sha256::digest(token.as_bytes()));
+        if tokens
+            .insert(
+                digest,
+                VectorServiceIdentity {
+                    username: config.username,
+                    tenant_ids: config.tenant_ids,
+                    agent_ids: config.agent_ids,
+                    vector_spaces: config.vector_spaces,
+                    permissions: config.permissions,
+                },
+            )
+            .is_some()
+        {
+            return Err("duplicate vector API token".into());
+        }
+    }
+    Ok(tokens)
+}
+
+fn vector_api_username(
+    state: &WebState,
+    headers: &HeaderMap,
+    vector_space: &str,
+    permission: &str,
+    scopes: &[(i64, i64)],
+) -> Result<String, String> {
+    if let Some(username) = session_username(state, headers) {
+        return Ok(username);
+    }
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "AUTHENTICATION_FAILED: Bearer token is required".to_string())?;
+    let digest = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let identity = state
+        .vector_api_tokens
+        .get(&digest)
+        .ok_or_else(|| "AUTHENTICATION_FAILED: invalid Bearer token".to_string())?;
+    if !identity
+        .vector_spaces
+        .iter()
+        .any(|allowed| allowed == vector_space)
+        || !identity
+            .permissions
+            .iter()
+            .any(|allowed| allowed == permission)
+    {
+        return Err(format!(
+            "AUTHORIZATION_FAILED: vector_space={vector_space}, permission={permission}"
+        ));
+    }
+    for (tenant_id, agent_id) in scopes {
+        if !identity.tenant_ids.contains(tenant_id)
+            || (!identity.agent_ids.is_empty() && !identity.agent_ids.contains(agent_id))
+        {
+            return Err(format!(
+                "TENANT_SCOPE_DENIED: tenant_id={tenant_id}, agent_id={agent_id}"
+            ));
+        }
+    }
+    Ok(identity.username.clone())
 }
 
 fn session_username(state: &WebState, headers: &HeaderMap) -> Option<String> {
@@ -528,17 +1130,38 @@ fn new_session_token() -> String {
     token
 }
 
+fn new_trace_id() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let mut trace_id = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        trace_id.push_str(&format!("{byte:02x}"));
+    }
+    trace_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        health_handler, paged_sql, parse_session_token, resolve_parquet_import_sources,
-        ParquetImportReq,
+        acquire_vector_api_permit, build_vector_service_tokens, health_handler, paged_sql,
+        parse_session_token, resolve_parquet_import_sources, run_vector_request, sql_handler,
+        validate_vector_api_limits, vector_api_username, vector_error_contract, web_router,
+        ParquetImportReq, SqlReq, WebState,
     };
+    use crate::config::{DbConfig, VectorApiLimitsConfig, VectorApiTokenConfig};
+    use crate::db::DbHandle;
     use axum::{
-        http::{header, HeaderMap, HeaderValue},
+        body::{to_bytes, Body},
+        extract::State,
+        http::{header, HeaderMap, HeaderValue, Request, StatusCode},
         Json,
     };
+    use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Semaphore;
+    use tower::ServiceExt;
 
     #[test]
     fn parses_session_cookie() {
@@ -549,6 +1172,261 @@ mod tests {
         );
 
         assert_eq!(parse_session_token(&headers), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn vector_bearer_token_enforces_tenant_and_agent_scope() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let identities = build_vector_service_tokens(vec![VectorApiTokenConfig {
+            token: token.into(),
+            username: "agent_service".into(),
+            tenant_ids: vec![1001],
+            agent_ids: vec![2001],
+            vector_spaces: vec!["agent-memory-v1".into()],
+            permissions: vec!["search".into(), "write".into()],
+        }])
+        .unwrap();
+        assert!(!identities.contains_key(token));
+
+        let db = DbHandle::open(
+            None,
+            &DbConfig {
+                vss_enabled: false,
+                ..DbConfig::default()
+            },
+        );
+        let state = WebState {
+            db: db.clone(),
+            snapshot_dir: Arc::new(String::new()),
+            snapshot_prefix: Arc::new(String::new()),
+            parquet_import_root: Arc::new(PathBuf::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            vector_api_tokens: Arc::new(identities),
+            vector_api_limits: Arc::new(VectorApiLimitsConfig::default()),
+            vector_api_semaphore: Arc::new(Semaphore::new(1)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        assert_eq!(
+            vector_api_username(
+                &state,
+                &headers,
+                "agent-memory-v1",
+                "search",
+                &[(1001, 2001)]
+            )
+            .unwrap(),
+            "agent_service"
+        );
+        assert!(vector_api_username(
+            &state,
+            &headers,
+            "agent-memory-v1",
+            "search",
+            &[(1002, 2001)]
+        )
+        .unwrap_err()
+        .contains("TENANT_SCOPE_DENIED"));
+        assert!(vector_api_username(
+            &state,
+            &headers,
+            "agent-memory-v1",
+            "search",
+            &[(1001, 2002)]
+        )
+        .unwrap_err()
+        .contains("TENANT_SCOPE_DENIED"));
+        assert!(
+            vector_api_username(&state, &headers, "other-space", "search", &[(1001, 2001)])
+                .unwrap_err()
+                .contains("AUTHORIZATION_FAILED")
+        );
+        db.shutdown();
+    }
+
+    #[tokio::test]
+    async fn web_sql_serializes_fixed_float_array_as_json() {
+        let db = DbHandle::open(
+            None,
+            &DbConfig {
+                vss_enabled: false,
+                ..DbConfig::default()
+            },
+        );
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            "test-session".to_string(),
+            "admin".to_string(),
+        )])));
+        let state = WebState {
+            db: db.clone(),
+            snapshot_dir: Arc::new(String::new()),
+            snapshot_prefix: Arc::new(String::new()),
+            parquet_import_root: Arc::new(PathBuf::new()),
+            sessions,
+            vector_api_tokens: Arc::new(HashMap::new()),
+            vector_api_limits: Arc::new(VectorApiLimitsConfig::default()),
+            vector_api_semaphore: Arc::new(Semaphore::new(1)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("rsduck_session=test-session"),
+        );
+
+        let Json(response) = sql_handler(
+            State(state),
+            headers,
+            Json(SqlReq {
+                sql: "SELECT [0.125, 0.25, 0.5]::FLOAT[3] AS embedding".into(),
+                page: 0,
+                page_size: 100,
+            }),
+        )
+        .await;
+
+        assert!(response.success, "{}", response.msg);
+        assert_eq!(response.columns[0].sql_type, "json");
+        assert_eq!(response.columns[0].mysql_type, "json");
+        assert_eq!(response.rows, vec![vec![Some("[0.125,0.25,0.5]".into())]]);
+        db.shutdown();
+    }
+
+    #[tokio::test]
+    async fn vector_api_limits_concurrency_and_timeout_are_explicit() {
+        let db = DbHandle::open(
+            None,
+            &DbConfig {
+                vss_enabled: false,
+                ..DbConfig::default()
+            },
+        );
+        let state = WebState {
+            db: db.clone(),
+            snapshot_dir: Arc::new(String::new()),
+            snapshot_prefix: Arc::new(String::new()),
+            parquet_import_root: Arc::new(PathBuf::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            vector_api_tokens: Arc::new(HashMap::new()),
+            vector_api_limits: Arc::new(VectorApiLimitsConfig::default()),
+            vector_api_semaphore: Arc::new(Semaphore::new(1)),
+        };
+        let permit = acquire_vector_api_permit(&state).unwrap();
+        assert!(acquire_vector_api_permit(&state)
+            .unwrap_err()
+            .contains("RATE_LIMITED"));
+        drop(permit);
+        assert!(acquire_vector_api_permit(&state).is_ok());
+
+        let completion_semaphore = Arc::new(Semaphore::new(1));
+        let completion_permit = completion_semaphore.clone().try_acquire_owned().unwrap();
+        let timeout = run_vector_request(1, completion_permit, async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok::<(), crate::db::DbError>(())
+        })
+        .await
+        .unwrap_err();
+        assert!(timeout.contains("REQUEST_TIMEOUT"));
+        assert!(completion_semaphore.clone().try_acquire_owned().is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(completion_semaphore.try_acquire_owned().is_ok());
+        db.shutdown();
+    }
+
+    #[test]
+    fn vector_api_limits_reject_zero_values() {
+        let mut config = VectorApiLimitsConfig::default();
+        validate_vector_api_limits(&config).unwrap();
+        config.max_concurrent_requests = 0;
+        assert!(validate_vector_api_limits(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn vector_api_body_limit_returns_structured_error() {
+        let db = DbHandle::open(
+            None,
+            &DbConfig {
+                vss_enabled: false,
+                ..DbConfig::default()
+            },
+        );
+        let limits = VectorApiLimitsConfig {
+            max_body_bytes: 64,
+            ..VectorApiLimitsConfig::default()
+        };
+        let app = web_router(
+            db.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            limits,
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/vector/search")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"vector_space":"space","embedding":"{}"}}"#,
+                        "x".repeat(128)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "REQUEST_BODY_TOO_LARGE");
+        assert_eq!(json["success"], false);
+        db.shutdown();
+    }
+
+    #[test]
+    fn vector_error_contract_exposes_stable_codes_and_http_statuses() {
+        assert_eq!(
+            vector_error_contract("VECTOR_DIMENSION_MISMATCH: expected=3, actual=2"),
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "VECTOR_DIMENSION_MISMATCH".into()
+            )
+        );
+        assert_eq!(
+            vector_error_contract("AUTHENTICATION_FAILED: invalid Bearer token"),
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "AUTHENTICATION_FAILED".into()
+            )
+        );
+        assert_eq!(
+            vector_error_contract("vector space memory does not exist"),
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "VECTOR_SPACE_NOT_FOUND".into()
+            )
+        );
+        assert_eq!(
+            vector_error_contract("unexpected catalog error"),
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "VECTOR_OPERATION_FAILED".into()
+            )
+        );
+        assert_eq!(
+            vector_error_contract("REQUEST_TIMEOUT: exceeded 5000ms"),
+            (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT".into())
+        );
+        assert_eq!(
+            vector_error_contract("REQUEST_BODY_TOO_LARGE: configured limit"),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "REQUEST_BODY_TOO_LARGE".into()
+            )
+        );
     }
 
     #[tokio::test]

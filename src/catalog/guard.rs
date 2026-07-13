@@ -382,6 +382,42 @@ pub(super) fn relation_from_token(token: &str) -> Option<(String, String)> {
     }
 }
 
+pub fn authorize_vector_index_management(conn: &Connection, username: &str) -> Result<i64, String> {
+    let principal = principal_for_username(conn, username)?;
+    require_system_action(conn, &principal, "manage_catalog")?;
+    Ok(principal.user_id)
+}
+
+pub fn authorize_vector_search(
+    conn: &Connection,
+    username: &str,
+    schema: &str,
+    table: &str,
+) -> Result<(), String> {
+    let principal = principal_for_username(conn, username)?;
+    require_relation_action(
+        conn,
+        &principal,
+        &(schema.to_string(), table.to_string()),
+        "read",
+    )
+}
+
+pub fn authorize_vector_write(
+    conn: &Connection,
+    username: &str,
+    schema: &str,
+    table: &str,
+) -> Result<(), String> {
+    let principal = principal_for_username(conn, username)?;
+    require_relation_action(
+        conn,
+        &principal,
+        &(schema.to_string(), table.to_string()),
+        "write",
+    )
+}
+
 pub fn authorize_user_metadata(conn: &Connection, username: &str) -> Result<(), String> {
     let principal = principal_for_username(conn, username)?;
     require_system_action(conn, &principal, "manage_user")

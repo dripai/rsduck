@@ -182,6 +182,160 @@ pub struct ParquetImportSource {
     pub path: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct VectorIndexCreate {
+    pub vector_space: String,
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub index_name: String,
+    pub embedding_model: String,
+    pub model_version: String,
+    pub metric: String,
+    #[serde(default = "default_vector_m")]
+    pub m: i32,
+    #[serde(default = "default_vector_m0")]
+    pub m0: i32,
+    #[serde(default = "default_vector_ef_construction")]
+    pub ef_construction: i32,
+    #[serde(default = "default_vector_ef_search")]
+    pub default_ef_search: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VectorIndexInfo {
+    pub index_oid: i64,
+    pub vector_space: String,
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub index_name: String,
+    pub embedding_model: String,
+    pub model_version: String,
+    pub dimension: usize,
+    pub metric: String,
+    pub m: i32,
+    pub m0: i32,
+    pub ef_construction: i32,
+    pub default_ef_search: i32,
+    pub definition_version: i64,
+    pub generation: i64,
+    pub extension_version: String,
+    pub build_status: String,
+    pub vector_count: i64,
+    pub built_at: String,
+    pub updated_at: String,
+    pub error_message: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorSearchRequest {
+    pub vector_space: String,
+    pub tenant_id: i64,
+    pub agent_id: i64,
+    pub embedding: Vec<f32>,
+    pub top_k: usize,
+    pub mode: String,
+    pub ef_search: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct VectorMatch {
+    pub memory_id: i64,
+    pub distance: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VectorSearchResult {
+    pub vector_space: String,
+    pub mode: String,
+    pub index_status: String,
+    pub matches: Vec<VectorMatch>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorUpsertItem {
+    pub tenant_id: i64,
+    pub agent_id: i64,
+    pub memory_id: i64,
+    pub source_version: i64,
+    pub content_hash: String,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorUpsertRequest {
+    pub vector_space: String,
+    pub items: Vec<VectorUpsertItem>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorDeleteItem {
+    pub tenant_id: i64,
+    pub agent_id: i64,
+    pub memory_id: i64,
+    pub source_version: i64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorDeleteRequest {
+    pub vector_space: String,
+    pub items: Vec<VectorDeleteItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VectorMutationResult {
+    pub vector_space: String,
+    pub applied: usize,
+    pub idempotent: usize,
+    pub vector_count: i64,
+}
+
+impl From<crate::catalog::VectorIndexStatus> for VectorIndexInfo {
+    fn from(status: crate::catalog::VectorIndexStatus) -> Self {
+        Self {
+            index_oid: status.index_oid,
+            vector_space: status.vector_space,
+            schema: status.schema,
+            table: status.table,
+            column: status.column,
+            index_name: status.index_name,
+            embedding_model: status.embedding_model,
+            model_version: status.model_version,
+            dimension: status.dimension,
+            metric: status.metric,
+            m: status.m,
+            m0: status.m0,
+            ef_construction: status.ef_construction,
+            default_ef_search: status.default_ef_search,
+            definition_version: status.definition_version,
+            generation: status.generation,
+            extension_version: status.extension_version,
+            build_status: status.build_status,
+            vector_count: status.vector_count,
+            built_at: status.built_at,
+            updated_at: status.updated_at,
+            error_message: status.error_message,
+        }
+    }
+}
+
+fn default_vector_m() -> i32 {
+    16
+}
+
+fn default_vector_m0() -> i32 {
+    32
+}
+
+fn default_vector_ef_construction() -> i32 {
+    128
+}
+
+fn default_vector_ef_search() -> i32 {
+    64
+}
+
 impl From<SqlTypedResult> for SqlResult {
     fn from(result: SqlTypedResult) -> Self {
         match result {
@@ -230,6 +384,41 @@ pub(super) enum SqlCommand {
         schema: String,
         sources: Vec<ParquetImportSource>,
         resp: oneshot::Sender<DbResult<usize>>,
+    },
+    CreateVectorIndex {
+        username: String,
+        request: VectorIndexCreate,
+        resp: oneshot::Sender<DbResult<VectorIndexInfo>>,
+    },
+    VectorIndexStatus {
+        username: String,
+        vector_space: String,
+        resp: oneshot::Sender<DbResult<VectorIndexInfo>>,
+    },
+    VectorSearch {
+        username: String,
+        request: VectorSearchRequest,
+        resp: oneshot::Sender<DbResult<VectorSearchResult>>,
+    },
+    VectorUpsert {
+        username: String,
+        request: VectorUpsertRequest,
+        resp: oneshot::Sender<DbResult<VectorMutationResult>>,
+    },
+    VectorDelete {
+        username: String,
+        request: VectorDeleteRequest,
+        resp: oneshot::Sender<DbResult<VectorMutationResult>>,
+    },
+    RebuildVectorIndex {
+        username: String,
+        vector_space: String,
+        resp: oneshot::Sender<DbResult<VectorIndexInfo>>,
+    },
+    CompactVectorIndex {
+        username: String,
+        vector_space: String,
+        resp: oneshot::Sender<DbResult<VectorIndexInfo>>,
     },
     Shutdown,
 }

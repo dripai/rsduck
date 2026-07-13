@@ -12,6 +12,7 @@ mod relation;
 mod schema;
 mod table;
 mod user_role;
+mod vector_index;
 mod view;
 
 #[allow(unused_imports)]
@@ -37,5 +38,6 @@ pub(in crate::catalog) use self::schema::*;
 pub(crate) use self::table::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::user_role::*;
+pub(crate) use self::vector_index::*;
 #[allow(unused_imports)]
 pub(in crate::catalog) use self::view::*;

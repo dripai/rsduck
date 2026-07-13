@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "rsduck"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2740,6 +2740,7 @@ dependencies = [
  "duckdb",
  "fs2",
  "futures",
+ "libc",
  "open",
  "rand_core 0.6.4",
  "reqwest",
@@ -2751,6 +2752,7 @@ dependencies = [
  "tao",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

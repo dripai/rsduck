@@ -1,11 +1,18 @@
 use super::{
-    allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, execute_catalog_aware_write,
+    allocate_oid, authorize_snapshot, authorize_sql, bootstrap_fresh, compact_vector_index,
+    create_vector_index, duckdb_index_exists, execute_catalog_aware_write,
     execute_catalog_aware_write_as, hash_password, import_parquet_tables_as, namespace_oid,
-    relation_oid, sql_string, validate_after_start, verify_password, CatalogAuthenticator,
-    OBJECT_RELATION_KIND,
+    rebuild_vector_index, relation_oid, sql_string, transition_vector_index_status,
+    validate_after_start, vector_index_status, verify_password, CatalogAuthenticator,
+    VectorIndexCreateRequest, ADMIN_USER_ID, OBJECT_RELATION_KIND,
 };
 use crate::auth::{AuthCredential, AuthProtocol, AuthRequest, BlockingAuthenticator};
-use crate::db::{prepare_snapshot_parquet_extension, ParquetImportSource};
+use crate::db::{
+    delete_vectors_blocking, prepare_snapshot_parquet_extension, restore_or_initialize,
+    save_snapshot_blocking, search_vectors_blocking, upsert_vectors_blocking, ParquetImportSource,
+    VectorDeleteItem, VectorDeleteRequest, VectorSearchRequest, VectorUpsertItem,
+    VectorUpsertRequest,
+};
 use duckdb::Connection;
 
 #[test]
@@ -595,6 +602,99 @@ fn create_table_accepts_shallow_complex_column_types() {
 }
 
 #[test]
+fn create_table_accepts_fixed_float_array_and_enforces_dimension() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE agent_memory_vector(memory_id BIGINT, embedding FLOAT[3])",
+    )
+    .unwrap();
+
+    let physical_type: String = conn
+        .query_row(
+            "SELECT t.rsduck_physical_type
+             FROM rsduck_catalog.rs_column a
+             JOIN rsduck_catalog.rs_relation c ON c.oid = a.attrelid
+             JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid
+             WHERE c.relname = 'agent_memory_vector' AND a.attname = 'embedding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(physical_type, "FLOAT[3]");
+
+    conn.execute(
+        "INSERT INTO agent_memory_vector VALUES (1, [0.12, 0.35, 0.78]::FLOAT[3])",
+        [],
+    )
+    .unwrap();
+    let distance: f32 = conn
+        .query_row(
+            "SELECT array_cosine_distance(embedding, [0.12, 0.35, 0.78]::FLOAT[3])
+             FROM agent_memory_vector WHERE memory_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(distance.abs() < f32::EPSILON);
+
+    let error = conn
+        .execute(
+            "INSERT INTO agent_memory_vector VALUES (2, [0.12, 0.35]::FLOAT[])",
+            [],
+        )
+        .unwrap_err();
+    let error = error.to_string();
+    assert!(
+        error.contains("array with length 3"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn create_table_rejects_invalid_fixed_float_array_types_without_leftovers() {
+    let conn = Connection::open_in_memory().unwrap();
+    bootstrap_fresh(&conn).unwrap();
+
+    for (table, column_type, expected_error) in [
+        (
+            "bad_vector_double",
+            "DOUBLE[3]",
+            "only supports FLOAT elements",
+        ),
+        (
+            "bad_vector_zero",
+            "FLOAT[0]",
+            "dimension must be greater than zero",
+        ),
+        (
+            "bad_vector_nested",
+            "FLOAT[3][2]",
+            "invalid fixed array DuckDB type syntax",
+        ),
+    ] {
+        let error = execute_catalog_aware_write(
+            &conn,
+            &format!("CREATE TABLE {table}(embedding {column_type})"),
+        )
+        .unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+    }
+
+    let leftovers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rsduck_catalog.rs_relation
+             WHERE relname LIKE 'bad_vector_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
 fn create_table_rejects_nested_complex_column_types() {
     let conn = Connection::open_in_memory().unwrap();
     bootstrap_fresh(&conn).unwrap();
@@ -642,6 +742,349 @@ fn complex_columns_cannot_be_keys_or_indexes() {
     )
     .unwrap_err();
     assert!(index_err.contains("complex column cannot be used as index column"));
+}
+
+#[test]
+#[ignore = "downloads the platform-specific DuckDB VSS extension"]
+fn catalog_manages_hnsw_vector_index_metadata() {
+    let conn = Connection::open_in_memory().unwrap();
+    let extension_dir = std::env::temp_dir().join(format!(
+        "rsduck_catalog_vss_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    conn.execute_batch(&format!(
+        "SET extension_directory = '{}'; INSTALL vss; LOAD vss;",
+        extension_dir.display().to_string().replace('\'', "''")
+    ))
+    .unwrap();
+    bootstrap_fresh(&conn).unwrap();
+    execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE agent_memory_vector(
+            tenant_id BIGINT NOT NULL,
+            agent_id BIGINT NOT NULL,
+            memory_id BIGINT NOT NULL,
+            source_version BIGINT NOT NULL,
+            content_hash VARCHAR NOT NULL,
+            embedding FLOAT[3] NOT NULL,
+            updated_at TIMESTAMP NOT NULL,
+            UNIQUE(tenant_id, agent_id, memory_id)
+        )",
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO agent_memory_vector VALUES
+         (1001, 2001, 1, 1, 'a', [0.12, 0.35, 0.78]::FLOAT[3], CURRENT_TIMESTAMP),
+         (1001, 2001, 2, 1, 'b', [0.80, 0.10, 0.05]::FLOAT[3], CURRENT_TIMESTAMP),
+         (9999, 2001, 3, 1, 'c', [0.12, 0.35, 0.78]::FLOAT[3], CURRENT_TIMESTAMP);",
+    )
+    .unwrap();
+
+    let status = create_vector_index(
+        &conn,
+        &VectorIndexCreateRequest {
+            vector_space: "agent-memory-test".into(),
+            schema: "main".into(),
+            table: "agent_memory_vector".into(),
+            column: "embedding".into(),
+            index_name: "agent_memory_vector_hnsw".into(),
+            embedding_model: "test-model".into(),
+            model_version: "1".into(),
+            metric: "cosine".into(),
+            m: 16,
+            m0: 32,
+            ef_construction: 128,
+            default_ef_search: 64,
+        },
+        ADMIN_USER_ID,
+    )
+    .unwrap();
+    assert_eq!(status.vector_space, "agent-memory-test");
+    assert_eq!(status.dimension, 3);
+    assert_eq!(status.build_status, "active");
+    assert_eq!(status.vector_count, 3);
+    assert!(duckdb_index_exists(&conn, "main", "agent_memory_vector_hnsw").unwrap());
+
+    for mode in ["exact", "ann"] {
+        let result = search_vectors_blocking(
+            &conn,
+            &VectorSearchRequest {
+                vector_space: "agent-memory-test".into(),
+                tenant_id: 1001,
+                agent_id: 2001,
+                embedding: vec![0.12, 0.35, 0.78],
+                top_k: 2,
+                mode: mode.into(),
+                ef_search: Some(64),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].memory_id, 1);
+        assert!(result.matches.iter().all(|item| item.memory_id != 3));
+    }
+
+    let upsert = VectorUpsertRequest {
+        vector_space: "agent-memory-test".into(),
+        items: vec![VectorUpsertItem {
+            tenant_id: 1001,
+            agent_id: 2001,
+            memory_id: 4,
+            source_version: 1,
+            content_hash: "d".into(),
+            embedding: vec![0.11, 0.34, 0.79],
+        }],
+    };
+    let applied = upsert_vectors_blocking(&conn, &upsert).unwrap();
+    assert_eq!(applied.applied, 1);
+    assert_eq!(applied.idempotent, 0);
+    let repeated = upsert_vectors_blocking(&conn, &upsert).unwrap();
+    assert_eq!(repeated.applied, 0);
+    assert_eq!(repeated.idempotent, 1);
+
+    let rollback_error = upsert_vectors_blocking(
+        &conn,
+        &VectorUpsertRequest {
+            vector_space: "agent-memory-test".into(),
+            items: vec![
+                VectorUpsertItem {
+                    tenant_id: 1001,
+                    agent_id: 2001,
+                    memory_id: 5,
+                    source_version: 1,
+                    content_hash: "e".into(),
+                    embedding: vec![0.10, 0.33, 0.80],
+                },
+                VectorUpsertItem {
+                    tenant_id: 1001,
+                    agent_id: 2001,
+                    memory_id: 4,
+                    source_version: 0,
+                    content_hash: "d".into(),
+                    embedding: vec![0.11, 0.34, 0.79],
+                },
+            ],
+        },
+    )
+    .unwrap_err();
+    assert!(rollback_error.contains("STALE_SOURCE_VERSION"));
+    let rolled_back: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_memory_vector WHERE memory_id = 5",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rolled_back, 0);
+
+    let delete = VectorDeleteRequest {
+        vector_space: "agent-memory-test".into(),
+        items: vec![VectorDeleteItem {
+            tenant_id: 1001,
+            agent_id: 2001,
+            memory_id: 4,
+            source_version: 2,
+        }],
+    };
+    let deleted = delete_vectors_blocking(&conn, &delete).unwrap();
+    assert_eq!(deleted.applied, 1);
+    let repeated_delete = delete_vectors_blocking(&conn, &delete).unwrap();
+    assert_eq!(repeated_delete.idempotent, 1);
+
+    let compacted = compact_vector_index(&conn, "agent-memory-test").unwrap();
+    assert_eq!(compacted.build_status, "active");
+    let rebuilt = rebuild_vector_index(&conn, "agent-memory-test").unwrap();
+    assert_eq!(rebuilt.build_status, "active");
+    assert_eq!(rebuilt.generation, 2);
+
+    let snapshot_root = std::env::temp_dir().join(format!(
+        "rsduck_vector_snapshot_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    let snapshot =
+        save_snapshot_blocking(&conn, snapshot_root.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    restored
+        .execute_batch(&format!(
+            "SET extension_directory = '{}'; LOAD vss;",
+            extension_dir.display().to_string().replace('\'', "''")
+        ))
+        .unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+    let restored_status = vector_index_status(&restored, "agent-memory-test").unwrap();
+    assert_eq!(restored_status.build_status, "active");
+    assert_eq!(restored_status.generation, 3);
+    let restored_search = search_vectors_blocking(
+        &restored,
+        &VectorSearchRequest {
+            vector_space: "agent-memory-test".into(),
+            tenant_id: 1001,
+            agent_id: 2001,
+            embedding: vec![0.12, 0.35, 0.78],
+            top_k: 2,
+            mode: "ann".into(),
+            ef_search: Some(64),
+        },
+    )
+    .unwrap();
+    assert_eq!(restored_search.matches[0].memory_id, 1);
+
+    restored
+        .execute_batch(
+            "UPDATE rsduck_catalog.rs_vector_index SET extension_version = 'outdated-vss'
+             WHERE vector_space = 'agent-memory-test'",
+        )
+        .unwrap();
+    super::refresh_catalog_checksum(&restored).unwrap();
+    validate_after_start(&restored).unwrap();
+    let stale = vector_index_status(&restored, "agent-memory-test").unwrap();
+    assert_eq!(stale.build_status, "stale");
+    assert!(stale
+        .error_message
+        .contains("VSS extension version changed"));
+    let stale_ann_error = search_vectors_blocking(
+        &restored,
+        &VectorSearchRequest {
+            vector_space: "agent-memory-test".into(),
+            tenant_id: 1001,
+            agent_id: 2001,
+            embedding: vec![0.12, 0.35, 0.78],
+            top_k: 2,
+            mode: "ann".into(),
+            ef_search: None,
+        },
+    )
+    .unwrap_err();
+    assert!(stale_ann_error.contains("INDEX_STALE"));
+    let rebuilt_stale = rebuild_vector_index(&restored, "agent-memory-test").unwrap();
+    assert_eq!(rebuilt_stale.build_status, "active");
+    assert_eq!(rebuilt_stale.generation, 4);
+
+    restored
+        .execute_batch("DROP INDEX agent_memory_vector_hnsw")
+        .unwrap();
+    validate_after_start(&restored).unwrap();
+    let unavailable = vector_index_status(&restored, "agent-memory-test").unwrap();
+    assert_eq!(unavailable.build_status, "unavailable");
+    assert!(unavailable
+        .error_message
+        .contains("missing DuckDB physical index"));
+    let relation_status: String = restored
+        .query_row(
+            "SELECT status FROM rsduck_catalog.rs_relation
+             WHERE relname = 'agent_memory_vector_hnsw'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(relation_status, "unavailable");
+    let rebuilt_unavailable = rebuild_vector_index(&restored, "agent-memory-test").unwrap();
+    assert_eq!(rebuilt_unavailable.build_status, "active");
+    assert_eq!(rebuilt_unavailable.generation, 5);
+
+    restored
+        .execute_batch("DROP INDEX agent_memory_vector_hnsw")
+        .unwrap();
+    let compact_error = compact_vector_index(&restored, "agent-memory-test").unwrap_err();
+    assert!(compact_error.contains("compact HNSW index failed"));
+    assert_eq!(
+        vector_index_status(&restored, "agent-memory-test")
+            .unwrap()
+            .build_status,
+        "failed"
+    );
+    let exact_when_index_failed = search_vectors_blocking(
+        &restored,
+        &VectorSearchRequest {
+            vector_space: "agent-memory-test".into(),
+            tenant_id: 1001,
+            agent_id: 2001,
+            embedding: vec![0.12, 0.35, 0.78],
+            top_k: 2,
+            mode: "exact".into(),
+            ef_search: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(exact_when_index_failed.index_status, "failed");
+    let ann_error = search_vectors_blocking(
+        &restored,
+        &VectorSearchRequest {
+            vector_space: "agent-memory-test".into(),
+            tenant_id: 1001,
+            agent_id: 2001,
+            embedding: vec![0.12, 0.35, 0.78],
+            top_k: 2,
+            mode: "ann".into(),
+            ef_search: None,
+        },
+    )
+    .unwrap_err();
+    assert!(ann_error.contains("INDEX_UNAVAILABLE"));
+    let rebuilt_failed = rebuild_vector_index(&restored, "agent-memory-test").unwrap();
+    assert_eq!(rebuilt_failed.build_status, "active");
+    assert_eq!(rebuilt_failed.generation, 6);
+
+    let invalid_transition =
+        transition_vector_index_status(&restored, rebuilt_failed.index_oid, "building", "invalid")
+            .unwrap_err();
+    assert!(invalid_transition.contains("INVALID_INDEX_STATE_TRANSITION"));
+
+    restored
+        .execute_batch(
+            "UPDATE rsduck_catalog.rs_vector_index SET metric = 'invalid-metric'
+             WHERE vector_space = 'agent-memory-test'",
+        )
+        .unwrap();
+    super::refresh_catalog_checksum(&restored).unwrap();
+    let rebuild_error = rebuild_vector_index(&restored, "agent-memory-test").unwrap_err();
+    assert!(rebuild_error.contains("recreate HNSW index failed"));
+    assert_eq!(
+        vector_index_status(&restored, "agent-memory-test")
+            .unwrap()
+            .build_status,
+        "failed"
+    );
+    assert!(duckdb_index_exists(&restored, "main", "agent_memory_vector_hnsw").unwrap());
+    restored
+        .execute_batch(
+            "UPDATE rsduck_catalog.rs_vector_index SET metric = 'cosine'
+             WHERE vector_space = 'agent-memory-test'",
+        )
+        .unwrap();
+    super::refresh_catalog_checksum(&restored).unwrap();
+    let recovered_failed_rebuild = rebuild_vector_index(&restored, "agent-memory-test").unwrap();
+    assert_eq!(recovered_failed_rebuild.build_status, "active");
+    assert_eq!(recovered_failed_rebuild.generation, 7);
+
+    transition_vector_index_status(
+        &restored,
+        recovered_failed_rebuild.index_oid,
+        "rebuilding",
+        "simulated interruption",
+    )
+    .unwrap();
+    validate_after_start(&restored).unwrap();
+    let interrupted = vector_index_status(&restored, "agent-memory-test").unwrap();
+    assert_eq!(interrupted.build_status, "unavailable");
+    assert!(interrupted
+        .error_message
+        .contains("interrupted vector index operation"));
+    let rebuilt_interrupted = rebuild_vector_index(&restored, "agent-memory-test").unwrap();
+    assert_eq!(rebuilt_interrupted.build_status, "active");
+    assert_eq!(rebuilt_interrupted.generation, 8);
+
+    drop(restored);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(snapshot_root);
+    let _ = std::fs::remove_dir_all(extension_dir);
 }
 
 #[test]

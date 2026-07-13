@@ -94,6 +94,11 @@ pub(super) fn catalog_checksum_queries() -> &'static [(&'static str, &'static st
              FROM rsduck_catalog.rs_index ORDER BY indexrelid",
         ),
         (
+            "rs_vector_index",
+            "SELECT indexrelid, vector_space, embedding_model, model_version, dimension, metric, m, m0, ef_construction, default_ef_search, definition_version, generation, extension_version, build_status, vector_count, error_message \
+             FROM rsduck_catalog.rs_vector_index ORDER BY indexrelid",
+        ),
+        (
             "rs_dependency",
             "SELECT classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype \
              FROM rsduck_catalog.rs_dependency ORDER BY classid, objid, objsubid, refclassid, refobjid, refobjsubid",

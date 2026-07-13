@@ -12,6 +12,8 @@ write_queue_size = 100000
 read_queue_size = 1024
 snapshot_queue_size = 16
 max_result_rows = 100000
+extension_dir = "extensions"
+vss_enabled = true
 
 [snapshot]
 restore_on_startup = true
@@ -27,3 +29,14 @@ bind = "127.0.0.1:13306"
 enabled = true
 bind = "127.0.0.1:13307"
 parquet_import_root = "."
+
+[web.vector_api_limits]
+max_body_bytes = 33554432
+max_concurrent_requests = 64
+search_timeout_ms = 5000
+write_timeout_ms = 30000
+maintenance_timeout_ms = 300000
+
+# Add one or more [[web.vector_api_tokens]] entries in the deployed config.
+# Never commit real service tokens to source control.
+# Required fields: token, username, tenant_ids, agent_ids, vector_spaces, permissions.

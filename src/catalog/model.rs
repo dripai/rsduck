@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
 
-pub(super) const CATALOG_VERSION: i64 = 1;
+pub(super) const CATALOG_VERSION: i64 = 2;
+pub(crate) const SNAPSHOT_FORMAT_VERSION: i64 = 3;
 
 pub(super) const ADMIN_USER_ID: i64 = 10;
 pub(super) const INFORMATION_SCHEMA_NS: i64 = 12;
@@ -98,4 +99,46 @@ pub struct SessionPrincipal {
     pub user_id: i64,
     pub username: String,
     pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VectorIndexCreateRequest {
+    pub vector_space: String,
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub index_name: String,
+    pub embedding_model: String,
+    pub model_version: String,
+    pub metric: String,
+    pub m: i32,
+    pub m0: i32,
+    pub ef_construction: i32,
+    pub default_ef_search: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VectorIndexStatus {
+    pub index_oid: i64,
+    pub vector_space: String,
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub index_name: String,
+    pub embedding_model: String,
+    pub model_version: String,
+    pub dimension: usize,
+    pub metric: String,
+    pub m: i32,
+    pub m0: i32,
+    pub ef_construction: i32,
+    pub default_ef_search: i32,
+    pub definition_version: i64,
+    pub generation: i64,
+    pub extension_version: String,
+    pub build_status: String,
+    pub vector_count: i64,
+    pub built_at: String,
+    pub updated_at: String,
+    pub error_message: String,
 }

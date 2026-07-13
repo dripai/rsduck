@@ -69,6 +69,7 @@ jobs:
           cp packaging/macos/uninstall-service.sh "$state_dir/uninstall-service.sh"
           cp packaging/macos/launchd/com.dripai.rsduck.plist "$root/Library/LaunchDaemons/com.dripai.rsduck.plist"
           cp packaging/macos/launchd/com.dripai.rsduck-tray.plist "$root/Library/LaunchAgents/com.dripai.rsduck-tray.plist"
+          target/release/rsduck prepare-vss-extension --dir "$state_dir/extensions"
           chmod +x packaging/macos/scripts/postinstall
 
       - name: Validate package inputs

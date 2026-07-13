@@ -17,6 +17,10 @@ for required in rsduck rsduck-tray rsduck.toml.default init.sql.default rsduck.s
     exit 1
   fi
 done
+if [ ! -d "$SOURCE_DIR/extensions" ]; then
+  echo "missing package directory: $SOURCE_DIR/extensions" >&2
+  exit 1
+fi
 
 if ! id rsduck >/dev/null 2>&1; then
   useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin rsduck
@@ -26,11 +30,12 @@ if systemctl is-active --quiet rsduck.service; then
   systemctl stop rsduck.service
 fi
 
-install -d -m 0755 "$INSTALL_DIR" "$STATE_DIR" "$STATE_DIR/logs" "$STATE_DIR/snapshot" /etc/xdg/autostart
+install -d -m 0755 "$INSTALL_DIR" "$STATE_DIR" "$STATE_DIR/logs" "$STATE_DIR/snapshot" "$STATE_DIR/extensions" /etc/xdg/autostart
 install -m 0755 "$SOURCE_DIR/rsduck" "$INSTALL_DIR/rsduck"
 install -m 0755 "$SOURCE_DIR/rsduck-tray" "$INSTALL_DIR/rsduck-tray"
 install -m 0644 "$SOURCE_DIR/rsduck.service" "$UNIT_PATH"
 install -m 0644 "$SOURCE_DIR/rsduck-tray.desktop" /etc/xdg/autostart/rsduck-tray.desktop
+cp -R "$SOURCE_DIR/extensions/." "$STATE_DIR/extensions/"
 
 if [ ! -f "$STATE_DIR/rsduck.toml" ]; then
   install -m 0644 "$SOURCE_DIR/rsduck.toml.default" "$STATE_DIR/rsduck.toml"

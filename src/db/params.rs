@@ -5,6 +5,7 @@ pub enum SqlParam {
     Bool(bool),
     Integer(i64),
     Float(f64),
+    FloatArray(Vec<f32>),
     Bytes(Vec<u8>),
 }
 
@@ -171,6 +172,24 @@ pub(super) fn sql_param_literal(param: &SqlParam) -> Result<String, String> {
                     "non-finite SQL parameter is not supported: {value}"
                 ))
             }
+        }
+        SqlParam::FloatArray(values) => {
+            if values.is_empty() {
+                return Err("FLOAT array SQL parameter cannot be empty".into());
+            }
+            if let Some(value) = values.iter().find(|value| !value.is_finite()) {
+                return Err(format!(
+                    "non-finite FLOAT array SQL parameter is not supported: {value}"
+                ));
+            }
+            Ok(format!(
+                "[{}]::FLOAT[]",
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
         }
         SqlParam::Bytes(value) => Ok(format!("'\\x{}'", hex_encode(value))),
     }

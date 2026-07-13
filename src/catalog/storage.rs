@@ -128,6 +128,27 @@ pub(crate) fn create_catalog_storage(conn: &Connection) -> Result<(), String> {
             indpred VARCHAR NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_vector_index (
+            indexrelid BIGINT PRIMARY KEY,
+            vector_space VARCHAR NOT NULL UNIQUE,
+            embedding_model VARCHAR NOT NULL,
+            model_version VARCHAR NOT NULL,
+            dimension INT NOT NULL,
+            metric VARCHAR NOT NULL,
+            m INT NOT NULL,
+            m0 INT NOT NULL,
+            ef_construction INT NOT NULL,
+            default_ef_search INT NOT NULL,
+            definition_version BIGINT NOT NULL,
+            generation BIGINT NOT NULL,
+            extension_version VARCHAR NOT NULL,
+            build_status VARCHAR NOT NULL,
+            vector_count BIGINT NOT NULL,
+            built_at TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL,
+            error_message VARCHAR NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS rsduck_catalog.rs_dependency (
             classid BIGINT NOT NULL,
             objid BIGINT NOT NULL,

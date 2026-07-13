@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn restore_or_initialize(
+pub(crate) fn restore_or_initialize(
     conn: &Connection,
     snapshot_dir: Option<&str>,
     init_sql_path: &str,

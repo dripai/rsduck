@@ -49,6 +49,10 @@ pub struct DbConfig {
     pub snapshot_queue_size: usize,
     #[serde(default = "default_max_result_rows")]
     pub max_result_rows: usize,
+    #[serde(default = "default_extension_dir")]
+    pub extension_dir: String,
+    #[serde(default = "default_true")]
+    pub vss_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +99,37 @@ pub struct WebConfig {
     pub bind: String,
     #[serde(default = "default_parquet_import_root")]
     pub parquet_import_root: String,
+    #[serde(default)]
+    pub vector_api_tokens: Vec<VectorApiTokenConfig>,
+    #[serde(default)]
+    pub vector_api_limits: VectorApiLimitsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorApiLimitsConfig {
+    #[serde(default = "default_vector_max_body_bytes")]
+    pub max_body_bytes: usize,
+    #[serde(default = "default_vector_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    #[serde(default = "default_vector_search_timeout_ms")]
+    pub search_timeout_ms: u64,
+    #[serde(default = "default_vector_write_timeout_ms")]
+    pub write_timeout_ms: u64,
+    #[serde(default = "default_vector_maintenance_timeout_ms")]
+    pub maintenance_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorApiTokenConfig {
+    pub token: String,
+    pub username: String,
+    pub tenant_ids: Vec<i64>,
+    #[serde(default)]
+    pub agent_ids: Vec<i64>,
+    pub vector_spaces: Vec<String>,
+    pub permissions: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -137,6 +172,10 @@ fn default_max_result_rows() -> usize {
     100_000
 }
 
+fn default_extension_dir() -> String {
+    "extensions".into()
+}
+
 fn default_interval_secs() -> u64 {
     900
 }
@@ -163,6 +202,26 @@ fn default_mysql_bind() -> String {
 
 fn default_web_bind() -> String {
     "127.0.0.1:13307".into()
+}
+
+fn default_vector_max_body_bytes() -> usize {
+    32 * 1024 * 1024
+}
+
+fn default_vector_max_concurrent_requests() -> usize {
+    64
+}
+
+fn default_vector_search_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_vector_write_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_vector_maintenance_timeout_ms() -> u64 {
+    300_000
 }
 
 fn default_log_level() -> String {
@@ -214,6 +273,8 @@ impl Default for DbConfig {
             read_queue_size: default_read_queue_size(),
             snapshot_queue_size: default_snapshot_queue_size(),
             max_result_rows: default_max_result_rows(),
+            extension_dir: default_extension_dir(),
+            vss_enabled: true,
         }
     }
 }
@@ -235,6 +296,20 @@ impl Default for WebConfig {
             enabled: default_true(),
             bind: default_web_bind(),
             parquet_import_root: default_parquet_import_root(),
+            vector_api_tokens: Vec::new(),
+            vector_api_limits: VectorApiLimitsConfig::default(),
+        }
+    }
+}
+
+impl Default for VectorApiLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: default_vector_max_body_bytes(),
+            max_concurrent_requests: default_vector_max_concurrent_requests(),
+            search_timeout_ms: default_vector_search_timeout_ms(),
+            write_timeout_ms: default_vector_write_timeout_ms(),
+            maintenance_timeout_ms: default_vector_maintenance_timeout_ms(),
         }
     }
 }
@@ -268,5 +343,30 @@ pub fn load_config() -> RsduckConfig {
     } else {
         tracing::info!("rsduck.toml not found, using defaults");
         RsduckConfig::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_config_parses_vector_api_limits() {
+        let config: RsduckConfig = toml::from_str(include_str!("../rsduck.toml")).unwrap();
+        assert_eq!(config.web.vector_api_limits.max_body_bytes, 33_554_432);
+        assert_eq!(config.web.vector_api_limits.max_concurrent_requests, 64);
+        assert_eq!(config.web.vector_api_limits.search_timeout_ms, 5_000);
+        assert_eq!(config.web.vector_api_limits.write_timeout_ms, 30_000);
+        assert_eq!(config.web.vector_api_limits.maintenance_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn vector_api_limits_have_safe_defaults_when_section_is_absent() {
+        let config: RsduckConfig = toml::from_str("").unwrap();
+        assert_eq!(config.web.vector_api_limits.max_concurrent_requests, 64);
+        assert_eq!(
+            config.web.vector_api_limits.max_body_bytes,
+            32 * 1024 * 1024
+        );
     }
 }
