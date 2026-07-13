@@ -1,5 +1,7 @@
 # RSDuck：把 Agent 记忆从“能存”变成“能召回”
 
+语言：[English](rsduck-vector-memory-overview.en.md) | 中文
+
 大模型 Agent 真正难的部分，往往不在一次对话，而在如何从大量历史记忆中找回当前最有价值的少量内容。RSDuck 在 DuckDB 之上提供固定维度向量、受管 HNSW 索引和专用 Vector API，用于承担这一段“语义召回”工作。
 
 它不是要替代 MySQL 等业务数据库，而是作为记忆检索加速层：业务库保存正文、状态、权限和版本；RSDuck 根据语义找出有价值的 `memory_id`，业务服务再按 ID 回事实源读取正文。这种分工既避免了两处保存两份事实，也让 Agent 可以在大量记忆中快速找到相关上下文。
