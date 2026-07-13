@@ -1322,16 +1322,24 @@ mod tests {
 
         let completion_semaphore = Arc::new(Semaphore::new(1));
         let completion_permit = completion_semaphore.clone().try_acquire_owned().unwrap();
-        let timeout = run_vector_request(1, completion_permit, async {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let timeout = run_vector_request(1, completion_permit, async move {
+            release_rx.await.unwrap();
             Ok::<(), crate::db::DbError>(())
         })
         .await
         .unwrap_err();
         assert!(timeout.contains("REQUEST_TIMEOUT"));
         assert!(completion_semaphore.clone().try_acquire_owned().is_err());
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        assert!(completion_semaphore.try_acquire_owned().is_ok());
+        release_tx.send(()).unwrap();
+        let released_permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            completion_semaphore.acquire_owned(),
+        )
+        .await
+        .expect("background request did not release its concurrency permit")
+        .expect("completion semaphore was closed");
+        drop(released_permit);
         db.shutdown();
     }
 
