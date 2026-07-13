@@ -5,13 +5,17 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 #[cfg(target_os = "macos")]
 use tray_icon::menu::Submenu;
 use tray_icon::{
@@ -45,6 +49,23 @@ impl ServiceAction {
 #[derive(Debug)]
 enum UserEvent {
     Menu(MenuEvent),
+    StatusRefreshed(StatusRefresh),
+    BackgroundActionCompleted {
+        result: Result<String, String>,
+        exit_after: bool,
+    },
+}
+
+#[derive(Debug)]
+struct StatusRefresh {
+    manager: String,
+    action_result: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BackgroundAction {
+    Service(ServiceAction),
+    Upgrade,
 }
 
 struct TrayMenu {
@@ -155,13 +176,16 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event();
     let event_loop = event_loop.build();
     let proxy = event_loop.create_proxy();
+    let menu_proxy = proxy.clone();
     MenuEvent::set_event_handler(Some(move |event| {
-        let _ = proxy.send_event(UserEvent::Menu(event));
+        let _ = menu_proxy.send_event(UserEvent::Menu(event));
     }));
 
     let mut tray_menu: Option<TrayMenu> = None;
     let mut _tray_icon = None;
     let mut last_refresh = Instant::now() - Duration::from_secs(60);
+    let refresh_in_flight = Arc::new(AtomicBool::new(false));
+    let action_in_flight = Arc::new(AtomicBool::new(false));
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1));
@@ -191,54 +215,84 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
         }
 
         if last_refresh.elapsed() >= Duration::from_secs(3) {
-            if let Some(menu) = tray_menu.as_ref() {
-                refresh_status(menu, &cfg);
+            if tray_menu.is_some() {
+                schedule_status_refresh(&proxy, refresh_in_flight.clone());
             }
             last_refresh = Instant::now();
         }
 
-        let Event::UserEvent(UserEvent::Menu(event)) = event else {
-            return;
-        };
-        let Some(menu) = tray_menu.as_ref() else {
-            return;
-        };
-
-        if event.id == *menu.open_web_sql.id() {
-            set_action_result(menu, open_web_sql(&cfg));
-        } else if event.id == *menu.open_logs.id() {
-            set_action_result(menu, open_logs(&cfg));
-        } else if event.id == *menu.start.id() {
-            set_action_result(menu, invoke_service_action(ServiceAction::Start));
-        } else if event.id == *menu.stop.id() {
-            set_action_result(menu, invoke_service_action(ServiceAction::Stop));
-        } else if event.id == *menu.restart.id() {
-            set_action_result(menu, invoke_service_action(ServiceAction::Restart));
-        } else if event.id == *menu.upgrade.id() {
-            let result = check_and_start_upgrade();
-            let upgrade_started = result
-                .as_ref()
-                .is_ok_and(|message| message.starts_with("已启动"));
-            set_action_result(menu, result);
-            if upgrade_started {
-                *control_flow = ControlFlow::Exit;
+        match event {
+            Event::UserEvent(UserEvent::StatusRefreshed(status)) => {
+                if let Some(menu) = tray_menu.as_ref() {
+                    apply_status_refresh(menu, status);
+                }
             }
-        } else if event.id == *menu.quit.id() {
-            *control_flow = ControlFlow::Exit;
+            Event::UserEvent(UserEvent::BackgroundActionCompleted { result, exit_after }) => {
+                if let Some(menu) = tray_menu.as_ref() {
+                    set_background_actions_enabled(menu, true);
+                    set_action_result(menu, result);
+                    schedule_status_refresh(&proxy, refresh_in_flight.clone());
+                }
+                if exit_after {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(UserEvent::Menu(event)) => {
+                let Some(menu) = tray_menu.as_ref() else {
+                    return;
+                };
+
+                if event.id == *menu.open_web_sql.id() {
+                    set_action_result(menu, open_web_sql(&cfg));
+                } else if event.id == *menu.open_logs.id() {
+                    set_action_result(menu, open_logs(&cfg));
+                } else if event.id == *menu.start.id() {
+                    run_background_action(
+                        menu,
+                        &proxy,
+                        action_in_flight.clone(),
+                        BackgroundAction::Service(ServiceAction::Start),
+                    );
+                } else if event.id == *menu.stop.id() {
+                    run_background_action(
+                        menu,
+                        &proxy,
+                        action_in_flight.clone(),
+                        BackgroundAction::Service(ServiceAction::Stop),
+                    );
+                } else if event.id == *menu.restart.id() {
+                    run_background_action(
+                        menu,
+                        &proxy,
+                        action_in_flight.clone(),
+                        BackgroundAction::Service(ServiceAction::Restart),
+                    );
+                } else if event.id == *menu.upgrade.id() {
+                    run_background_action(
+                        menu,
+                        &proxy,
+                        action_in_flight.clone(),
+                        BackgroundAction::Upgrade,
+                    );
+                } else if event.id == *menu.quit.id() {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            _ => {}
         }
     });
 }
 
 fn create_tray_menu() -> Result<(Menu, TrayMenu), String> {
     let menu = Menu::new();
-    let status = MenuItem::new("状态：检查中", false, None);
-    let open_web_sql = MenuItem::new("打开 Web SQL", true, None);
-    let open_logs = MenuItem::new("打开日志目录", true, None);
-    let start = MenuItem::new("启动服务", true, None);
-    let stop = MenuItem::new("停止服务", true, None);
-    let restart = MenuItem::new("重启服务", true, None);
-    let upgrade = MenuItem::new("检查并升级", true, None);
-    let quit = MenuItem::new("退出托盘", true, None);
+    let status = MenuItem::new("服务：检查中", false, None);
+    let open_web_sql = MenuItem::new("打开Web", true, None);
+    let open_logs = MenuItem::new("日志", true, None);
+    let start = MenuItem::new("启动", true, None);
+    let stop = MenuItem::new("停止", true, None);
+    let restart = MenuItem::new("重启", true, None);
+    let upgrade = MenuItem::new("升级", true, None);
+    let quit = MenuItem::new("退出", true, None);
     let separator = PredefinedMenuItem::separator();
     let separator_after_service = PredefinedMenuItem::separator();
     let separator_before_quit = PredefinedMenuItem::separator();
@@ -299,11 +353,27 @@ fn tray_icon_image() -> Icon {
     Icon::from_rgba(rgba, 32, 32).expect("generated tray icon RGBA must be valid")
 }
 
-fn refresh_status(menu: &TrayMenu, cfg: &RsduckConfig) {
-    let manager = service_manager_status();
-    let application = application_health_status(cfg);
-    let service_status = format!("状态：服务 {manager}；Web {application}");
-    if let Some(action_result) = take_windows_action_result() {
+fn schedule_status_refresh(proxy: &EventLoopProxy<UserEvent>, refresh_in_flight: Arc<AtomicBool>) {
+    if refresh_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let proxy = proxy.clone();
+    thread::spawn(move || {
+        let status = StatusRefresh {
+            manager: service_manager_status().to_string(),
+            action_result: take_windows_action_result(),
+        };
+        refresh_in_flight.store(false, Ordering::Release);
+        let _ = proxy.send_event(UserEvent::StatusRefreshed(status));
+    });
+}
+
+fn apply_status_refresh(menu: &TrayMenu, status: StatusRefresh) {
+    let service_status = format!("服务：{}", status.manager);
+    if let Some(action_result) = status.action_result {
         menu.status
             .set_text(format!("{service_status}；{action_result}"));
     } else {
@@ -313,9 +383,50 @@ fn refresh_status(menu: &TrayMenu, cfg: &RsduckConfig) {
 
 fn set_action_result(menu: &TrayMenu, result: Result<String, String>) {
     match result {
-        Ok(message) => menu.status.set_text(format!("状态：{message}")),
-        Err(error) => menu.status.set_text(format!("状态：操作失败：{error}")),
+        Ok(message) => menu.status.set_text(message),
+        Err(error) => menu.status.set_text(format!("失败：{error}")),
     }
+}
+
+fn set_background_actions_enabled(menu: &TrayMenu, enabled: bool) {
+    menu.start.set_enabled(enabled);
+    menu.stop.set_enabled(enabled);
+    menu.restart.set_enabled(enabled);
+    menu.upgrade.set_enabled(enabled);
+}
+
+fn run_background_action(
+    menu: &TrayMenu,
+    proxy: &EventLoopProxy<UserEvent>,
+    action_in_flight: Arc<AtomicBool>,
+    action: BackgroundAction,
+) {
+    if action_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    set_background_actions_enabled(menu, false);
+    menu.status.set_text(match action {
+        BackgroundAction::Service(action) => format!("服务：{}中…", action_label(action)),
+        BackgroundAction::Upgrade => "升级：检查中…".into(),
+    });
+    let proxy = proxy.clone();
+    thread::spawn(move || {
+        let (result, exit_after) = match action {
+            BackgroundAction::Service(action) => (invoke_service_action(action), false),
+            BackgroundAction::Upgrade => {
+                let result = check_and_start_upgrade();
+                let exit_after = result
+                    .as_ref()
+                    .is_ok_and(|message| message.starts_with("已启动"));
+                (result, exit_after)
+            }
+        };
+        action_in_flight.store(false, Ordering::Release);
+        let _ = proxy.send_event(UserEvent::BackgroundActionCompleted { result, exit_after });
+    });
 }
 
 fn open_web_sql(cfg: &RsduckConfig) -> Result<String, String> {
@@ -357,46 +468,6 @@ fn web_console_url(bind: &str) -> Result<String, String> {
         address.ip().to_string()
     };
     Ok(format!("http://{host}:{}", address.port()))
-}
-
-fn application_health_status(cfg: &RsduckConfig) -> &'static str {
-    if !cfg.web.enabled {
-        return "已禁用";
-    }
-    let Ok(url) = web_console_url(&cfg.web.bind) else {
-        return "配置无效";
-    };
-    let Ok(host_port) = url.strip_prefix("http://").ok_or(()) else {
-        return "配置无效";
-    };
-    let Ok(addresses) = host_port.to_socket_addrs() else {
-        return "不可用";
-    };
-    for address in addresses {
-        if health_request(address) {
-            return "可用";
-        }
-    }
-    "不可用"
-}
-
-fn health_request(address: SocketAddr) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_secs(1)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-    if stream
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    let mut response = [0_u8; 64];
-    match stream.read(&mut response) {
-        Ok(size) => response[..size].starts_with(b"HTTP/1.1 200"),
-        Err(_) => false,
-    }
 }
 
 fn service_manager_status() -> &'static str {
@@ -680,7 +751,9 @@ fn apple_script_string(value: &str) -> String {
 fn check_and_start_upgrade() -> Result<String, String> {
     let manifest_url = std::env::var("RSDUCK_UPDATE_MANIFEST_URL")
         .unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string());
-    let manifest = reqwest::blocking::get(&manifest_url)
+    let manifest = update_http_client(Duration::from_secs(20))?
+        .get(&manifest_url)
+        .send()
         .map_err(|error| format!("download update manifest failed: {error}"))?
         .error_for_status()
         .map_err(|error| format!("update manifest request failed: {error}"))?
@@ -698,6 +771,14 @@ fn check_and_start_upgrade() -> Result<String, String> {
     let installer = download_update_asset(asset, platform)?;
     launch_update_installer(&installer, platform)?;
     Ok(format!("已启动 v{} 升级安装", manifest.version))
+}
+
+fn update_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(timeout)
+        .build()
+        .map_err(|error| format!("create update HTTP client failed: {error}"))
 }
 
 fn version_is_newer(candidate: &str, current: &str) -> Result<bool, String> {
@@ -752,7 +833,9 @@ fn update_platform_key() -> Result<&'static str, String> {
 }
 
 fn download_update_asset(asset: &UpdateAsset, platform: &str) -> Result<PathBuf, String> {
-    let bytes = reqwest::blocking::get(&asset.url)
+    let bytes = update_http_client(Duration::from_secs(600))?
+        .get(&asset.url)
+        .send()
         .map_err(|error| format!("download update package failed: {error}"))?
         .error_for_status()
         .map_err(|error| format!("update package request failed: {error}"))?

@@ -988,7 +988,7 @@ Service deployment must also verify:
 
 ### 17.2 Tray Features And Updates
 
-- `rsduck-tray` reports service-manager state separately from Web `/healthz` availability, and provides start, stop, restart, open Web SQL, open log directory, and quit actions.
+- `rsduck-tray` reports service-manager state and provides start, stop, restart, open Web, open logs, upgrade, and quit actions. Status probes, service control, and update downloads run in the background without blocking the tray menu.
 - Service control requests elevation per platform: UAC and Service Control Manager on Windows, `pkexec systemctl` on Linux, and administrator-authorized `launchctl` on macOS.
 - The release workflow generates `rsduck-update.json` with version, target platform, installer URL, and SHA-256. The tray launches an installer only after the downloaded file verifies successfully.
 - Windows and macOS installers request elevation through the operating system. Linux updates extract the service package and run its installer through `pkexec`. The tray exits before the update so its executable is not held open.

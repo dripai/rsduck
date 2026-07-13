@@ -988,7 +988,7 @@ cargo build --release
 
 ### 17.2 托盘功能和升级
 
-- `rsduck-tray` 分别显示服务管理器状态和 Web `/healthz` 可用性，并提供启动、停止、重启、打开 Web SQL、打开日志目录和退出菜单。
+- `rsduck-tray` 显示服务管理器状态，并提供启动、停止、重启、打开 Web、打开日志、升级和退出菜单；状态探测、服务控制和升级下载在后台执行，不阻塞托盘菜单。
 - 服务控制按平台请求管理员授权：Windows 使用 UAC 与 Service Control Manager，Linux 使用 `pkexec systemctl`，macOS 使用管理员授权的 `launchctl`。
 - 发布工作流会生成 `rsduck-update.json`，其中包含版本、目标平台、安装包地址和 SHA-256。托盘只在下载文件校验通过后启动安装程序。
 - Windows 和 macOS 升级程序由系统安装器请求管理员权限；Linux 升级会解压服务包后通过 `pkexec` 执行安装脚本。更新前托盘会退出，避免占用自身可执行文件。
