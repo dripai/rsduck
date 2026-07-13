@@ -38,6 +38,7 @@
 - [总体架构设计](doc/architecture-overview.md)
 - [catalog 和权限设计](doc/mysql-compat-auth-catalog-design.md)
 - [实战案例](doc/rsduck-practical-examples.md)
+- [RSDuck Agent 向量记忆检索：原理、亮点与案例](doc/rsduck-vector-memory-overview.md)
 - [Agent 向量记忆检索与索引接入规范](doc/agent-vector-memory.md)
 
 本文面向需要运行、接入、维护或继续开发 rsduck 的工程人员。内容以当前代码行为为准，重点说明可以做什么、不能做什么、失败时如何处理，以及新增能力时必须保持的约束。
