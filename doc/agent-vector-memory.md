@@ -1,5 +1,7 @@
 # Agent 向量记忆检索与索引接入规范
 
+语言：[English](agent-vector-memory.en.md) | 中文
+
 ## 1. 职责边界
 
 - MySQL 等关系型业务数据库是记忆正文、业务状态和版本的事实源。

@@ -39,7 +39,7 @@ Related documents:
 - [Catalog and permission design](doc/mysql-compat-auth-catalog-design.en.md)
 - [Practical examples](doc/rsduck-practical-examples.en.md)
 - [RSDuck Agent vector memory retrieval: principles, strengths, and example](doc/rsduck-vector-memory-overview.en.md)
-- [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.md)
+- [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.en.md)
 
 This document is for engineers who need to run, integrate, maintain, or continue developing rsduck. It describes the current code behavior, with emphasis on what is supported, what is not supported, how failures should be handled, and which constraints must be preserved when adding new capabilities.
 
@@ -829,7 +829,7 @@ POST /api/vector/search                          ANN or explicit exact search
 - ANN failures never trigger an implicit full scan. Exact search runs only when the caller explicitly requests `mode=exact`.
 - HNSW is derived data. Snapshot v3 stores vector data, catalog metadata, and index definitions, then rebuilds the physical index during restore.
 
-See the [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.md) for table definitions, authentication configuration, request and response formats, error codes, timeout retry behavior, and model-upgrade rules.
+See the [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.en.md) for table definitions, authentication configuration, request and response formats, error codes, timeout retry behavior, and model-upgrade rules.
 
 ## 15. Common Errors And Handling
 
