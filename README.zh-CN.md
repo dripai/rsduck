@@ -38,6 +38,7 @@
 - [总体架构设计](doc/architecture-overview.md)
 - [catalog 和权限设计](doc/mysql-compat-auth-catalog-design.md)
 - [实战案例](doc/rsduck-practical-examples.md)
+- [普通 DuckDB 整库导入 RSDuck 设计与使用说明](doc/duckdb-database-import-design.md)
 - [RSDuck Agent 向量记忆检索：原理、亮点与案例](doc/rsduck-vector-memory-overview.md)
 - [Agent 向量记忆检索与索引接入规范](doc/agent-vector-memory.md)
 

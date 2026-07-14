@@ -2,6 +2,7 @@ pub mod auth;
 pub mod catalog;
 pub mod config;
 pub mod db;
+pub mod duckdb_import;
 pub mod logging;
 pub mod mysql_compat;
 pub mod process_lock;

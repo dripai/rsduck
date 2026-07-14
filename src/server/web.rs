@@ -374,9 +374,11 @@ async fn parquet_import_info_handler(
             msg: "authentication required".into(),
         });
     }
+    let root = fs::canonicalize(state.parquet_import_root.as_ref())
+        .unwrap_or_else(|_| state.parquet_import_root.as_ref().clone());
     Json(ParquetImportInfoResp {
         success: true,
-        root: state.parquet_import_root.display().to_string(),
+        root: root.display().to_string(),
         msg: "ok".into(),
     })
 }

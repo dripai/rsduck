@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rsduck::{config, db, logging, process_lock, server, shutdown};
+use rsduck::{config, db, duckdb_import, logging, process_lock, server, shutdown};
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::time;
 use tracing::{error, info};
@@ -77,9 +77,33 @@ async fn main() {
                 }
             }
         }
+        if command == "import-duckdb" {
+            let import_config = match duckdb_import::parse_import_duckdb_args(&args[1..]) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("{error}");
+                    eprintln!("{}", duckdb_import::import_duckdb_usage());
+                    std::process::exit(2);
+                }
+            };
+            let import_result = tokio::task::spawn_blocking(move || {
+                duckdb_import::run_import_duckdb(import_config)
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("import DuckDB task failed: {error}")));
+            match import_result {
+                Ok(report) if report.exit_code() == 0 => return,
+                Ok(report) => std::process::exit(report.exit_code()),
+                Err(error) => {
+                    eprintln!("import DuckDB failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         if command != "reset-admin-password" {
             eprintln!("usage: rsduck reset-admin-password [--password <password>]");
             eprintln!("       rsduck prepare-vss-extension --dir <directory>");
+            eprintln!("       {}", duckdb_import::import_duckdb_usage());
             std::process::exit(2);
         }
         let password = match parse_reset_admin_password_args(&args[1..]) {
