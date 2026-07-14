@@ -368,7 +368,8 @@ pub(super) fn catalog_columns(
 ) -> Result<Vec<CatalogColumn>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT a.attname, a.atttypid, t.rsduck_physical_type, a.attnum, a.attnotnull, d.adbin \
+            "SELECT a.attname, a.atttypid, t.rsduck_physical_type, a.atttypmod, \
+                    a.attnum, a.attnotnull, d.adbin \
              FROM rsduck_catalog.rs_column a \
              JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid \
              LEFT JOIN rsduck_catalog.rs_column_default d \
@@ -392,17 +393,20 @@ pub(super) fn catalog_columns(
             type_id: row
                 .get(1)
                 .map_err(|e| format!("read catalog atttypid failed: {e}"))?,
-            duckdb_type: row
-                .get(2)
-                .map_err(|e| format!("read catalog physical type failed: {e}"))?,
+            duckdb_type: duckdb_type_with_modifier(
+                &row.get::<_, String>(2)
+                    .map_err(|e| format!("read catalog physical type failed: {e}"))?,
+                row.get(3)
+                    .map_err(|e| format!("read catalog atttypmod failed: {e}"))?,
+            ),
             attnum: row
-                .get(3)
+                .get(4)
                 .map_err(|e| format!("read catalog attnum failed: {e}"))?,
             not_null: row
-                .get(4)
+                .get(5)
                 .map_err(|e| format!("read catalog attnotnull failed: {e}"))?,
             default_expr: row
-                .get(5)
+                .get(6)
                 .map_err(|e| format!("read catalog adbin failed: {e}"))?,
         });
     }

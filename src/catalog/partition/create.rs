@@ -14,11 +14,7 @@ pub(in crate::catalog) fn physical_partition_create_from_catalog_sql(
 ) -> Result<String, String> {
     let mut column_defs = Vec::with_capacity(columns.len());
     for column in columns {
-        let mut definition = format!(
-            "{} {}",
-            quote_ident(&column.name),
-            duckdb_type_for_type_id(conn, column.type_id)?
-        );
+        let mut definition = format!("{} {}", quote_ident(&column.name), column.duckdb_type);
         if column.not_null {
             definition.push_str(" NOT NULL");
         }

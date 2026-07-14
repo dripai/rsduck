@@ -5,6 +5,73 @@ pub(super) fn type_id_for_duckdb_type(duckdb_type: &str) -> Result<i64, String> 
         .ok_or_else(|| format!("unsupported DuckDB type for rsduck catalog: {duckdb_type}"))
 }
 
+const TYPE_MODIFIER_HEADER_SIZE: i32 = 4;
+
+pub(crate) fn type_modifier_for_duckdb_type(duckdb_type: &str) -> i32 {
+    decimal_precision_and_scale(duckdb_type)
+        .map(|(precision, scale)| {
+            ((i32::from(precision) << 16) | i32::from(scale)) + TYPE_MODIFIER_HEADER_SIZE
+        })
+        .unwrap_or(-1)
+}
+
+pub(crate) fn duckdb_type_with_modifier(physical_type: &str, type_modifier: i32) -> String {
+    if !is_decimal_type(physical_type) {
+        return physical_type.to_string();
+    }
+    decimal_precision_and_scale_from_modifier(type_modifier)
+        .map(|(precision, scale)| format!("DECIMAL({precision},{scale})"))
+        .unwrap_or_else(|| physical_type.to_string())
+}
+
+pub(crate) fn is_valid_type_modifier_for_duckdb_type(
+    physical_type: &str,
+    type_modifier: i32,
+) -> bool {
+    !is_decimal_type(physical_type)
+        || decimal_precision_and_scale_from_modifier(type_modifier).is_some()
+}
+
+fn is_decimal_type(duckdb_type: &str) -> bool {
+    let lower = duckdb_type.trim().to_ascii_lowercase();
+    lower == "decimal"
+        || lower == "numeric"
+        || lower.starts_with("decimal(")
+        || lower.starts_with("numeric(")
+}
+
+fn decimal_precision_and_scale(duckdb_type: &str) -> Option<(u8, u8)> {
+    let trimmed = duckdb_type.trim();
+    if !is_decimal_type(trimmed) {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let close = trimmed.rfind(')')?;
+    if close <= open + 1 || !trimmed[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let (precision, scale) = trimmed[open + 1..close].split_once(',')?;
+    let precision = precision.trim().parse::<u8>().ok()?;
+    let scale = scale.trim().parse::<u8>().ok()?;
+    if precision == 0 || precision > 38 || scale > precision {
+        return None;
+    }
+    Some((precision, scale))
+}
+
+fn decimal_precision_and_scale_from_modifier(type_modifier: i32) -> Option<(u8, u8)> {
+    if type_modifier < TYPE_MODIFIER_HEADER_SIZE {
+        return None;
+    }
+    let encoded = type_modifier - TYPE_MODIFIER_HEADER_SIZE;
+    let precision = ((encoded >> 16) & 0xffff) as u8;
+    let scale = (encoded & 0xffff) as u8;
+    if precision == 0 || precision > 38 || scale > precision {
+        return None;
+    }
+    Some((precision, scale))
+}
+
 pub(super) fn ensure_type_id_for_duckdb_type(
     conn: &Connection,
     duckdb_type: &str,
@@ -308,13 +375,4 @@ fn split_struct_field(field: &str) -> Result<(&str, &str), String> {
         }
     }
     Err(format!("STRUCT field is missing type: {field}"))
-}
-
-pub(super) fn duckdb_type_for_type_id(conn: &Connection, type_id: i64) -> Result<String, String> {
-    conn.query_row(
-        &format!("SELECT rsduck_physical_type FROM rsduck_catalog.rs_type WHERE oid = {type_id}"),
-        [],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("lookup DuckDB type for catalog type id {type_id} failed: {e}"))
 }

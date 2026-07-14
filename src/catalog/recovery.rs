@@ -659,10 +659,17 @@ pub(super) fn validate_catalog_columns_match_duckdb(
             .name
             .eq_ignore_ascii_case(&physical_column.name)
             || catalog_column.type_id != physical_column.type_id
+            || !catalog_column
+                .duckdb_type
+                .eq_ignore_ascii_case(&physical_column.duckdb_type)
         {
             return Err(format!(
-                "column mismatch at catalog attnum {}: catalog={} duckdb={}",
-                catalog_column.attnum, catalog_column.name, physical_column.name
+                "column mismatch at catalog attnum {}: catalog={}:{} duckdb={}:{}",
+                catalog_column.attnum,
+                catalog_column.name,
+                catalog_column.duckdb_type,
+                physical_column.name,
+                physical_column.duckdb_type
             ));
         }
     }

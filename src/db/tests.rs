@@ -715,6 +715,127 @@ fn snapshot_directory_round_trip_restores_multiple_tables() {
 }
 
 #[test]
+fn snapshot_round_trip_preserves_decimal_precision_and_scale() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_decimal_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE decimal_metrics(price DECIMAL(18,6), amount DECIMAL(18,6))",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO decimal_metrics VALUES (2627.88, 90037647343.00)",
+        [],
+    )
+    .unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE decimal_metrics ALTER COLUMN price SET DATA TYPE DECIMAL(9,2)",
+    )
+    .unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "ALTER TABLE decimal_metrics ALTER COLUMN amount SET DATA TYPE DECIMAL(18,2)",
+    )
+    .unwrap();
+    let type_modifiers = conn
+        .prepare(
+            "SELECT a.atttypmod \
+             FROM rsduck_catalog.rs_column a \
+             JOIN rsduck_catalog.rs_relation r ON r.oid = a.attrelid \
+             WHERE r.relname = 'decimal_metrics' AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, i32>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(type_modifiers.len(), 2);
+    assert!(type_modifiers.iter().all(|modifier| *modifier > 0));
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+
+    let restored_types = restored
+        .prepare(
+            "SELECT column_name, data_type FROM duckdb_columns() \
+             WHERE schema_name = 'main' AND table_name = 'decimal_metrics' \
+             ORDER BY column_index",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        restored_types,
+        vec![
+            ("price".to_string(), "DECIMAL(9,2)".to_string()),
+            ("amount".to_string(), "DECIMAL(18,2)".to_string()),
+        ]
+    );
+    let restored_values: (String, String) = restored
+        .query_row(
+            "SELECT price::VARCHAR, amount::VARCHAR FROM decimal_metrics",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(restored_values, ("2627.88".into(), "90037647343.00".into()));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_restore_rejects_decimal_without_modifier() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_legacy_decimal_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE legacy_decimal(price DECIMAL(9,2))",
+    )
+    .unwrap();
+    conn.execute("INSERT INTO legacy_decimal VALUES (2627.88)", [])
+        .unwrap();
+    conn.execute(
+        "UPDATE rsduck_catalog.rs_column SET atttypmod = -1 \
+         WHERE attrelid = (SELECT oid FROM rsduck_catalog.rs_relation \
+                           WHERE relname = 'legacy_decimal')",
+        [],
+    )
+    .unwrap();
+    crate::catalog::refresh_catalog_checksum(&conn).unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    let error = restore_or_initialize(&restored, Some(&snapshot), "").unwrap_err();
+    assert!(error.contains("snapshot DECIMAL column is missing or has invalid type modifier"));
+    assert!(error.contains("column=price"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn snapshot_round_trip_preserves_fixed_float_array_type() {
     let dir = std::env::temp_dir().join(format!(
         "rsduck_snapshot_fixed_array_{}_{}",

@@ -63,13 +63,13 @@ pub(in crate::catalog) fn partition_entrypoint_sql_from_catalog(
     let selects = columns
         .iter()
         .map(|column| {
-            Ok(format!(
+            format!(
                 "CAST(NULL AS {}) AS {}",
-                duckdb_type_for_type_id(conn, column.type_id)?,
+                column.duckdb_type,
                 quote_ident(&column.name)
-            ))
+            )
         })
-        .collect::<Result<Vec<_>, String>>()?
+        .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
         "CREATE OR REPLACE VIEW {} AS SELECT {selects} WHERE FALSE",

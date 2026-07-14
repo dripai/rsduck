@@ -552,7 +552,7 @@ fn restore_snapshot_table(
 fn snapshot_table_columns(conn: &Connection, relation_id: i64) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT a.attname, t.rsduck_physical_type, a.attnotnull
+            "SELECT a.attname, t.rsduck_physical_type, a.atttypmod, a.attnotnull
              FROM rsduck_catalog.rs_column a
              JOIN rsduck_catalog.rs_type t ON t.oid = a.atttypid
              WHERE a.attrelid = {relation_id} AND NOT a.attisdropped
@@ -564,7 +564,8 @@ fn snapshot_table_columns(conn: &Connection, relation_id: i64) -> Result<Vec<Str
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })
         .map_err(|e| format!("query snapshot table columns failed: {e}"))?
@@ -575,16 +576,25 @@ fn snapshot_table_columns(conn: &Connection, relation_id: i64) -> Result<Vec<Str
             "snapshot table relation {relation_id} has no catalog columns"
         ));
     }
-    Ok(columns
+    columns
         .into_iter()
-        .map(|(name, physical_type, not_null)| {
-            format!(
-                "{} {physical_type}{}",
+        .map(|(name, physical_type, type_modifier, not_null)| {
+            if !crate::catalog::is_valid_type_modifier_for_duckdb_type(
+                &physical_type,
+                type_modifier,
+            ) {
+                return Err(format!(
+                    "snapshot DECIMAL column is missing or has invalid type modifier: relation={relation_id}, column={name}, atttypmod={type_modifier}"
+                ));
+            }
+            Ok(format!(
+                "{} {}{}",
                 quote_ident(&name),
+                crate::catalog::duckdb_type_with_modifier(&physical_type, type_modifier),
                 if not_null { " NOT NULL" } else { "" }
-            )
+            ))
         })
-        .collect())
+        .collect()
 }
 
 fn restore_snapshot_views(conn: &Connection, views: &[SnapshotView]) -> Result<(), String> {

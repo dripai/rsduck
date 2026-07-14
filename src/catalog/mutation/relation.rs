@@ -67,10 +67,11 @@ pub(in crate::catalog) fn insert_attribute_row(
         &format!(
             "INSERT INTO rsduck_catalog.rs_column(attrelid, attname, atttypid, attnum, atttypmod, \
              attnotnull, atthasdef, attisdropped, attidentity, attgenerated, attoptions) \
-             VALUES ({rel_oid}, '{}', {}, {}, -1, {}, {}, FALSE, '', '', '')",
+             VALUES ({rel_oid}, '{}', {}, {}, {}, {}, {}, FALSE, '', '', '')",
             sql_string(&column.name),
             column.type_id,
             column.attnum,
+            type_modifier_for_duckdb_type(&column.duckdb_type),
             sql_bool(column.not_null),
             sql_bool(column.default_expr.is_some())
         ),

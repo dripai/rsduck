@@ -359,10 +359,12 @@ fn sync_catalog_column(
     name: &str,
 ) -> Result<(), String> {
     let type_id = ensure_type_id_for_duckdb_type(conn, &column.duckdb_type)?;
+    let type_modifier = type_modifier_for_duckdb_type(&column.duckdb_type);
     conn.execute(
         &format!(
             "UPDATE rsduck_catalog.rs_column \
-             SET attname = '{}', atttypid = {type_id}, attnotnull = {}, atthasdef = {} \
+             SET attname = '{}', atttypid = {type_id}, atttypmod = {type_modifier}, \
+                 attnotnull = {}, atthasdef = {} \
              WHERE attrelid = {rel_oid} AND attnum = {attnum}",
             sql_string(name),
             sql_bool(column.not_null),

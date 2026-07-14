@@ -20,7 +20,7 @@ pub(super) const TYPE_VARCHAR: i64 = 1008;
 pub(super) const TYPE_DATE: i64 = 1009;
 pub(super) const TYPE_TIME: i64 = 1010;
 pub(super) const TYPE_TIMESTAMP: i64 = 1011;
-pub(super) const TYPE_NUMERIC: i64 = 1012;
+pub(crate) const TYPE_NUMERIC: i64 = 1012;
 
 pub(super) const ROLE_ADMIN_ID: i64 = 20;
 pub(super) const ROLE_OPERATOR_ID: i64 = 21;
