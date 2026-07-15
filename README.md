@@ -41,8 +41,6 @@ Related documents:
 - [RSDuck Agent vector memory retrieval: principles, strengths, and example](doc/rsduck-vector-memory-overview.en.md)
 - [Agent vector memory retrieval and indexing contract](doc/agent-vector-memory.en.md)
 
-This document is for engineers who need to run, integrate, maintain, or continue developing rsduck. It describes the current code behavior, with emphasis on what is supported, what is not supported, how failures should be handled, and which constraints must be preserved when adding new capabilities.
-
 ## 1. Project Positioning
 
 rsduck is an in-memory database service built on DuckDB. It exposes:
