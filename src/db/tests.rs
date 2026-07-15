@@ -799,7 +799,7 @@ fn snapshot_round_trip_preserves_decimal_precision_and_scale() {
 }
 
 #[test]
-fn snapshot_restore_rejects_decimal_without_modifier() {
+fn snapshot_restore_repairs_legacy_decimal_modifier_from_parquet() {
     let dir = std::env::temp_dir().join(format!(
         "rsduck_snapshot_legacy_decimal_{}_{}",
         std::process::id(),
@@ -821,6 +821,63 @@ fn snapshot_restore_rejects_decimal_without_modifier() {
         "UPDATE rsduck_catalog.rs_column SET atttypmod = -1 \
          WHERE attrelid = (SELECT oid FROM rsduck_catalog.rs_relation \
                            WHERE relname = 'legacy_decimal')",
+        [],
+    )
+    .unwrap();
+    crate::catalog::refresh_catalog_checksum(&conn).unwrap();
+
+    let snapshot = save_snapshot_blocking(&conn, dir.to_str().unwrap(), "rsduck").unwrap();
+    let restored = Connection::open_in_memory().unwrap();
+    restore_or_initialize(&restored, Some(&snapshot), "").unwrap();
+
+    let (physical_type, type_modifier): (String, i32) = restored
+        .query_row(
+            "SELECT dc.data_type, a.atttypmod \
+             FROM duckdb_columns() dc \
+             JOIN rsduck_catalog.rs_relation r ON r.relname = dc.table_name \
+             JOIN rsduck_catalog.rs_column a ON a.attrelid = r.oid \
+              AND a.attname = dc.column_name \
+             WHERE dc.schema_name = 'main' AND dc.table_name = 'legacy_decimal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(physical_type, "DECIMAL(9,2)");
+    assert!(type_modifier > 0);
+
+    let restored_value: String = restored
+        .query_row("SELECT price::VARCHAR FROM legacy_decimal", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(restored_value, "2627.88");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn snapshot_restore_rejects_non_legacy_invalid_decimal_modifier() {
+    let dir = std::env::temp_dir().join(format!(
+        "rsduck_snapshot_invalid_decimal_modifier_{}_{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::catalog::bootstrap_fresh(&conn).unwrap();
+    crate::catalog::execute_catalog_aware_write(
+        &conn,
+        "CREATE TABLE invalid_decimal(price DECIMAL(9,2))",
+    )
+    .unwrap();
+    conn.execute("INSERT INTO invalid_decimal VALUES (2627.88)", [])
+        .unwrap();
+    conn.execute(
+        "UPDATE rsduck_catalog.rs_column SET atttypmod = 0 \
+         WHERE attrelid = (SELECT oid FROM rsduck_catalog.rs_relation \
+                           WHERE relname = 'invalid_decimal')",
         [],
     )
     .unwrap();

@@ -509,6 +509,7 @@ fn restore_snapshot_table(
         return Ok(());
     }
     let qualified = quote_qualified(&table.schema, &table.relation);
+    repair_legacy_decimal_modifiers_from_parquet(conn, table.relation_id, &file_path)?;
     let columns = snapshot_table_columns(conn, table.relation_id)?;
     conn.execute_batch(&format!(
         "CREATE TABLE {qualified} ({});",
@@ -545,6 +546,108 @@ fn restore_snapshot_table(
             "snapshot data row count mismatch for {}.{}: expected={}, actual={actual_rows}",
             table.schema, table.relation, table.row_count
         ));
+    }
+    Ok(())
+}
+
+fn repair_legacy_decimal_modifiers_from_parquet(
+    conn: &Connection,
+    relation_id: i64,
+    file_path: &Path,
+) -> Result<(), String> {
+    let mut catalog_stmt = conn
+        .prepare(&format!(
+            "SELECT attname, attnum, atttypid, atttypmod \
+             FROM rsduck_catalog.rs_column \
+             WHERE attrelid = {relation_id} AND NOT attisdropped \
+             ORDER BY attnum"
+        ))
+        .map_err(|e| format!("prepare snapshot DECIMAL modifier lookup failed: {e}"))?;
+    let catalog_columns = catalog_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i32>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query snapshot DECIMAL modifiers failed: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read snapshot DECIMAL modifiers failed: {e}"))?;
+    drop(catalog_stmt);
+
+    if !catalog_columns
+        .iter()
+        .any(|(_, _, type_id, type_modifier)| {
+            *type_id == crate::catalog::TYPE_NUMERIC && *type_modifier == -1
+        })
+    {
+        return Ok(());
+    }
+
+    let mut parquet_stmt = conn
+        .prepare(&format!(
+            "DESCRIBE SELECT * FROM read_parquet('{}')",
+            escape_sql_string(&file_path.display().to_string())
+        ))
+        .map_err(|e| format!("prepare snapshot Parquet schema inspection failed: {e}"))?;
+    let parquet_columns = parquet_stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("query snapshot Parquet schema failed: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read snapshot Parquet schema failed: {e}"))?;
+    drop(parquet_stmt);
+
+    if catalog_columns.len() != parquet_columns.len() {
+        return Err(format!(
+            "snapshot Parquet column count mismatch for relation {relation_id}: catalog={}, parquet={}",
+            catalog_columns.len(),
+            parquet_columns.len()
+        ));
+    }
+    for ((catalog_name, attnum, type_id, type_modifier), (parquet_name, parquet_type)) in
+        catalog_columns.iter().zip(parquet_columns.iter())
+    {
+        if !catalog_name.eq_ignore_ascii_case(parquet_name) {
+            return Err(format!(
+                "snapshot Parquet column mismatch for relation {relation_id}: catalog={catalog_name}, parquet={parquet_name}"
+            ));
+        }
+        if *type_id != crate::catalog::TYPE_NUMERIC {
+            continue;
+        }
+        let parquet_modifier = crate::catalog::type_modifier_for_duckdb_type(parquet_type);
+        if parquet_modifier < 0 {
+            return Err(format!(
+                "snapshot DECIMAL column has incompatible Parquet type: relation={relation_id}, column={catalog_name}, parquet_type={parquet_type}"
+            ));
+        }
+        if *type_modifier != -1 {
+            let catalog_type = crate::catalog::duckdb_type_with_modifier("DECIMAL", *type_modifier);
+            if !catalog_type.eq_ignore_ascii_case(parquet_type) {
+                return Err(format!(
+                    "snapshot DECIMAL type mismatch: relation={relation_id}, column={catalog_name}, catalog={catalog_type}, parquet={parquet_type}"
+                ));
+            }
+            continue;
+        }
+        conn.execute(
+            &format!(
+                "UPDATE rsduck_catalog.rs_column SET atttypmod = {parquet_modifier} \
+                 WHERE attrelid = {relation_id} AND attnum = {attnum} AND atttypmod = -1"
+            ),
+            [],
+        )
+        .map_err(|e| format!("repair legacy snapshot DECIMAL modifier failed: {e}"))?;
+        tracing::warn!(
+            relation_id,
+            column = catalog_name.as_str(),
+            parquet_type = parquet_type.as_str(),
+            "repaired legacy snapshot DECIMAL modifier from Parquet schema"
+        );
     }
     Ok(())
 }
