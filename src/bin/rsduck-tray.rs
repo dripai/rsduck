@@ -48,7 +48,8 @@ const WINDOWS_SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MACOS_SERVICE_LABEL: &str = "com.dripai.rsduck";
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/dripai/rsduck/releases/latest/download/rsduck-update.json";
-const STATUS_FEEDBACK_DURATION: Duration = Duration::from_secs(8);
+#[cfg(windows)]
+const WINDOWS_NOTIFICATION_APP_ID: &str = "com.dripai.rsduck.tray";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceAction {
@@ -73,6 +74,7 @@ enum UserEvent {
     StatusRefreshed(StatusRefresh),
     BackgroundActionProgress(String),
     BackgroundActionCompleted {
+        action: BackgroundAction,
         result: Result<String, String>,
         exit_after: bool,
     },
@@ -123,6 +125,7 @@ fn main() {
         eprintln!("prepare tray runtime directory failed: {error}");
         std::process::exit(1);
     });
+    prepare_system_notifications();
     let cfg = config::load_config();
     run_tray(cfg).unwrap_or_else(|error| {
         eprintln!("rsduck tray failed: {error}");
@@ -153,6 +156,142 @@ fn prepare_runtime_directory() -> Result<(), String> {
             directory.display()
         )
     })
+}
+
+fn prepare_system_notifications() {
+    #[cfg(windows)]
+    if let Err(error) = register_windows_notification_app() {
+        eprintln!("register Windows notifications failed: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn register_windows_notification_app() -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+
+    let registry_path = wide_null(format!(
+        "Software\\Classes\\AppUserModelId\\{WINDOWS_NOTIFICATION_APP_ID}"
+    ));
+    let mut key: HKEY = std::ptr::null_mut();
+    let create_status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            registry_path.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if create_status != 0 {
+        return Err(format!(
+            "create notification registry key failed: {}",
+            std::io::Error::from_raw_os_error(create_status as i32)
+        ));
+    }
+
+    let value_name = wide_null("DisplayName");
+    let display_name = wide_null("RSDuck");
+    let set_status = unsafe {
+        RegSetValueExW(
+            key,
+            value_name.as_ptr(),
+            0,
+            REG_SZ,
+            display_name.as_ptr().cast(),
+            (display_name.len() * std::mem::size_of::<u16>()) as u32,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if set_status != 0 {
+        return Err(format!(
+            "set notification display name failed: {}",
+            std::io::Error::from_raw_os_error(set_status as i32)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn show_system_notification(title: &str, message: &str) {
+    use winrt_toast::{Toast, ToastManager};
+
+    let mut toast = Toast::new();
+    let tag = if title.contains("升级") {
+        "upgrade"
+    } else {
+        "operation"
+    };
+    toast
+        .text1(title)
+        .text2(message)
+        .tag(tag)
+        .group("rsduck-tray");
+    if let Err(error) = ToastManager::new(WINDOWS_NOTIFICATION_APP_ID).show(&toast) {
+        eprintln!("show Windows notification failed: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_system_notification(title: &str, message: &str) {
+    let script = format!(
+        "display notification {} with title {}",
+        apple_script_string(message),
+        apple_script_string(title)
+    );
+    if let Err(error) = Command::new("osascript").args(["-e", &script]).spawn() {
+        eprintln!("show macOS notification failed: {error}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn show_system_notification(title: &str, message: &str) {
+    if let Err(error) = Command::new("notify-send")
+        .args(["--app-name=RSDuck", title, message])
+        .spawn()
+    {
+        eprintln!("show Linux notification failed: {error}");
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn show_system_notification(title: &str, message: &str) {
+    eprintln!("{title}: {message}");
+}
+
+fn show_menu_action_error(title: &str, result: Result<String, String>) {
+    if let Err(error) = result {
+        show_system_notification(title, &error);
+    }
+}
+
+fn show_background_action_result(action: BackgroundAction, result: &Result<String, String>) {
+    let title = match action {
+        BackgroundAction::Service(_) => "RSDuck 服务",
+        BackgroundAction::Upgrade => "RSDuck 升级",
+    };
+    match result {
+        Ok(message) => show_system_notification(title, message),
+        Err(error) => show_system_notification(title, &format!("失败：{error}")),
+    }
+}
+
+fn should_notify_upgrade_progress(message: &str) -> bool {
+    message.starts_with("升级：发现 ")
+        || message == "升级：下载完成，正在校验…"
+        || message == "升级：校验完成，正在启动安装器…"
+}
+
+fn trim_upgrade_prefix(message: &str) -> &str {
+    message.strip_prefix("升级：").unwrap_or(message)
 }
 
 fn run_elevated_command(args: &[String]) {
@@ -205,7 +344,6 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
     let mut tray_menu: Option<TrayMenu> = None;
     let mut _tray_icon = None;
     let mut service_toggle_action: Option<ServiceAction> = None;
-    let mut status_feedback_until: Option<Instant> = None;
     let mut last_refresh = Instant::now() - Duration::from_secs(60);
     let refresh_in_flight = Arc::new(AtomicBool::new(false));
     let action_in_flight = Arc::new(AtomicBool::new(false));
@@ -247,37 +385,30 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
         match event {
             Event::UserEvent(UserEvent::StatusRefreshed(status)) => {
                 if let Some(menu) = tray_menu.as_ref() {
-                    let received_action_result = status.action_result.is_some();
-                    if received_action_result {
-                        status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                    if let Some(action_result) = status.action_result.as_deref() {
+                        show_system_notification("RSDuck 服务", action_result);
                     }
                     let action_busy = action_in_flight.load(Ordering::Acquire);
-                    let preserve_feedback =
-                        status_feedback_until.is_some_and(|deadline| Instant::now() < deadline);
-                    service_toggle_action = apply_status_refresh(
-                        menu,
-                        status,
-                        action_busy,
-                        !action_busy && (received_action_result || !preserve_feedback),
-                    );
-                    if !preserve_feedback {
-                        status_feedback_until = None;
-                    }
+                    service_toggle_action =
+                        apply_status_refresh(menu, &status.manager, action_busy);
                 }
             }
             Event::UserEvent(UserEvent::BackgroundActionProgress(message)) => {
-                if action_in_flight.load(Ordering::Acquire) {
-                    if let Some(menu) = tray_menu.as_ref() {
-                        menu.status.set_text(message);
-                    }
+                if action_in_flight.load(Ordering::Acquire)
+                    && should_notify_upgrade_progress(&message)
+                {
+                    show_system_notification("RSDuck 升级", trim_upgrade_prefix(&message));
                 }
             }
-            Event::UserEvent(UserEvent::BackgroundActionCompleted { result, exit_after }) => {
+            Event::UserEvent(UserEvent::BackgroundActionCompleted {
+                action,
+                result,
+                exit_after,
+            }) => {
                 action_in_flight.store(false, Ordering::Release);
                 if let Some(menu) = tray_menu.as_ref() {
                     set_background_actions_enabled(menu, false);
-                    set_action_result(menu, result);
-                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                    show_background_action_result(action, &result);
                     schedule_status_refresh(&proxy, refresh_in_flight.clone());
                 }
                 if exit_after {
@@ -290,14 +421,11 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
                 };
 
                 if event.id == *menu.open_web_sql.id() {
-                    set_action_result(menu, open_web_sql(&cfg));
-                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                    show_menu_action_error("打开 Web 失败", open_web_sql(&cfg));
                 } else if event.id == *menu.open_logs.id() {
-                    set_action_result(menu, open_logs(&cfg));
-                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                    show_menu_action_error("打开日志失败", open_logs(&cfg));
                 } else if event.id == *menu.service_toggle.id() {
                     if let Some(action) = service_toggle_action.take() {
-                        status_feedback_until = None;
                         run_background_action(
                             menu,
                             &proxy,
@@ -306,7 +434,6 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
                         );
                     }
                 } else if event.id == *menu.restart.id() {
-                    status_feedback_until = None;
                     run_background_action(
                         menu,
                         &proxy,
@@ -314,7 +441,7 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
                         BackgroundAction::Service(ServiceAction::Restart),
                     );
                 } else if event.id == *menu.upgrade.id() {
-                    status_feedback_until = None;
+                    show_system_notification("RSDuck 升级", "正在检查新版本");
                     run_background_action(
                         menu,
                         &proxy,
@@ -332,7 +459,7 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
 
 fn create_tray_menu() -> Result<(Menu, TrayMenu), String> {
     let menu = Menu::new();
-    let status = MenuItem::new("服务：检查中", false, None);
+    let status = MenuItem::new("检查中", false, None);
     let open_web_sql = MenuItem::new("打开Web", true, None);
     let open_logs = MenuItem::new("日志", true, None);
     let service_toggle = MenuItem::new("启动/停止", false, None);
@@ -417,20 +544,11 @@ fn schedule_status_refresh(proxy: &EventLoopProxy<UserEvent>, refresh_in_flight:
 
 fn apply_status_refresh(
     menu: &TrayMenu,
-    status: StatusRefresh,
+    manager_status: &str,
     action_busy: bool,
-    update_status_text: bool,
 ) -> Option<ServiceAction> {
-    if update_status_text {
-        let service_status = format!("服务：{}", status.manager);
-        if let Some(action_result) = status.action_result.as_deref() {
-            menu.status
-                .set_text(format!("{service_status}；{action_result}"));
-        } else {
-            menu.status.set_text(service_status);
-        }
-    }
-    let toggle = service_toggle_for_status(&status.manager);
+    menu.status.set_text(manager_status);
+    let toggle = service_toggle_for_status(manager_status);
     if let Some((action, label)) = toggle {
         menu.service_toggle.set_text(label);
         menu.service_toggle.set_enabled(!action_busy);
@@ -454,13 +572,6 @@ fn service_toggle_for_status(status: &str) -> Option<(ServiceAction, &'static st
     }
 }
 
-fn set_action_result(menu: &TrayMenu, result: Result<String, String>) {
-    match result {
-        Ok(message) => menu.status.set_text(message),
-        Err(error) => menu.status.set_text(format!("失败：{error}")),
-    }
-}
-
 fn set_background_actions_enabled(menu: &TrayMenu, enabled: bool) {
     menu.service_toggle.set_enabled(enabled);
     menu.restart.set_enabled(enabled);
@@ -480,10 +591,6 @@ fn run_background_action(
         return;
     }
     set_background_actions_enabled(menu, false);
-    menu.status.set_text(match action {
-        BackgroundAction::Service(action) => format!("服务：{}中…", action_label(action)),
-        BackgroundAction::Upgrade => "升级：检查中…".into(),
-    });
     let proxy = proxy.clone();
     thread::spawn(move || {
         let (result, exit_after) = match action {
@@ -500,7 +607,11 @@ fn run_background_action(
                 (result, exit_after)
             }
         };
-        let _ = proxy.send_event(UserEvent::BackgroundActionCompleted { result, exit_after });
+        let _ = proxy.send_event(UserEvent::BackgroundActionCompleted {
+            action,
+            result,
+            exit_after,
+        });
     });
 }
 
@@ -1125,8 +1236,8 @@ mod tests {
     #[cfg(windows)]
     use super::windows_service_state_label;
     use super::{
-        parse_release_version, service_toggle_for_status, version_is_newer, web_console_url,
-        ServiceAction,
+        parse_release_version, service_toggle_for_status, should_notify_upgrade_progress,
+        trim_upgrade_prefix, version_is_newer, web_console_url, ServiceAction,
     };
     #[cfg(windows)]
     use windows_service::service::ServiceState;
@@ -1162,6 +1273,21 @@ mod tests {
         );
         assert_eq!(service_toggle_for_status("启动中"), None);
         assert_eq!(service_toggle_for_status("未知"), None);
+    }
+
+    #[test]
+    fn upgrade_notifications_skip_chatty_download_percentages() {
+        assert!(should_notify_upgrade_progress(
+            "升级：发现 v0.1.25，准备下载…"
+        ));
+        assert!(should_notify_upgrade_progress("升级：下载完成，正在校验…"));
+        assert!(!should_notify_upgrade_progress(
+            "升级：正在下载… 50%（10.0/20.0 MB）"
+        ));
+        assert_eq!(
+            trim_upgrade_prefix("升级：校验完成，正在启动安装器…"),
+            "校验完成，正在启动安装器…"
+        );
     }
 
     #[cfg(windows)]
