@@ -5,8 +5,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,14 +24,33 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIconBuilder,
 };
+#[cfg(windows)]
+use windows_service::{
+    service::{Service, ServiceAccess, ServiceState},
+    service_manager::{ServiceManager, ServiceManagerAccess},
+    Error as WindowsServiceError,
+};
 
 const SERVICE_NAME: &str = "rsduck";
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(windows)]
+const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
+#[cfg(windows)]
+const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+#[cfg(windows)]
+const ERROR_SERVICE_NOT_ACTIVE: i32 = 1062;
+#[cfg(windows)]
+const WINDOWS_SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(windows)]
+const WINDOWS_SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "macos")]
 const MACOS_SERVICE_LABEL: &str = "com.dripai.rsduck";
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/dripai/rsduck/releases/latest/download/rsduck-update.json";
+const STATUS_FEEDBACK_DURATION: Duration = Duration::from_secs(8);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceAction {
     Start,
     Stop,
@@ -50,6 +71,7 @@ impl ServiceAction {
 enum UserEvent {
     Menu(MenuEvent),
     StatusRefreshed(StatusRefresh),
+    BackgroundActionProgress(String),
     BackgroundActionCompleted {
         result: Result<String, String>,
         exit_after: bool,
@@ -72,8 +94,7 @@ struct TrayMenu {
     status: MenuItem,
     open_web_sql: MenuItem,
     open_logs: MenuItem,
-    start: MenuItem,
-    stop: MenuItem,
+    service_toggle: MenuItem,
     restart: MenuItem,
     upgrade: MenuItem,
     quit: MenuItem,
@@ -183,6 +204,8 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
 
     let mut tray_menu: Option<TrayMenu> = None;
     let mut _tray_icon = None;
+    let mut service_toggle_action: Option<ServiceAction> = None;
+    let mut status_feedback_until: Option<Instant> = None;
     let mut last_refresh = Instant::now() - Duration::from_secs(60);
     let refresh_in_flight = Arc::new(AtomicBool::new(false));
     let action_in_flight = Arc::new(AtomicBool::new(false));
@@ -224,13 +247,37 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
         match event {
             Event::UserEvent(UserEvent::StatusRefreshed(status)) => {
                 if let Some(menu) = tray_menu.as_ref() {
-                    apply_status_refresh(menu, status);
+                    let received_action_result = status.action_result.is_some();
+                    if received_action_result {
+                        status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                    }
+                    let action_busy = action_in_flight.load(Ordering::Acquire);
+                    let preserve_feedback =
+                        status_feedback_until.is_some_and(|deadline| Instant::now() < deadline);
+                    service_toggle_action = apply_status_refresh(
+                        menu,
+                        status,
+                        action_busy,
+                        !action_busy && (received_action_result || !preserve_feedback),
+                    );
+                    if !preserve_feedback {
+                        status_feedback_until = None;
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::BackgroundActionProgress(message)) => {
+                if action_in_flight.load(Ordering::Acquire) {
+                    if let Some(menu) = tray_menu.as_ref() {
+                        menu.status.set_text(message);
+                    }
                 }
             }
             Event::UserEvent(UserEvent::BackgroundActionCompleted { result, exit_after }) => {
+                action_in_flight.store(false, Ordering::Release);
                 if let Some(menu) = tray_menu.as_ref() {
-                    set_background_actions_enabled(menu, true);
+                    set_background_actions_enabled(menu, false);
                     set_action_result(menu, result);
+                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
                     schedule_status_refresh(&proxy, refresh_in_flight.clone());
                 }
                 if exit_after {
@@ -244,23 +291,22 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
 
                 if event.id == *menu.open_web_sql.id() {
                     set_action_result(menu, open_web_sql(&cfg));
+                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
                 } else if event.id == *menu.open_logs.id() {
                     set_action_result(menu, open_logs(&cfg));
-                } else if event.id == *menu.start.id() {
-                    run_background_action(
-                        menu,
-                        &proxy,
-                        action_in_flight.clone(),
-                        BackgroundAction::Service(ServiceAction::Start),
-                    );
-                } else if event.id == *menu.stop.id() {
-                    run_background_action(
-                        menu,
-                        &proxy,
-                        action_in_flight.clone(),
-                        BackgroundAction::Service(ServiceAction::Stop),
-                    );
+                    status_feedback_until = Some(Instant::now() + STATUS_FEEDBACK_DURATION);
+                } else if event.id == *menu.service_toggle.id() {
+                    if let Some(action) = service_toggle_action.take() {
+                        status_feedback_until = None;
+                        run_background_action(
+                            menu,
+                            &proxy,
+                            action_in_flight.clone(),
+                            BackgroundAction::Service(action),
+                        );
+                    }
                 } else if event.id == *menu.restart.id() {
+                    status_feedback_until = None;
                     run_background_action(
                         menu,
                         &proxy,
@@ -268,6 +314,7 @@ fn run_tray(cfg: RsduckConfig) -> Result<(), String> {
                         BackgroundAction::Service(ServiceAction::Restart),
                     );
                 } else if event.id == *menu.upgrade.id() {
+                    status_feedback_until = None;
                     run_background_action(
                         menu,
                         &proxy,
@@ -288,23 +335,21 @@ fn create_tray_menu() -> Result<(Menu, TrayMenu), String> {
     let status = MenuItem::new("服务：检查中", false, None);
     let open_web_sql = MenuItem::new("打开Web", true, None);
     let open_logs = MenuItem::new("日志", true, None);
-    let start = MenuItem::new("启动", true, None);
-    let stop = MenuItem::new("停止", true, None);
-    let restart = MenuItem::new("重启", true, None);
+    let service_toggle = MenuItem::new("启动/停止", false, None);
+    let restart = MenuItem::new("重启", false, None);
     let upgrade = MenuItem::new("升级", true, None);
     let quit = MenuItem::new("退出", true, None);
     let separator = PredefinedMenuItem::separator();
     let separator_after_service = PredefinedMenuItem::separator();
     let separator_before_quit = PredefinedMenuItem::separator();
 
-    let items: [&dyn tray_icon::menu::IsMenuItem; 11] = [
+    let items: [&dyn tray_icon::menu::IsMenuItem; 10] = [
         &status,
         &separator,
         &open_web_sql,
         &open_logs,
         &separator_after_service,
-        &start,
-        &stop,
+        &service_toggle,
         &restart,
         &upgrade,
         &separator_before_quit,
@@ -329,8 +374,7 @@ fn create_tray_menu() -> Result<(Menu, TrayMenu), String> {
             status,
             open_web_sql,
             open_logs,
-            start,
-            stop,
+            service_toggle,
             restart,
             upgrade,
             quit,
@@ -371,13 +415,42 @@ fn schedule_status_refresh(proxy: &EventLoopProxy<UserEvent>, refresh_in_flight:
     });
 }
 
-fn apply_status_refresh(menu: &TrayMenu, status: StatusRefresh) {
-    let service_status = format!("服务：{}", status.manager);
-    if let Some(action_result) = status.action_result {
-        menu.status
-            .set_text(format!("{service_status}；{action_result}"));
+fn apply_status_refresh(
+    menu: &TrayMenu,
+    status: StatusRefresh,
+    action_busy: bool,
+    update_status_text: bool,
+) -> Option<ServiceAction> {
+    if update_status_text {
+        let service_status = format!("服务：{}", status.manager);
+        if let Some(action_result) = status.action_result.as_deref() {
+            menu.status
+                .set_text(format!("{service_status}；{action_result}"));
+        } else {
+            menu.status.set_text(service_status);
+        }
+    }
+    let toggle = service_toggle_for_status(&status.manager);
+    if let Some((action, label)) = toggle {
+        menu.service_toggle.set_text(label);
+        menu.service_toggle.set_enabled(!action_busy);
+        menu.restart.set_enabled(!action_busy);
+        menu.upgrade.set_enabled(!action_busy);
+        Some(action)
     } else {
-        menu.status.set_text(service_status);
+        menu.service_toggle.set_text("启动/停止");
+        menu.service_toggle.set_enabled(false);
+        menu.restart.set_enabled(false);
+        menu.upgrade.set_enabled(!action_busy);
+        None
+    }
+}
+
+fn service_toggle_for_status(status: &str) -> Option<(ServiceAction, &'static str)> {
+    match status {
+        "运行中" => Some((ServiceAction::Stop, "停止")),
+        "已停止" => Some((ServiceAction::Start, "启动")),
+        _ => None,
     }
 }
 
@@ -389,8 +462,7 @@ fn set_action_result(menu: &TrayMenu, result: Result<String, String>) {
 }
 
 fn set_background_actions_enabled(menu: &TrayMenu, enabled: bool) {
-    menu.start.set_enabled(enabled);
-    menu.stop.set_enabled(enabled);
+    menu.service_toggle.set_enabled(enabled);
     menu.restart.set_enabled(enabled);
     menu.upgrade.set_enabled(enabled);
 }
@@ -417,14 +489,17 @@ fn run_background_action(
         let (result, exit_after) = match action {
             BackgroundAction::Service(action) => (invoke_service_action(action), false),
             BackgroundAction::Upgrade => {
-                let result = check_and_start_upgrade();
+                let progress_proxy = proxy.clone();
+                let mut report_progress = move |message| {
+                    let _ = progress_proxy.send_event(UserEvent::BackgroundActionProgress(message));
+                };
+                let result = check_and_start_upgrade(&mut report_progress);
                 let exit_after = result
                     .as_ref()
                     .is_ok_and(|message| message.starts_with("已启动"));
                 (result, exit_after)
             }
         };
-        action_in_flight.store(false, Ordering::Release);
         let _ = proxy.send_event(UserEvent::BackgroundActionCompleted { result, exit_after });
     });
 }
@@ -489,25 +564,28 @@ fn service_manager_status() -> &'static str {
 
 #[cfg(windows)]
 fn windows_service_status() -> &'static str {
-    let Ok(output) = Command::new("sc.exe")
-        .args(["query", SERVICE_NAME])
-        .output()
-    else {
-        return "未知";
+    let service = match open_windows_service(ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(error) if windows_service_error_code(&error) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            return "未安装";
+        }
+        Err(_) => return "未知",
     };
-    let text = String::from_utf8_lossy(&output.stdout);
-    if text.contains("RUNNING") {
-        "运行中"
-    } else if text.contains("STOPPED") {
-        "已停止"
-    } else if text.contains("START_PENDING") {
-        "启动中"
-    } else if text.contains("STOP_PENDING") {
-        "停止中"
-    } else if text.contains("FAILED 1060") {
-        "未安装"
-    } else {
-        "异常"
+    match service.query_status() {
+        Ok(status) => windows_service_state_label(status.current_state),
+        Err(_) => "异常",
+    }
+}
+
+#[cfg(windows)]
+fn windows_service_state_label(state: ServiceState) -> &'static str {
+    match state {
+        ServiceState::Stopped => "已停止",
+        ServiceState::StartPending | ServiceState::ContinuePending => "启动中",
+        ServiceState::StopPending => "停止中",
+        ServiceState::Running => "运行中",
+        ServiceState::PausePending => "暂停中",
+        ServiceState::Paused => "已暂停",
     }
 }
 
@@ -578,33 +656,124 @@ fn action_label(action: ServiceAction) -> &'static str {
 
 #[cfg(windows)]
 fn run_windows_service_action(action: ServiceAction) -> Result<String, String> {
+    let service = open_windows_service(
+        ServiceAccess::QUERY_STATUS | ServiceAccess::START | ServiceAccess::STOP,
+    )
+    .map_err(|error| windows_service_operation_error("open service", error))?;
     match action {
-        ServiceAction::Start => run_checked("sc.exe", &["start", SERVICE_NAME]),
-        ServiceAction::Stop => run_checked("sc.exe", &["stop", SERVICE_NAME]),
+        ServiceAction::Start => start_windows_service(&service),
+        ServiceAction::Stop => stop_windows_service(&service),
         ServiceAction::Restart => {
-            run_checked("sc.exe", &["stop", SERVICE_NAME])?;
-            wait_for_windows_stop()?;
-            run_checked("sc.exe", &["start", SERVICE_NAME])
+            stop_windows_service(&service)?;
+            start_windows_service(&service)
         }
     }
     .map(|_| format!("服务{}完成", action_label(action)))
 }
 
 #[cfg(windows)]
-fn wait_for_windows_stop() -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(120);
+fn open_windows_service(access: ServiceAccess) -> windows_service::Result<Service> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    manager.open_service(SERVICE_NAME, access)
+}
+
+#[cfg(windows)]
+fn start_windows_service(service: &Service) -> Result<(), String> {
+    match query_windows_service_state(service)? {
+        ServiceState::Running => return Ok(()),
+        ServiceState::StartPending | ServiceState::ContinuePending => {
+            return wait_for_windows_service_state(service, ServiceState::Running, "start");
+        }
+        ServiceState::StopPending => {
+            wait_for_windows_service_state(service, ServiceState::Stopped, "stop before start")?;
+        }
+        ServiceState::Paused | ServiceState::PausePending => {
+            return Err("cannot start a paused Windows service".into());
+        }
+        ServiceState::Stopped => {}
+    }
+    match service.start::<&str>(&[]) {
+        Ok(()) => {}
+        Err(error) if windows_service_error_code(&error) == Some(ERROR_SERVICE_ALREADY_RUNNING) => {
+        }
+        Err(error) => return Err(windows_service_operation_error("start service", error)),
+    }
+    wait_for_windows_service_state(service, ServiceState::Running, "start")
+}
+
+#[cfg(windows)]
+fn stop_windows_service(service: &Service) -> Result<(), String> {
+    match query_windows_service_state(service)? {
+        ServiceState::Stopped => return Ok(()),
+        ServiceState::StopPending => {
+            return wait_for_windows_service_state(service, ServiceState::Stopped, "stop");
+        }
+        ServiceState::StartPending | ServiceState::ContinuePending => {
+            wait_for_windows_service_state(service, ServiceState::Running, "start before stop")?;
+        }
+        ServiceState::PausePending => {
+            wait_for_windows_service_state(service, ServiceState::Paused, "pause before stop")?;
+        }
+        ServiceState::Running | ServiceState::Paused => {}
+    }
+    match service.stop() {
+        Ok(_) => {}
+        Err(error) if windows_service_error_code(&error) == Some(ERROR_SERVICE_NOT_ACTIVE) => {
+            return Ok(());
+        }
+        Err(error) => return Err(windows_service_operation_error("stop service", error)),
+    }
+    wait_for_windows_service_state(service, ServiceState::Stopped, "stop")
+}
+
+#[cfg(windows)]
+fn query_windows_service_state(service: &Service) -> Result<ServiceState, String> {
+    service
+        .query_status()
+        .map(|status| status.current_state)
+        .map_err(|error| windows_service_operation_error("query service status", error))
+}
+
+#[cfg(windows)]
+fn wait_for_windows_service_state(
+    service: &Service,
+    expected: ServiceState,
+    operation: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + WINDOWS_SERVICE_ACTION_TIMEOUT;
     loop {
-        let output = Command::new("sc.exe")
-            .args(["query", SERVICE_NAME])
-            .output()
-            .map_err(|error| format!("query service status failed: {error}"))?;
-        if String::from_utf8_lossy(&output.stdout).contains("STOPPED") {
+        let current = query_windows_service_state(service)?;
+        if current == expected {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("timed out waiting for service to stop".into());
+            return Err(format!(
+                "timed out waiting for Windows service to {operation}: current_state={current:?}, expected_state={expected:?}"
+            ));
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(WINDOWS_SERVICE_POLL_INTERVAL);
+    }
+}
+
+#[cfg(windows)]
+fn windows_service_error_code(error: &WindowsServiceError) -> Option<i32> {
+    match error {
+        WindowsServiceError::Winapi(error) => error.raw_os_error(),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn windows_service_operation_error(operation: &str, error: WindowsServiceError) -> String {
+    match windows_service_error_code(&error) {
+        Some(ERROR_ACCESS_DENIED) => {
+            format!("{operation} failed: administrator permission is required")
+        }
+        Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            format!("{operation} failed: Windows service {SERVICE_NAME} is not installed")
+        }
+        Some(code) => format!("{operation} failed with Windows error {code}: {error}"),
+        None => format!("{operation} failed: {error}"),
     }
 }
 
@@ -647,22 +816,6 @@ fn wide_null(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
-}
-
-#[cfg(windows)]
-fn run_checked(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("run {program} failed: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        Err(format!("{program} {} failed: {}", args.join(" "), detail))
-    }
 }
 
 #[cfg(windows)]
@@ -748,7 +901,8 @@ fn apple_script_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
 }
 
-fn check_and_start_upgrade() -> Result<String, String> {
+fn check_and_start_upgrade(report_progress: &mut dyn FnMut(String)) -> Result<String, String> {
+    report_progress("升级：正在检查新版本…".into());
     let manifest_url = std::env::var("RSDUCK_UPDATE_MANIFEST_URL")
         .unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string());
     let manifest = update_http_client(Duration::from_secs(20))?
@@ -763,12 +917,14 @@ fn check_and_start_upgrade() -> Result<String, String> {
     if !version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))? {
         return Ok(format!("当前已是最新版本 v{}", env!("CARGO_PKG_VERSION")));
     }
+    report_progress(format!("升级：发现 v{}，准备下载…", manifest.version));
     let platform = update_platform_key()?;
     let asset = manifest
         .assets
         .get(platform)
         .ok_or_else(|| format!("update manifest has no asset for {platform}"))?;
-    let installer = download_update_asset(asset, platform)?;
+    let installer = download_update_asset(asset, platform, report_progress)?;
+    report_progress("升级：校验完成，正在启动安装器…".into());
     launch_update_installer(&installer, platform)?;
     Ok(format!("已启动 v{} 升级安装", manifest.version))
 }
@@ -832,22 +988,18 @@ fn update_platform_key() -> Result<&'static str, String> {
     Err("current platform has no supported update package".into())
 }
 
-fn download_update_asset(asset: &UpdateAsset, platform: &str) -> Result<PathBuf, String> {
-    let bytes = update_http_client(Duration::from_secs(600))?
+fn download_update_asset(
+    asset: &UpdateAsset,
+    platform: &str,
+    report_progress: &mut dyn FnMut(String),
+) -> Result<PathBuf, String> {
+    let mut response = update_http_client(Duration::from_secs(600))?
         .get(&asset.url)
         .send()
         .map_err(|error| format!("download update package failed: {error}"))?
         .error_for_status()
-        .map_err(|error| format!("update package request failed: {error}"))?
-        .bytes()
-        .map_err(|error| format!("read update package failed: {error}"))?;
-    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
-    if actual_hash != asset.sha256.to_ascii_lowercase() {
-        return Err(format!(
-            "update package checksum mismatch: expected {}, got {actual_hash}",
-            asset.sha256
-        ));
-    }
+        .map_err(|error| format!("update package request failed: {error}"))?;
+    let total_bytes = response.content_length();
 
     let extension = if platform == "windows-x64" {
         "exe"
@@ -866,7 +1018,52 @@ fn download_update_asset(asset: &UpdateAsset, platform: &str) -> Result<PathBuf,
     fs::create_dir_all(&dir)
         .map_err(|error| format!("create update temporary directory failed: {error}"))?;
     let path = dir.join(format!("rsduck-update.{extension}"));
-    fs::write(&path, bytes).map_err(|error| format!("write update package failed: {error}"))?;
+    let mut file = fs::File::create(&path)
+        .map_err(|error| format!("create update package {} failed: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut downloaded_bytes = 0_u64;
+    let mut last_reported_percent = 0_u64;
+    let mut last_reported_bytes = 0_u64;
+    loop {
+        let bytes_read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("read update package failed: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..bytes_read])
+            .map_err(|error| format!("write update package failed: {error}"))?;
+        hasher.update(&buffer[..bytes_read]);
+        downloaded_bytes += bytes_read as u64;
+        if let Some(total_bytes) = total_bytes.filter(|total| *total > 0) {
+            let percent = (downloaded_bytes.saturating_mul(100) / total_bytes).min(100);
+            if percent == 100 || percent >= last_reported_percent.saturating_add(5) {
+                report_progress(format!(
+                    "升级：正在下载… {percent}%（{:.1}/{:.1} MB）",
+                    downloaded_bytes as f64 / 1_048_576.0,
+                    total_bytes as f64 / 1_048_576.0
+                ));
+                last_reported_percent = percent;
+            }
+        } else if downloaded_bytes >= last_reported_bytes.saturating_add(10 * 1_048_576) {
+            report_progress(format!(
+                "升级：正在下载… {:.1} MB",
+                downloaded_bytes as f64 / 1_048_576.0
+            ));
+            last_reported_bytes = downloaded_bytes;
+        }
+    }
+    file.flush()
+        .map_err(|error| format!("flush update package failed: {error}"))?;
+    report_progress("升级：下载完成，正在校验…".into());
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if actual_hash != asset.sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "update package checksum mismatch: expected {}, got {actual_hash}",
+            asset.sha256
+        ));
+    }
     Ok(path)
 }
 
@@ -925,7 +1122,14 @@ fn launch_update_installer(installer: &Path, platform: &str) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_release_version, version_is_newer, web_console_url};
+    #[cfg(windows)]
+    use super::windows_service_state_label;
+    use super::{
+        parse_release_version, service_toggle_for_status, version_is_newer, web_console_url,
+        ServiceAction,
+    };
+    #[cfg(windows)]
+    use windows_service::service::ServiceState;
 
     #[test]
     fn release_versions_use_numeric_semver_order() {
@@ -944,5 +1148,43 @@ mod tests {
             web_console_url("[::]:13307").unwrap(),
             "http://127.0.0.1:13307"
         );
+    }
+
+    #[test]
+    fn service_toggle_follows_stable_service_status() {
+        assert_eq!(
+            service_toggle_for_status("运行中"),
+            Some((ServiceAction::Stop, "停止"))
+        );
+        assert_eq!(
+            service_toggle_for_status("已停止"),
+            Some((ServiceAction::Start, "启动"))
+        );
+        assert_eq!(service_toggle_for_status("启动中"), None);
+        assert_eq!(service_toggle_for_status("未知"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_service_states_have_stable_tray_labels() {
+        assert_eq!(windows_service_state_label(ServiceState::Stopped), "已停止");
+        assert_eq!(
+            windows_service_state_label(ServiceState::StartPending),
+            "启动中"
+        );
+        assert_eq!(
+            windows_service_state_label(ServiceState::StopPending),
+            "停止中"
+        );
+        assert_eq!(windows_service_state_label(ServiceState::Running), "运行中");
+        assert_eq!(
+            windows_service_state_label(ServiceState::ContinuePending),
+            "启动中"
+        );
+        assert_eq!(
+            windows_service_state_label(ServiceState::PausePending),
+            "暂停中"
+        );
+        assert_eq!(windows_service_state_label(ServiceState::Paused), "已暂停");
     }
 }
